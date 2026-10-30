@@ -1,0 +1,14 @@
+# API keys are local test values for the load generator, not secrets.
+tenants:
+  - name: notetaker
+    api_key: sk-local-notetaker
+    default_shape: small.16k.30tps
+  - name: agent
+    api_key: sk-local-agent
+    default_shape: small.8k.60tps
+  - name: chat
+    api_key: sk-local-chat
+    default_shape: small.8k.30tps
+  - name: batch
+    api_key: sk-local-batch
+    default_shape: small.8k.15tps.lazy

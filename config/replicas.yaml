@@ -1,0 +1,8 @@
+# Replicas are vLLM OpenAI servers (or in-process fakes). Adding a RunPod pod = one more entry.
+models:
+  small: Qwen/Qwen2.5-3B-Instruct-AWQ
+replicas:
+  - id: local-2080ti
+    kind: vllm
+    url: ${VLLM_URL:-http://localhost:8000}
+    model: small

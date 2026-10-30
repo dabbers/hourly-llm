@@ -1,0 +1,7 @@
+# Reference per-token prices (placeholders, gpt-4o-mini-class) and provider cost.
+token:
+  input_usd_per_million: 0.15
+  output_usd_per_million: 0.60
+  batch_discount: 0.5          # applied to lazy requests under the per-token reference
+provider:
+  gpu_usd_per_hour: 0.30       # placeholder rental price for a 2080 Ti-class GPU

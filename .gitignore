@@ -1,0 +1,13 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+# runs and local state
+runs/
+*.sqlite
+*.sqlite-journal
+.env
+# wsl-side venv for vllm lives outside the repo

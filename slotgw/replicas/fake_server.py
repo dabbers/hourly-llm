@@ -1,0 +1,240 @@
+"""In-process fake vLLM replica: OpenAI chat completions (stream and complete) with a configurable
+step-rate curve and KV budget, plus /tokenize, /metrics and /v1/models. Used by tests and by the
+multi-replica scheduler tests; also runnable as a service (slotgw-fake-replica)."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import time
+import uuid
+from dataclasses import dataclass, field
+from itertools import pairwise
+from typing import Any
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+
+WORDS = ["the", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog", "while", "the", "meter", "counts", "every", "token", "that", "the", "fake", "replica", "emits", "at", "a", "calibrated", "rate"]
+
+
+def parse_curve(text: str) -> list[tuple[int, float]]:
+    pts = []
+    for part in text.split(","):
+        n, rate = part.split(":")
+        pts.append((int(n), float(rate)))
+    pts.sort()
+    return pts
+
+
+def step_rate(curve: list[tuple[int, float]], n: int) -> float:
+    """Per-stream decode tokens/s at n concurrent streams, linear between calibration points."""
+    n = max(1, n)
+    if n <= curve[0][0]:
+        return curve[0][1]
+    for (n0, r0), (n1, r1) in pairwise(curve):
+        if n0 <= n <= n1:
+            if n1 == n0:
+                return r1
+            return r0 + (r1 - r0) * (n - n0) / (n1 - n0)
+    return curve[-1][1]
+
+
+def estimate_tokens(messages: list[dict[str, Any]]) -> int:
+    total = 3
+    for m in messages:
+        content = m.get("content") or ""
+        if isinstance(content, list):
+            content = " ".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+        total += len(str(content)) // 4 + 4
+    return total
+
+
+@dataclass
+class FakeState:
+    model: str
+    kv_tokens: int
+    block_size: int
+    curve: list[tuple[int, float]]
+    prefill_tps: float
+    running: dict[str, int] = field(default_factory=dict)  # request_id -> context tokens held
+    completed: int = 0
+    generated_tokens: int = 0
+    prompt_tokens: int = 0
+
+    @property
+    def kv_used(self) -> int:
+        return sum(self.running.values())
+
+
+def create_fake_app(
+    model: str = "Qwen/Qwen2.5-3B-Instruct-AWQ",
+    kv_tokens: int = 160_000,
+    block_size: int = 16,
+    curve: str = "1:60,8:40,16:30,32:20",
+    prefill_tps: float = 2000.0,
+) -> FastAPI:
+    state = FakeState(
+        model=model,
+        kv_tokens=kv_tokens,
+        block_size=block_size,
+        curve=parse_curve(curve),
+        prefill_tps=prefill_tps,
+    )
+    app = FastAPI(title="fake-vllm")
+    app.state.fake = state
+
+    @app.get("/health")
+    async def health() -> dict[str, Any]:
+        return {"ok": True}
+
+    @app.get("/v1/models")
+    async def models() -> dict[str, Any]:
+        return {"object": "list", "data": [{"id": state.model, "object": "model", "owned_by": "fake"}]}
+
+    @app.post("/tokenize")
+    async def tokenize(request: Request) -> dict[str, Any]:
+        body = await request.json()
+        if "messages" in body:
+            count = estimate_tokens(body["messages"])
+        else:
+            count = len(str(body.get("prompt", ""))) // 4 + 1
+        return {"count": count, "max_model_len": 32768, "tokens": []}
+
+    @app.get("/metrics")
+    async def metrics() -> PlainTextResponse:
+        lines = [
+            f'vllm:cache_config_info{{block_size="{state.block_size}",num_gpu_blocks="{state.kv_tokens // state.block_size}",cache_dtype="auto"}} 1.0',
+            f"vllm:num_requests_running {len(state.running)}",
+            "vllm:num_requests_waiting 0",
+            f"vllm:kv_cache_usage_perc {min(1.0, state.kv_used / state.kv_tokens):.6f}",
+            "vllm:num_preemptions_total 0",
+            f"vllm:generation_tokens_total {state.generated_tokens}",
+            f"vllm:prompt_tokens_total {state.prompt_tokens}",
+            f"vllm:request_success_total {state.completed}",
+        ]
+        return PlainTextResponse("\n".join(lines) + "\n")
+
+    @app.post("/v1/chat/completions")
+    async def chat(request: Request):
+        body = await request.json()
+        messages = body.get("messages") or []
+        prompt_tokens = estimate_tokens(messages)
+        max_tokens = int(body.get("max_tokens") or 64)
+        ignore_eos = bool(body.get("ignore_eos", False))
+        if ignore_eos:
+            n_out = max_tokens
+        else:
+            n_out = min(max_tokens, 1 + (sum(ord(c) for c in json.dumps(messages)) % 40))
+        stream = bool(body.get("stream", False))
+        include_usage = bool((body.get("stream_options") or {}).get("include_usage", False))
+        continuous = bool((body.get("stream_options") or {}).get("continuous_usage_stats", False))
+        request_id = "chatcmpl-" + uuid.uuid4().hex[:24]
+        created = int(time.time())
+        context = prompt_tokens + n_out
+
+        async def generate():
+            state.running[request_id] = context
+            state.prompt_tokens += prompt_tokens
+            try:
+                await asyncio.sleep(prompt_tokens / state.prefill_tps)
+                for i in range(n_out):
+                    await asyncio.sleep(1.0 / step_rate(state.curve, len(state.running)))
+                    state.generated_tokens += 1
+                    yield i, WORDS[i % len(WORDS)] + " "
+            finally:
+                state.running.pop(request_id, None)
+                state.completed += 1
+
+        finish_reason = "length" if n_out >= max_tokens else "stop"
+
+        if not stream:
+            parts: list[str] = []
+            async for _, word in generate():
+                parts.append(word)
+            return JSONResponse(
+                {
+                    "id": request_id,
+                    "object": "chat.completion",
+                    "created": created,
+                    "model": state.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "".join(parts)},
+                            "finish_reason": finish_reason,
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": n_out,
+                        "total_tokens": prompt_tokens + n_out,
+                    },
+                }
+            )
+
+        def chunk(delta: dict[str, Any], finish: str | None, completion_tokens: int | None) -> str:
+            obj: dict[str, Any] = {
+                "id": request_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": state.model,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+            if completion_tokens is not None:
+                obj["usage"] = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                }
+            return f"data: {json.dumps(obj)}\n\n"
+
+        async def sse():
+            yield chunk({"role": "assistant", "content": ""}, None, 0 if continuous else None)
+            done = 0
+            async for i, word in generate():
+                done = i + 1
+                yield chunk({"content": word}, None, done if continuous else None)
+            yield chunk({}, finish_reason, done if (continuous or include_usage) else None)
+            if include_usage and not continuous:
+                obj = {
+                    "id": request_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": state.model,
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": done,
+                        "total_tokens": prompt_tokens + done,
+                    },
+                }
+                yield f"data: {json.dumps(obj)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(sse(), media_type="text/event-stream")
+
+    return app
+
+
+def main() -> None:
+    import uvicorn
+
+    p = argparse.ArgumentParser(description="fake vLLM replica")
+    p.add_argument("--host", default=os.environ.get("FAKE_HOST", "0.0.0.0"))
+    p.add_argument("--port", type=int, default=int(os.environ.get("FAKE_PORT", "8001")))
+    p.add_argument("--model", default=os.environ.get("FAKE_MODEL", "Qwen/Qwen2.5-3B-Instruct-AWQ"))
+    p.add_argument("--kv-tokens", type=int, default=int(os.environ.get("FAKE_KV_TOKENS", "160000")))
+    p.add_argument("--curve", default=os.environ.get("FAKE_RATE_CURVE", "1:60,8:40,16:30,32:20"))
+    p.add_argument("--prefill-tps", type=float, default=float(os.environ.get("FAKE_PREFILL_TPS", "2000")))
+    args = p.parse_args()
+    app = create_fake_app(
+        model=args.model, kv_tokens=args.kv_tokens, curve=args.curve, prefill_tps=args.prefill_tps
+    )
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+
+
+if __name__ == "__main__":
+    main()
