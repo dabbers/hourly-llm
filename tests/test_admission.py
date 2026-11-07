@@ -146,7 +146,7 @@ async def test_lazy_never_overtakes_waiting_interactive():
     await asyncio.sleep(0.02)
     lazy = asyncio.create_task(sched.admit("l0", LAZY, 100, max_wait_s=1.0))
     await asyncio.sleep(0.02)
-    assert sched.queue_lengths() == {"interactive": 1, "lazy": 1}
+    assert sched.queue_lengths() == {"interactive": 1, "lazy": 1, "burst": 0}
     sched.release(holds[0])
     h = await asyncio.wait_for(interactive, 1)
     assert h.shape is S8_30

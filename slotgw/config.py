@@ -88,6 +88,7 @@ class ShapePricing(BaseModel):
     """Extra charges on top of a shape's price_per_second (docs/DESIGN.md section 8)."""
 
     prompt_usd_per_million: float | None = Field(default=None, ge=0)  # prices prefill; None/auto = reference input price
+    reservation_price_factor: float = Field(default=1.0, gt=0)  # reserved slot price = price_per_second x this
 
     @field_validator("prompt_usd_per_million", mode="before")
     @classmethod
@@ -142,11 +143,24 @@ class AdmissionSettings(BaseModel):
     max_prefill_tokens_in_flight: int = Field(default=0, ge=0)  # 0 = no cap
     dispatch_tick_s: float = Field(default=0.25, gt=0)
     health_interval_s: float = Field(default=5.0, gt=0)
+    reservation_spill: bool = False  # a reserved tenant whose slots are busy may compete on demand
+
+
+class BurstSettings(BaseModel):
+    """Burst manager (docs/DESIGN.md section 7): lend idle step rate and free KV, revocably."""
+
+    enabled: bool = True
+    tps: bool = True  # lend the step rate above each running request's guarantee to its pacer
+    context: bool = True  # admit over-context requests into free KV with low engine priority
+    revoke_policy: Literal["finish", "grace", "abort"] = "grace"  # when a guaranteed admission needs the KV
+    grace_s: float = Field(default=15.0, ge=0)
+    max_context_tokens: int = Field(default=0, ge=0)  # cap for context bursts; 0 = the model's largest shape
 
 
 class GatewaySettings(BaseModel):
     pacing: PacingSettings = Field(default_factory=PacingSettings)
     admission: AdmissionSettings = Field(default_factory=AdmissionSettings)
+    burst: BurstSettings = Field(default_factory=BurstSettings)
 
 
 class Config(BaseModel):

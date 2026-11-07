@@ -1,8 +1,8 @@
 """Entry point: `slotgw-report runs/<run_id> [runs/<other_run_id> ...] [--out DIR]`.
 
 Reads each run's meter and load-generator side files, writes per_request.csv, per_tenant.csv,
-summary.csv, across_seeds.csv, interference.csv, per_replica.csv, refusals.csv, market.csv, list_prices.csv and a
-self-contained report.html
+summary.csv, across_seeds.csv, interference.csv, per_replica.csv, refusals.csv, market.csv, list_prices.csv,
+reservations.csv, reservation_bills.csv and a self-contained report.html
 (docs/DESIGN.md section 10; milestone 2 scope: bills, variance across seeds, latency, throttling,
 timeline, interference, basic provider economics)."""
 
@@ -30,6 +30,8 @@ from .metrics import (
     per_run,
     per_tenant,
     refusals,
+    reservation_bills,
+    reservations,
     timeline,
 )
 
@@ -329,6 +331,129 @@ def _market_section(mk: pd.DataFrame, lp: pd.DataFrame, config, fallback) -> str
     )
 
 
+def _reservations_section(rs: pd.DataFrame) -> str:
+    if rs.empty:
+        return '<p class="muted">no completed requests</p>'
+    intro = (
+        "<p>What if each tenant reserved N slots of its shape for the whole run and paid slot-seconds whether used or "
+        "not? N is sized from the tenant's own queue-free occupancy (each request holds a slot from arrival for the seat "
+        "time it measured; capacity refusals at the median seat time). The reservation bill is slot time at the shape's "
+        "price per second with no prefill charge, since the slot covers prefill; the cost share is the reserved slice of "
+        "the card, with the fastest shapes weighted by how many plan slots a seat of theirs displaces "
+        f"({escape(str(rs['weight_basis'].iloc[0]))}).</p>"
+    )
+    p95 = rs[rs["sizing"] == "p95"].groupby("tenant", sort=False)
+    mx = rs[rs["sizing"] == "max"].groupby("tenant", sort=False)
+    tenants = list(p95.groups)
+    chart = charts.bar_chart(
+        "Bill per tenant: per-token, per-request shape, reservation at p95 and at peak occupancy",
+        tenants,
+        {
+            "per-token": p95["per_token_usd"].mean().tolist(),
+            "shape, per request": p95["shape_usd"].mean().tolist(),
+            "reservation p95": p95["reservation_usd"].mean().tolist(),
+            "reservation peak": mx["reservation_usd"].mean().reindex(tenants).tolist(),
+        },
+        subtitle="mean over load runs; the reservation lasts the whole run",
+        y_label="USD per run", fmt=charts.fmt_usd,
+    )
+    tbl = html.table(
+        rs,
+        [
+            ("load_run", "load run", html.fmt_text), ("tenant", "tenant", html.fmt_text), ("shape", "shape", html.fmt_text),
+            ("sizing", "sizing", html.fmt_text), ("slots", "slots", html.fmt_int),
+            ("occupancy_p50", "occ. p50", html.fmt_f(1)), ("occupancy_p95", "occ. p95", html.fmt_f(1)), ("occupancy_max", "occ. max", html.fmt_f(0)),
+            ("would_queue_share", "would queue", html.fmt_pct), ("used_fill", "used fill", html.fmt_pct),
+            ("idle_slot_hours", "idle slot-h", html.fmt_f(2)),
+            ("reservation_usd", "reservation USD", html.fmt_usd), ("shape_usd", "shape per-request USD", html.fmt_usd),
+            ("per_token_usd", "per-token USD", html.fmt_usd),
+            ("reservation_vs_per_token", "res. ÷ per-token", html.fmt_f(2)),
+            ("capacity_weight", "cap. weight", html.fmt_f(2)), ("cost_share_usd", "GPU cost share", html.fmt_usd),
+            ("reservation_vs_cost", "res. ÷ cost", html.fmt_f(2)),
+            ("slot_usd_per_hour", "slot $/h", html.fmt_usd), ("breakeven_slot_usd_per_hour", "break-even slot $/h", html.fmt_usd),
+            ("revenue_parity_slot_usd_per_hour", "per-token-parity slot $/h", html.fmt_usd),
+        ],
+        left=4,
+    )
+    return f'<div class="card">{intro}{chart}{tbl}</div>'
+
+
+
+
+def _bursting_section(pr: pd.DataFrame, pt: pd.DataFrame) -> str:
+    chart = charts.bar_chart(
+        "Shape revenue, the burst discount and per-token revenue per run", pr["load_run"].tolist(),
+        {"shape, billed": pr["shape_usd"].tolist(), "burst discount": pr["burst_discount_usd"].tolist(),
+         "per-token": pr["per_token_usd"].tolist()},
+        subtitle="burst discount = bound - billed: runtime the provider gave away by delivering faster than the shape (tps burst)",
+        y_label="USD", fmt=charts.fmt_usd,
+    )
+    runs = html.table(
+        pr,
+        [
+            ("load_run", "load run", html.fmt_text), ("ok", "ok", html.fmt_int), ("context_bursts", "context bursts", html.fmt_int),
+            ("revoked", "revoked", html.fmt_int), ("output_tokens_burst", "burst tokens", html.fmt_int),
+            ("burst_share", "burst share", html.fmt_pct), ("burst_rate_lent_mean", "lent tok/s (sampled mean)", html.fmt_f(1)),
+            ("burst_discount_usd", "burst discount USD", html.fmt_usd), ("shape_usd", "shape billed USD", html.fmt_usd),
+            ("floor_violations", "floor viol.", html.fmt_int), ("output_tokens_per_gpu_hour", "output tokens / GPU-hour", html.fmt_int),
+        ],
+    )
+    cols = [
+        ("load_run", "load run", html.fmt_text), ("ok", "ok", html.fmt_int), ("context_bursts", "ctx bursts", html.fmt_int),
+        ("revoked", "revoked", html.fmt_int), ("burst_share", "burst share", html.fmt_pct),
+        ("queued_p50_ms", "queue p50 ms", html.fmt_int), ("ttft_p50_ms", "TTFT p50 ms", html.fmt_int), ("ttft_p95_ms", "TTFT p95 ms", html.fmt_int),
+        ("e2e_p50_ms", "e2e p50 ms", html.fmt_int), ("e2e_p95_ms", "e2e p95 ms", html.fmt_int),
+        ("delivered_tps_mean", "delivered tps", html.fmt_f(1)), ("floor_violation_share", "viol. % of stream time", html.fmt_pct),
+        ("shape_usd", "shape USD", html.fmt_usd), ("burst_discount_usd", "burst discount", html.fmt_usd),
+    ]
+    parts = [f'<div class="card">{chart}{runs}</div>']
+    agg = pt.groupby(["tenant", "load_run"], sort=False).agg(
+        ok=("ok", "sum"), context_bursts=("context_bursts", "sum"), revoked=("revoked", "sum"),
+        burst_tokens=("burst_tokens", "sum"), output_tokens=("output_tokens", "sum"),
+        queued_p50_ms=("queued_p50_ms", "mean"), ttft_p50_ms=("ttft_p50_ms", "mean"), ttft_p95_ms=("ttft_p95_ms", "mean"),
+        e2e_p50_ms=("e2e_p50_ms", "mean"), e2e_p95_ms=("e2e_p95_ms", "mean"), delivered_tps_mean=("delivered_tps_mean", "mean"),
+        stream_s=("stream_s", "sum"), violation_stream_s=("violation_stream_s", "sum"),
+        shape_usd=("shape_usd", "sum"), burst_discount_usd=("burst_discount_usd", "sum"),
+    ).reset_index()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        agg["burst_share"] = np.where(agg["output_tokens"] > 0, agg["burst_tokens"] / agg["output_tokens"], np.nan)
+        agg["floor_violation_share"] = np.where(agg["stream_s"] > 0, agg["violation_stream_s"] / agg["stream_s"], np.nan)
+    for tenant, sub in agg.groupby("tenant", sort=False):
+        parts.append(f'<div class="card"><h3>{escape(str(tenant))}</h3>{html.table(sub, cols)}</div>')
+    return "".join(parts)
+
+
+def _reservations_actual_section(rb: pd.DataFrame) -> str:
+    if rb.empty:
+        return '<p class="muted">no reservations in these runs (scenario `reservation:` specs, or --no-reservations)</p>'
+    by_tenant = rb.groupby("tenant", sort=False).agg(
+        tenant_usd=("tenant_usd", "mean"), reservation_usd=("reservation_usd", "mean"),
+        shape_usd=("shape_usd", "mean"), per_token_usd=("per_token_usd", "mean"),
+    ).reset_index()
+    chart = charts.bar_chart(
+        "Bill per tenant: with its reservation, per-request shape, per-token", by_tenant["tenant"].tolist(),
+        {"reservation + on-demand": by_tenant["tenant_usd"].tolist(), "of which reservation": by_tenant["reservation_usd"].tolist(),
+         "shape, per request": by_tenant["shape_usd"].tolist(), "per-token": by_tenant["per_token_usd"].tolist()},
+        subtitle="mean over the load runs that had a reservation for the tenant", y_label="USD per run", fmt=charts.fmt_usd,
+    )
+    tbl = html.table(
+        rb,
+        [
+            ("load_run", "load run", html.fmt_text), ("tenant", "tenant", html.fmt_text), ("shape", "shape", html.fmt_text),
+            ("replicas", "replicas", html.fmt_text), ("slots", "slots", html.fmt_int), ("duration_s", "duration s", html.fmt_int),
+            ("slot_usd_per_hour", "slot $/h", html.fmt_usd), ("served", "served", html.fmt_int), ("timeouts", "timeouts", html.fmt_int),
+            ("queued_p50_ms", "queue p50 ms", html.fmt_int), ("queued_p95_ms", "queue p95 ms", html.fmt_int),
+            ("used_fill", "used fill", html.fmt_pct), ("idle_slot_hours", "idle slot-h", html.fmt_f(2)),
+            ("reservation_usd", "reservation USD", html.fmt_usd), ("on_demand_usd", "on-demand USD", html.fmt_usd),
+            ("tenant_usd", "tenant total", html.fmt_usd), ("shape_usd", "per-request shape USD", html.fmt_usd),
+            ("per_token_usd", "per-token USD", html.fmt_usd), ("tenant_vs_shape", "total ÷ shape", html.fmt_f(2)),
+            ("tenant_vs_per_token", "total ÷ per-token", html.fmt_f(2)),
+        ],
+        left=4,
+    )
+    return f'<div class="card">{chart}{tbl}</div>'
+
+
 def _overview_section(pr: pd.DataFrame, run_ids: list[str]) -> str:
     tbl = html.table(
         pr,
@@ -336,7 +461,9 @@ def _overview_section(pr: pd.DataFrame, run_ids: list[str]) -> str:
             ("load_run", "load run", html.fmt_text), ("scenario", "scenario", html.fmt_text), ("seed", "seed", html.fmt_int),
             ("pacing", "pacing", html.fmt_text), ("duration_s", "duration s", html.fmt_int),
             ("requests", "requests", html.fmt_int), ("ok", "ok", html.fmt_int), ("refused", "refused", html.fmt_int), ("errors", "errors", html.fmt_int),
+            ("revoked", "revoked", html.fmt_int), ("context_bursts", "ctx bursts", html.fmt_int), ("reserved_requests", "reserved req.", html.fmt_int),
             ("prompt_tokens", "prompt tokens", html.fmt_int), ("output_tokens", "output tokens", html.fmt_int),
+            ("burst_share", "burst share", html.fmt_pct), ("reservation_usd", "reservation USD", html.fmt_usd),
             ("concurrency_mean", "in flight mean", html.fmt_f(1)), ("concurrency_p95", "in flight p95", html.fmt_f(1)),
             ("engine_running_mean", "engine running mean", html.fmt_f(1)),
             ("kv_usage_mean", "KV mean", html.fmt_pct), ("kv_usage_p95", "KV p95", html.fmt_pct), ("preemptions", "preemptions", html.fmt_int),
@@ -364,6 +491,10 @@ DEFINITIONS = """
 <dt>revenue at a reference</dt><dd>the run's prompt and output tokens at that reference's prices, lazy requests at the batch discount; prefix-cache hits are charged in full, so an upper bound.</dd>
 <dt>gross margin</dt><dd>1 − GPU cost ÷ revenue. "At target utilisation": the same GPU-hour serving tokens in proportion to target ÷ measured utilisation.</dd>
 <dt>list price at a margin</dt><dd>GPU cost ÷ (1 − margin) ÷ output-equivalent tokens, where prompt tokens count at the market reference's input:output price ratio and lazy tokens at the batch discount; the input price follows at that ratio. The market reference is the active one, or the current config's for a run snapshotted before price references existed.</dd>
+<dt>burst tokens / burst share</dt><dd>tokens the burst bucket paid for: delivered above the shape's tps because the burst manager lent idle step rate; share = burst tokens ÷ output tokens.</dd>
+<dt>context burst</dt><dd>a request over its shape's context admitted into free KV with low engine priority; "revoked" counts the ones aborted (status revoked, unbilled) when a guaranteed admission needed the capacity under the revoke policy.</dd>
+<dt>reservation bill</dt><dd>slots × reservation duration × the shape's price per second (× pricing.shape.reservation_price_factor), whether used or not; no prefill charge. The tenant's total is that plus on-demand shape bills for its requests not served from the reservation; "used fill" is seat time of the served requests ÷ reserved slot-seconds.</dd>
+<dt>reservation what-if</dt><dd>N slots of the tenant's shape for the whole run, sized at the p50, p95 or max of the tenant's queue-free occupancy; bill = N × run time × the shape's price per second, no prefill charge; "would queue" = requests arriving while all N slots are busy; used fill = occupied slot-seconds within the reservation ÷ reserved; cost share = GPU cost × N × capacity weight ÷ plan slots, where the weight is seats(plan shape) ÷ seats(this shape) on the calibration curve; the parity slot price is the hourly slot price at which the reservation equals the tenant's per-token bill.</dd>
 <dt>in flight</dt><dd>requests between admission and last delivered token, from the meter; "running" is vLLM's own count sampled through the gateway.</dd>
 </dl>
 """
@@ -377,8 +508,10 @@ def build_report(run_dirs: list[str | Path], out_dir: str | Path | None = None, 
         raise SystemExit("no requests in the given runs")
     df = enrich(pd.concat(frames, ignore_index=True), config)
     loads: list[LoadRun] = [lr for d in datas for lr in d.loads]
+    all_res = pd.concat([d.reservations for d in datas if len(d.reservations)], ignore_index=True) if any(len(d.reservations) for d in datas) else None
     pt = per_tenant(df)
-    pr = per_run(df, loads, config)
+    pr = per_run(df, loads, config, all_res)
+    rb = reservation_bills(df, all_res, config)
     xs = across_seeds(pt)
     inter = interference(df)
     tl = timeline(df, loads)
@@ -386,6 +519,7 @@ def build_report(run_dirs: list[str | Path], out_dir: str | Path | None = None, 
     ref = refusals(df)
     mk = market(df, config, datas[0].fallback_config)
     lp = list_prices(df, config, datas[0].fallback_config)
+    rs = reservations(df, config, datas[0].fallback_config, Path(config_dir) if config_dir else Path("config"))
 
     out = Path(out_dir) if out_dir else datas[0].run_dir / "report"
     out.mkdir(parents=True, exist_ok=True)
@@ -398,6 +532,8 @@ def build_report(run_dirs: list[str | Path], out_dir: str | Path | None = None, 
     ref.to_csv(out / "refusals.csv", index=False)
     mk.to_csv(out / "market.csv", index=False)
     lp.to_csv(out / "list_prices.csv", index=False)
+    rs.to_csv(out / "reservations.csv", index=False)
+    rb.to_csv(out / "reservation_bills.csv", index=False)
 
     n_seeds = int(xs["seeds"].max()) if not xs.empty else 0
     intro = (
@@ -412,9 +548,12 @@ def build_report(run_dirs: list[str | Path], out_dir: str | Path | None = None, 
         ("experience", "Latency, throttling and floor violations", _experience_section(pt)),
         ("timeline", "Timeline", _timeline_section(tl)),
         ("interference", "Prefill interference", _interference_section(inter)),
+        ("bursting", "Bursting: burst tokens, discount, revocations", _bursting_section(pr, pt)),
+        ("reservations-actual", "Reservations: standing slots and their bills", _reservations_actual_section(rb)),
         ("replicas", "Replicas: fill rate, utilisation, break-even", _replicas_section(prp, ref)),
         ("economics", "Provider economics", _economics_section(pr)),
         ("market", "Market reference prices and margin", _market_section(mk, lp, config, datas[0].fallback_config)),
+        ("reservations", "Reservation what-if", _reservations_section(rs)),
         ("definitions", "Definitions", DEFINITIONS),
     ]
     (out / "report.html").write_text(html.page("slotgw report", intro, sections), encoding="utf-8")

@@ -9,7 +9,7 @@ import pytest
 
 from report.build import build_report
 from slotgw.config import load_config
-from slotgw.meter import Meter, RequestRecord
+from slotgw.meter import Meter, RequestRecord, ReservationRecord
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -39,10 +39,20 @@ def _write_run(run_dir: Path) -> None:
     i = 0
     for seed, load_run in ((1, "synthetic-s1"), (2, "synthetic-s2")):
         t0 = base + seed * 10_000
+        res_id = f"res-{load_run}"
+        meter.record_reservation(ReservationRecord(
+            reservation_id=res_id, tenant="chat", shape="small.8k.30tps", slots=1, t_start=t0, t_end=t0 + 90.0,
+            price_per_second=4.5e-6, replicas="local-2080ti", served=12, timeouts=0, load_run=load_run, scenario="synthetic", seed=seed,
+        ))
         for k in range(12):
             t = t0 + k * 7.0
-            # chat: streamed, engine faster than the shape -> paced at 30 tps exactly after the head start
-            meter.record(_row(i, load_run, seed, "chat", "small.8k.30tps", "stream", t, 600, 150 + 10 * seed, 0.3, 120, 36)); i += 1
+            # chat: streamed, engine faster than the shape -> paced at 30 tps exactly after the head start;
+            # served from the tenant's one-slot reservation, with burst tokens lent on top in seed 2
+            rec = _row(i, load_run, seed, "chat", "small.8k.30tps", "stream", t, 600, 150 + 10 * seed, 0.3, 120, 36)
+            rec.reservation_id = res_id
+            if seed == 2:
+                rec.output_tokens_burst, rec.output_tokens_guaranteed = 40, rec.output_tokens - 40
+            meter.record(rec); i += 1
             # agent: streamed, engine too slow for the 60 tps shape -> floor violations
             meter.record(_row(i, load_run, seed, "agent", "small.8k.60tps", "stream", t + 1, 1500, 200, 0.4, 40, 40)); i += 1
             # batch: lazy complete
@@ -50,6 +60,11 @@ def _write_run(run_dir: Path) -> None:
         # a long-prefill note-taker summary overlapping the chat streams, plus one refusal
         meter.record(_row(i, load_run, seed, "notetaker", "small.16k.30tps", "complete", t0 + 3.0, 6000, 200, 4.0, 100, 36)); i += 1
         meter.record(_row(i, load_run, seed, "agent", "small.8k.60tps", "stream", t0 + 50.0, 8000, 300, 0, 1, 1, status="refused")); i += 1
+        # a context burst (9k prompt on the 8k shape) that was revoked for a guaranteed request
+        rec = _row(i, load_run, seed, "agent", "small.8k.60tps", "stream", t0 + 60.0, 9000, 300, 0.4, 40, 40)
+        rec.class_ctx, rec.status, rec.http_status, rec.abort_reason, rec.revoked = "burst", "revoked", 503, "burst_revoked", True
+        rec.output_tokens, rec.wasted_tokens, rec.t_last_token = 80, 60, None
+        meter.record(rec); i += 1
         d = run_dir / "loads" / load_run
         d.mkdir(parents=True)
         (d / "loadrun.json").write_text(json.dumps({
@@ -70,7 +85,8 @@ def test_report_builds_csvs_and_html(tmp_path):
     out = build_report([run_dir], config_dir=REPO / "config")
     assert out == run_dir / "report"
     for name in ("per_request.csv", "per_tenant.csv", "summary.csv", "across_seeds.csv", "interference.csv",
-                 "per_replica.csv", "refusals.csv", "market.csv", "list_prices.csv", "report.html"):
+                 "per_replica.csv", "refusals.csv", "market.csv", "list_prices.csv", "reservations.csv",
+                 "reservation_bills.csv", "report.html"):
         assert (out / name).is_file(), name
 
     pr = pd.read_csv(out / "per_request.csv")
@@ -88,10 +104,22 @@ def test_report_builds_csvs_and_html(tmp_path):
     assert set(pt["tenant"]) == {"chat", "agent", "batch", "notetaker"}
     agent_pt = pt[(pt["tenant"] == "agent") & (pt["load_run"] == "synthetic-s1")].iloc[0]
     assert agent_pt["refused"] == 1 and agent_pt["ok"] == 12
+    assert agent_pt["revoked"] == 1 and agent_pt["context_bursts"] == 1 and agent_pt["errors"] == 0
+    chat_pt = pt[(pt["tenant"] == "chat") & (pt["load_run"] == "synthetic-s2")].iloc[0]
+    assert chat_pt["reserved_requests"] == 12 and chat_pt["burst_tokens"] == 480
+    assert chat_pt["burst_share"] == pytest.approx(480 / chat_pt["output_tokens"])
     assert agent_pt["floor_violation_share"] == pytest.approx(1.0)
 
     summary = pd.read_csv(out / "summary.csv")
     assert len(summary) == 2 and set(summary["seed"]) == {1, 2}
+    assert (summary["revoked"] == 1).all() and (summary["context_bursts"] == 1).all() and (summary["reserved_requests"] == 12).all()
+    assert summary["reservation_usd"].tolist() == pytest.approx([90.0 * 4.5e-6] * 2)
+    s2 = summary.set_index("seed").loc[2]
+    assert s2["output_tokens_burst"] == 480 and s2["tenant_usd"] == pytest.approx(s2["reservation_usd"] + s2["shape_usd"] - pt[(pt["tenant"] == "chat") & (pt["seed"] == 2)]["shape_usd"].sum())
+    rbill = pd.read_csv(out / "reservation_bills.csv")
+    assert len(rbill) == 2 and set(rbill["tenant"]) == {"chat"} and (rbill["served"] == 12).all()
+    assert rbill["reservation_usd"].tolist() == pytest.approx([90.0 * 4.5e-6] * 2) and rbill["used_fill"].between(0, 1).all()
+    assert (rbill["on_demand_usd"] == 0).all() and (rbill["tenant_vs_per_token"] > 0).all()
     assert (summary["kv_usage_mean"] > 0).all() and (summary["concurrency_mean"] > 0).all()
     assert (summary["gpu_cost_usd"] > 0).all()
 
@@ -133,9 +161,25 @@ def test_report_builds_csvs_and_html(tmp_path):
         earned = ((sub["prompt_tokens"] * row["input_usd_per_million"] + sub["output_tokens"] * row["output_usd_per_million"]) * disc).sum() / 1e6
         assert earned == pytest.approx(summary.set_index("load_run").loc[load_run, "gpu_cost_usd"])
 
+    rs = pd.read_csv(out / "reservations.csv")
+    assert len(rs) == 2 * 4 * 3 and set(rs["sizing"]) == {"p50", "p95", "max"}
+    assert (rs["slots"] >= 1).all() and (rs["reservation_usd"] > 0).all()
+    assert rs["used_fill"].between(0, 1).all() and (rs["idle_slot_hours"] >= 0).all()
+    assert (rs[rs["sizing"] == "max"]["would_queue_share"] == 0).all()  # peak-sized: nobody waits
+    wide = rs.pivot_table(index=["load_run", "tenant"], columns="sizing", values="slots")
+    assert (wide["p50"] <= wide["p95"]).all() and (wide["p95"] <= wide["max"]).all()
+    chat = rs[(rs["tenant"] == "chat") & (rs["sizing"] == "max")].iloc[0]
+    assert chat["slots"] == 1 and chat["capacity_weight"] == pytest.approx(1.0)  # one stream every 7 s, ~5 s each
+    assert chat["breakeven_slot_usd_per_hour"] == pytest.approx(0.30 / 8)  # one of eight plan slots on a $0.30/h card
+    agent = rs[(rs["tenant"] == "agent") & (rs["sizing"] == "max")].iloc[0]
+    assert agent["capacity_weight"] == pytest.approx(4.0)  # 2 seats at 60 tps vs 8 at 30 on the 2080 Ti curve
+    assert rs["weight_basis"].iloc[0].startswith("local-2080ti")
+
     page = (out / "report.html").read_text(encoding="utf-8")
-    assert page.count("<svg") >= 7
+    assert page.count("<svg") >= 8
+    assert "Reservation what-if" in page
     assert "Market reference prices" in page and "basket-3b" in page
+    assert "Bursting" in page and "standing slots" in page
     for word in ("chat", "agent", "batch", "notetaker", "Bills", "Predictability", "Timeline", "Definitions"):
         assert word in page
     assert "<script" not in page  # self-contained, no JavaScript

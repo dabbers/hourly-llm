@@ -10,6 +10,8 @@ from pathlib import Path
 
 import yaml
 
+from .config import ReplicaConfig
+
 MAX_SEATS_SEARCH = 1024
 
 
@@ -75,3 +77,16 @@ class ThroughputProfile:
         if not pts:
             raise ValueError(f"{path}: level context_{context} has no step rates")
         return cls(curve=tuple(sorted(pts)), source=f"{Path(path).name}:context_{context}")
+
+
+def profile_for(cfg: ReplicaConfig, config_dir: Path | None = None) -> ThroughputProfile:
+    """The replica's profile: an inline `curve:` or its calibration file, resolved relative to the
+    working directory or to the config directory's parent (the repository root)."""
+    if cfg.curve:
+        return ThroughputProfile.from_curve_string(cfg.curve, source=f"{cfg.id}:inline")
+    if cfg.calibration:
+        path = Path(cfg.calibration)
+        if not path.is_file() and config_dir is not None:
+            path = Path(config_dir).parent / cfg.calibration
+        return ThroughputProfile.from_calibration(path, cfg.curve_context)
+    raise RuntimeError(f"replica {cfg.id}: admission needs `calibration` or `curve` in replicas.yaml")

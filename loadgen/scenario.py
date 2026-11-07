@@ -108,12 +108,22 @@ Arrivals = Annotated[
 ]
 
 
+class ReservationSpec(BaseModel):
+    """A standing reservation the load generator creates for the tenant (docs/DESIGN.md section 8):
+    `slots` of `shape` (default: the tenant's shape) for the whole run, or one window per named phase."""
+
+    slots: int = Field(ge=1)
+    shape: str | None = None
+    phases: list[str] = Field(default_factory=list)
+
+
 class TenantSpec(BaseModel):
     name: str
     api_key: str
     shape: str | None = None  # None: the tenant's default shape (gateway decides)
     profile: Profile
     arrivals: Arrivals | None = None
+    reservation: ReservationSpec | None = None
 
     @model_validator(mode="after")
     def _closed_loop_for_batch(self) -> TenantSpec:
@@ -149,6 +159,30 @@ class Scenario(BaseModel):
     @property
     def max_rate_scale(self) -> float:
         return max(p.rate_scale for p in self.phases)
+
+    def phase_window(self, name: str) -> tuple[float, float]:
+        """(start, end) offsets of a phase; raises for an unknown phase name."""
+        acc = 0.0
+        for p in self.phases:
+            if p.name == name:
+                return acc, acc + p.duration_s
+            acc += p.duration_s
+        raise ValueError(f"unknown phase {name!r}")
+
+    def reservation_windows(self, spec: ReservationSpec) -> list[tuple[float, float]]:
+        if not spec.phases:
+            return [(0.0, self.duration_s)]
+        return [self.phase_window(n) for n in spec.phases]
+
+    @model_validator(mode="after")
+    def _check_reservation_phases(self) -> Scenario:
+        names = {p.name for p in self.phases}
+        for t in self.tenants:
+            if t.reservation is not None:
+                for n in t.reservation.phases:
+                    if n not in names:
+                        raise ValueError(f"tenant {t.name}: reservation phase {n!r} is not a phase of the scenario")
+        return self
 
 
 def load_scenario(path: str | Path) -> Scenario:

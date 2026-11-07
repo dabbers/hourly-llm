@@ -83,6 +83,8 @@ services:
       SLOTGW_LAZY_PREEMPT: ${SLOTGW_LAZY_PREEMPT:-never}
       SLOTGW_MAX_PREFILL_TOKENS: ${SLOTGW_MAX_PREFILL_TOKENS:-0}
       SLOTGW_PROMPT_USD_PER_MILLION: ${SLOTGW_PROMPT_USD_PER_MILLION:-auto}
+      SLOTGW_BURST: ${SLOTGW_BURST:-true}
+      SLOTGW_BURST_REVOKE: ${SLOTGW_BURST_REVOKE:-grace}
     depends_on:
       vllm:
         condition: service_healthy
@@ -112,6 +114,8 @@ services:
       SLOTGW_LAZY_PREEMPT: ${SLOTGW_LAZY_PREEMPT:-never}
       SLOTGW_MAX_PREFILL_TOKENS: ${SLOTGW_MAX_PREFILL_TOKENS:-0}
       SLOTGW_PROMPT_USD_PER_MILLION: ${SLOTGW_PROMPT_USD_PER_MILLION:-auto}
+      SLOTGW_BURST: ${SLOTGW_BURST:-true}
+      SLOTGW_BURST_REVOKE: ${SLOTGW_BURST_REVOKE:-grace}
     depends_on:
       - fake-replica
 

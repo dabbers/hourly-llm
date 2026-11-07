@@ -13,24 +13,13 @@ from fastapi import FastAPI
 from . import __version__
 from .admission import ReplicaLedger, Scheduler
 from .api import GatewayState, build_router
-from .calibration import ThroughputProfile
-from .config import Config, ReplicaConfig
+from .calibration import profile_for
+from .config import Config
 from .meter import Meter
 from .replicas.base import Replica
 from .replicas.vllm import VllmReplica
 
 log = logging.getLogger("slotgw")
-
-
-def profile_for(cfg: ReplicaConfig, config_dir: Path | None = None) -> ThroughputProfile:
-    if cfg.curve:
-        return ThroughputProfile.from_curve_string(cfg.curve, source=f"{cfg.id}:inline")
-    if cfg.calibration:
-        path = Path(cfg.calibration)
-        if not path.is_file() and config_dir is not None:
-            path = config_dir.parent / cfg.calibration
-        return ThroughputProfile.from_calibration(path, cfg.curve_context)
-    raise RuntimeError(f"replica {cfg.id}: admission needs `calibration` or `curve` in replicas.yaml")
 
 
 async def build_ledgers(config: Config, replicas: list[Replica], config_dir: Path | None = None) -> list[ReplicaLedger]:
@@ -71,14 +60,15 @@ def create_app(config: Config, meter: Meter, replicas: list[Replica] | None = No
         loops: list[asyncio.Task] = []
         if config.gateway.admission.enabled:
             ledgers = await build_ledgers(config, reps, cdir)
-            scheduler = Scheduler(ledgers, config.gateway.admission)
+            scheduler = Scheduler(ledgers, config.gateway.admission, config.gateway.burst)
             loops.append(asyncio.create_task(_tick_loop(scheduler, config.gateway.admission.dispatch_tick_s)))
             loops.append(asyncio.create_task(_health_loop(ledgers, config.gateway.admission.health_interval_s)))
         app.state.gw = GatewayState(config=config, meter=meter, replicas=reps, scheduler=scheduler)
         log.info(
-            "slotgw %s: %d shapes, %d tenants, %d replicas, pacing %s, admission %s",
+            "slotgw %s: %d shapes, %d tenants, %d replicas, pacing %s, admission %s, burst %s",
             __version__, len(config.shapes), len(config.tenants), len(reps),
             "on" if config.gateway.pacing.enabled else "off", "on" if scheduler else "off",
+            "on" if config.gateway.burst.enabled else "off",
         )
         try:
             yield
@@ -102,9 +92,9 @@ async def _tick_loop(scheduler: Scheduler, interval: float) -> None:
     while True:
         await asyncio.sleep(interval)
         try:
-            scheduler.dispatch()
+            scheduler.tick()
         except Exception:
-            log.exception("dispatch failed")
+            log.exception("tick failed")
 
 
 async def _health_loop(ledgers: list[ReplicaLedger], interval: float) -> None:

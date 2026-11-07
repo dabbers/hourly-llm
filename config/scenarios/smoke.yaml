@@ -13,6 +13,7 @@ tenants:
     api_key: sk-local-chat
     profile: {kind: chat, turns: [2, 4], first_user_tokens: [100, 300], user_tokens_per_turn: [100, 300], output_tokens: [40, 120], think_s: [2, 6]}
     arrivals: {kind: diurnal, rate_per_min: 6}
+    reservation: {slots: 1, phases: [peak]}
   - name: agent
     api_key: sk-local-agent
     profile: {kind: agent, steps: [2, 5], first_user_tokens: [500, 1000], growth_tokens: [300, 800], output_tokens: [60, 200], pause_s: [1, 3]}

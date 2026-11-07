@@ -70,6 +70,9 @@ SAMPLE_COLUMNS = [
     # gateway ledger view (milestone 3; empty when admission is off)
     "ledger_running", "ledger_lazy_running", "ledger_kv_held", "ledger_kv_usable", "seats_now",
     "prefill_tokens_in_flight", "queue_interactive", "queue_lazy", "gw_preemptions", "gw_timeouts",
+    # milestone 4: reservations and burst
+    "engine_active", "reserved_slots", "reserved_idle", "burst_running", "burst_rate_lent", "step_rate_now",
+    "queue_burst", "gw_revocations", "gw_bursts_admitted",
 ]
 
 
@@ -116,9 +119,12 @@ class LoadRunner:
         scenario_path: str | Path | None = None,
         progress_every_s: float = 10.0,
         label: str | None = None,
+        reservations: bool = True,
     ):
         self.scenario = scenario
         self.plan = plan
+        self.reservations_enabled = reservations
+        self.reservation_log: list[dict[str, Any]] = []
         self.gateway_url = gateway_url.rstrip("/")
         self.runs_dir = Path(runs_dir)
         stem = f"{scenario.name}-{label}" if label else scenario.name
@@ -175,6 +181,12 @@ class LoadRunner:
             self._t_end = self._t0 + self.scenario.duration_s
             sampler = asyncio.create_task(self._sample_loop(client))
             progress = asyncio.create_task(self._progress_loop())
+            reservers = [
+                asyncio.create_task(self._reservation_window(client, spec, w0, w1))
+                for spec in self.scenario.tenants
+                if spec.reservation is not None and self.reservations_enabled
+                for (w0, w1) in self.scenario.reservation_windows(spec.reservation)
+            ]
             try:
                 await asyncio.gather(*(self._drive_tenant(client, tp) for tp in self.plan.tenants))
             finally:
@@ -185,6 +197,10 @@ class LoadRunner:
                         await t
                     except (asyncio.CancelledError, httpx.HTTPError):
                         pass
+                for t in reservers:
+                    t.cancel()
+                await asyncio.gather(*reservers, return_exceptions=True)
+                await self._release_reservations(client)
                 self._client_sink.close()
                 self._sample_sink.close()
             ended = datetime.now(UTC)
@@ -196,6 +212,10 @@ class LoadRunner:
                 "gateway_url": self.gateway_url,
                 "gateway_run_id": self.gateway_run_id,
                 "gateway_pacing": health.get("pacing"),
+                "gateway_admission": health.get("admission"),
+                "gateway_burst": health.get("burst"),
+                "price_reference": health.get("price_reference"),
+                "reservations": self.reservation_log,
                 "replicas": health.get("replicas"),  # id, model, KV budget (cache) at the start of the run
                 "plan_digest": self.plan.digest,
                 "planned_open_loop_requests": self.plan.n_open_loop_requests,
@@ -257,6 +277,56 @@ class LoadRunner:
         if abs(ratio - 1.0) > 0.05:
             log.warning("prompt sizing is off by %.0f%%: adjust loadgen/content.py VOCAB", (ratio - 1) * 100)
         return {"template_overhead_tokens": overhead, "tokens_per_planned_token": round(ratio, 4)}
+
+    # ---- reservations -----------------------------------------------------------------------
+
+    async def _reservation_window(self, client: httpx.AsyncClient, spec, w0: float, w1: float) -> None:
+        """Hold the tenant's reservation from offset w0 to w1 of the timeline."""
+        await self.sleep_until(w0)
+        body = {
+            "tenant": spec.name,
+            "shape": spec.reservation.shape or spec.shape,
+            "slots": spec.reservation.slots,
+            "load_run": self.load_run_id,
+            "scenario": self.scenario_label,
+            "seed": self.plan.seed,
+        }
+        entry: dict[str, Any] = {**body, "t_start_offset": w0, "t_end_offset": w1, "id": None, "status": None}
+        self.reservation_log.append(entry)
+        try:
+            r = await client.post("/admin/reservations", json=body, timeout=30)
+            entry["status"] = r.status_code
+            if r.status_code != 201:
+                entry["error"] = r.text[:200]
+                log.warning("reservation for %s refused: %s %s", spec.name, r.status_code, r.text[:200])
+                return
+            entry["id"] = r.json().get("id")
+            entry["replicas"] = r.json().get("replicas")
+            log.info("reservation %s: %d x %s for %s until t=%.0fs", entry["id"], body["slots"], body["shape"], spec.name, w1)
+        except httpx.HTTPError as e:
+            entry["error"] = f"{type(e).__name__}: {e}"[:200]
+            log.warning("reservation for %s failed: %s", spec.name, e)
+            return
+        try:
+            await self.sleep_until(w1)
+        finally:
+            await self._delete_reservation(client, entry)
+
+    async def _delete_reservation(self, client: httpx.AsyncClient, entry: dict[str, Any]) -> None:
+        if not entry.get("id") or entry.get("released"):
+            return
+        try:
+            r = await client.delete(f"/admin/reservations/{entry['id']}", timeout=30)
+            entry["released"] = r.status_code == 200
+            if r.status_code == 200:
+                entry["served"] = r.json().get("served")
+                entry["timeouts"] = r.json().get("timeouts")
+        except httpx.HTTPError as e:
+            log.warning("could not release reservation %s: %s", entry["id"], e)
+
+    async def _release_reservations(self, client: httpx.AsyncClient) -> None:
+        for entry in self.reservation_log:
+            await self._delete_reservation(client, entry)
 
     # ---- drivers ----------------------------------------------------------------------------
 
@@ -479,6 +549,15 @@ class LoadRunner:
                             "queue_lazy": queues.get("lazy"),
                             "gw_preemptions": sched.get("preemptions"),
                             "gw_timeouts": sched.get("timeouts"),
+                            "engine_active": lg.get("engine_active"),
+                            "reserved_slots": lg.get("reserved_slots"),
+                            "reserved_idle": lg.get("reserved_idle"),
+                            "burst_running": lg.get("burst_running"),
+                            "burst_rate_lent": lg.get("burst_rate_lent"),
+                            "step_rate_now": lg.get("step_rate_now"),
+                            "queue_burst": queues.get("burst"),
+                            "gw_revocations": sched.get("revocations"),
+                            "gw_bursts_admitted": sched.get("bursts_admitted"),
                         }
                     )
             except (httpx.HTTPError, ValueError) as e:

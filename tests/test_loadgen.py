@@ -27,6 +27,7 @@ def tiny_scenario(tenants: list[str] | None = None, duration_s: float = 8.0) -> 
             "profile": {"kind": "chat", "turns": [2, 2], "first_user_tokens": [20, 40], "user_tokens_per_turn": [20, 40],
                         "output_tokens": [8, 12], "think_s": [0.2, 0.5]},
             "arrivals": {"kind": "diurnal", "rate_per_min": 30},
+            "reservation": {"slots": 1},
         },
         {
             "name": "agent",
@@ -142,3 +143,25 @@ async def test_loadgen_runs_against_gateway_and_tags_the_meter(gateway, meter_ro
 
     samples = _read_csv(out / "samples.csv")
     assert len(samples) >= 5 and samples[0]["replica"] == "fake-0"
+    assert {s["reserved_slots"] for s in samples} >= {"1"} and all(s["gw_revocations"] == "0" for s in samples)
+
+    # the chat tenant's reservation was created at the start, served its requests and was released at the end
+    (res,) = meta["reservations"]
+    assert res["status"] == 201 and res["id"] and res["released"] is True and res["served"] >= 1
+    assert res["shape"] == "small.8k.30tps" and res["slots"] == 1 and res["load_run"] == "tiny-s7-test"
+    chat_rows = [r for r in rows if r["tenant"] == "chat" and r["status"] == "ok"]
+    assert chat_rows and all(r["reservation_id"] == res["id"] for r in chat_rows)
+    assert all(r["reservation_id"] is None for r in rows if r["tenant"] != "chat")
+
+
+def test_reservation_windows_follow_phases():
+    sc = tiny_scenario(["chat"])
+    assert sc.reservation_windows(sc.tenants[0].reservation) == [(0.0, 8.0)]
+    sc2 = Scenario(
+        name="w", phases=[Phase(name="a", duration_s=10), Phase(name="b", duration_s=20), Phase(name="c", duration_s=5)],
+        tenants=[{**sc.tenants[0].model_dump(), "reservation": {"slots": 2, "phases": ["b", "c"]}}],
+    )
+    assert sc2.reservation_windows(sc2.tenants[0].reservation) == [(10.0, 30.0), (30.0, 35.0)]
+    with pytest.raises(ValueError, match="not a phase"):
+        Scenario(name="w", phases=[Phase(name="a", duration_s=10)],
+                 tenants=[{**sc.tenants[0].model_dump(), "reservation": {"slots": 1, "phases": ["zz"]}}])

@@ -278,6 +278,147 @@ What it says:
 - **Variance is unchanged by the reference**: both bills scale with the same token counts, so the
   milestone-2/3 predictability findings hold at any reference; only the level moves.
 
+### Reservation what-if on the milestone-3 runs
+
+`reservations.csv` sizes, per tenant, a standing reservation of N slots for the whole 18-minute run
+from the tenant's queue-free occupancy (each request holds a slot from arrival for the seat time it
+measured), and bills it slot-seconds at the shape's price with no prefill charge. Overcommit 1.0,
+seed 1, the snapshot's gpt-4o-mini-derived prices (a 30 tps slot $0.065 per hour; at the 3B basket
+all slot prices are 4× lower). Capacity weight = seats(30 tps) ÷ seats(shape tps) on the calibration
+curve, so a 60 tps slot displaces four 30 tps plan slots.
+
+| tenant (shape) | occupancy p50 / p95 / max | p95 reservation: slots, would wait, used fill | reservation USD at p95 / at peak | per-request shape USD | per-token USD | slot $/h: price / break-even / per-token parity at p95 |
+|---|---|---|---|---|---|---|
+| chat (8k.30tps) | 1 / 4 / 9 | 4, 12%, 31% | 0.079 / 0.178 | 0.100 | 0.134 | 0.065 / 0.038 / 0.110 |
+| agent (8k.60tps) | 1 / 3 / 5 | 3, 9%, 34% | 0.119 / 0.198 | 0.122 | 0.162 | 0.130 / 0.150 / 0.177 |
+| notetaker (16k.30tps) | 0 / 1 / 1 | 1, 0%, 14% | 0.025 / 0.025 | 0.012 | 0.014 | 0.081 / 0.038 / 0.044 |
+| batch (8k.15tps.lazy) | 0 / 1 / 2 | 1, 20%, 22% | 0.005 / 0.010 | 0.009 | 0.008 | 0.016 / 0.016 / 0.026 |
+
+What it says:
+
+- **A p95 reservation is cheaper for the steady tenants than paying per request** (chat 0.79×, agent
+  0.97× of the per-request shape bill; 0.59× and 0.73× of per-token), and about one request in ten
+  would wait for the tenant's own slots. Sized at the peak nobody waits and the bill is 1.3× per-token.
+  The hour-mark note-taker is the opposite case: its one slot is 86% idle and costs 1.8× per-token, so
+  bursty tenants want on-demand or burst, steady ones a reservation.
+- **Two thirds of a p95 reservation sits idle** (used fill 31–34%; at p50 sizing 60% but seven in ten
+  requests wait). That idle reserved capacity is the resale pool the burst manager (milestone 4) lends
+  to burst and lazy work, and it is what the customer is paying for when their demand is not steady.
+- **Parity slot prices do not cover the provider's cost.** At the snapshot prices a sold 30 tps slot
+  earns 1.7× its cost share, but a 60 tps slot earns 0.86× because it displaces four plan slots: 60 tps
+  reservations lose money at parity even when fully used. At the 3B basket every slot sells below cost
+  ($0.016 against $0.038 per hour for 30 tps). A reservation product needs its own price, between
+  break-even ($0.038 per hour for a 30 tps slot on a $0.30 card) and what the tenant's traffic earns
+  per token ($0.11 per hour for chat at p95 sizing; about $0.05 at basket prices): a narrow window on
+  this card, wider on a card with more seats per dollar.
+- **Whole-run reservations straddle the scenario's quiet and peak phases**, which is most of the idle
+  share; reservations with phase-length windows (business hours, hour marks) would fill better, and
+  the sizing rule is the customer's lever, not the provider's.
+
+## Milestone 4 measurements (tps burst, context bursts, reservations)
+
+All on 2026-11-07 on the card and settings of milestone 3 (KV budget `VLLM_GPU_MEM=0.64`, 128-token
+prefill chunks, overcommit 1.0, `requeue` off), billed at the `basket-3b` reference (prefill $0.0755
+per 1M prompt tokens; a 30 tps slot $4.5 per million seconds = $0.0162 per hour, 16k shapes × 1.25),
+`config/scenarios/mixed.yaml` seed 1, 18 minutes + 90 s drain. Reservations as the scenario states
+them: chat 4 slots of `small.8k.30tps` (the what-if's p95 sizing), note-taker 1 slot of
+`small.16k.30tps`, both for the whole run; the on-demand runs used `--no-reservations`. A smoke run
+went first (`smoke.yaml`, burst on, one chat slot reserved from 30 s to 90 s): 102 / 102 ok, the
+reservation created and released on time, 14 requests served from it, 0 timeouts. The burst (`grace`)
+and burst + reservations runs share gateway run `20261107-054909` (same gateway settings, so compose
+kept the container); the report splits them by load run. Report: `runs/20261107-053033/report-m4`.
+
+| | burst off, on demand `20261107-053033` | burst (`grace`), on demand `20261107-054909` | burst (`abort`), on demand `20261107-064403` | burst + reservations `20261107-054909` | burst off + reservations `20261107-062541` |
+|---|---|---|---|---|---|
+| ok / refused (agent context / agent seat / chat seat) | 517 / 39 (32 / 3 / 4) | 554 / 39 (1 / 34 / 4) | 558 / 40 (0 / 34 / 6) | 461 / 38 (0 / 38 / 0) | 344 / 38 (0 / 38 / 0) |
+| context bursts classified / ran / revoked | – | 37 / 3 / 0 | 32 / 0 / 0 | 0 | – |
+| output tokens (per GPU-hour) | 114k (371k) | 128k (424k) | 131k (436k) | 120k (399k) | 73k (241k) |
+| burst tokens (share of output); lent rate per running request, sampled mean | 0 | 40k (32%); 56 tok/s | 43k (33%); 56 | 71k (59%); 65 | 0 |
+| engine streams mean / ledger holds mean (of which reserved) | 2.0 / 2.2 | 2.3 / 2.5 | 2.3 / 2.5 | 1.9 / 5.9 (5) | 1.1 / 5.2 (5) |
+| delivered tok/s chat / agent / note-taker / batch (shapes 30 / 60 / 30 / 15) | 36 / 70 / 32 / 16 | 64 / 72 / 59 / 77 | 67 / 72 / 58 / 80 | 73 / – / 59 / 81 | 37 / – / 32 / 16 |
+| throttled s | 2058 | 219 | 250 | 404 | 2390 |
+| floor violations (share chat / agent / note-taker / batch) | 57 (14 / 18 / 22 / 0%) | 67 (18 / 28 / 15 / 0%) | 57 (16 / 24 / 0 / 0%) | 14 (10 / – / 9 / 0%) | 20 (10 / – / 20 / 0%) |
+| chat queue p50 / p95; e2e p50 / p95 | 10.4 / 22.7 s; 17.0 / 29.5 s | 11.4 / 25.0; 16.8 / 30.1 | 13.3 / 25.2; 16.7 / 30.4 | 0.01 / 1.6; 3.4 / 9.4 | 0.01 / 2.2; 6.1 / 10.8 |
+| agent queue p50 / p95; e2e p50 / p95 | 6.2 / 20.5 s; 11.7 / 23.8 s | 8.5 / 24.6; 14.0 / 28.9 | 9.9 / 24.9; 15.2 / 29.9 | nothing served | nothing served |
+| batch ok; e2e p50 / p95 | 33; 33 / 265 s | 62; 8.3 / 281 | 70; 7.1 / 196 | 163; 6.1 / 71 | 47; 38 / 82 |
+| per-token USD / shape USD (bound) / burst discount | 0.142 / 0.146 (0.148) / 0.002 | 0.152 / 0.153 (0.159) / 0.006 | 0.147 / 0.149 (0.155) / 0.007 | 0.084 / 0.086 (0.094) / 0.008 | 0.074 / 0.077 (0.078) / 0.001 |
+| billed: reservations + on demand = revenue; × GPU cost ($0.090 per run) | 0.146; 1.58 | 0.153; 1.69 | 0.149; 1.65 | 0.026 + 0.018 = 0.043; 0.48 | 0.026 + 0.006 = 0.032; 0.35 |
+| fill / utilisation | 27 / 43% | 32 / 49% | 31 / 50% | 25 / 46% | 15 / 28% |
+| KV usage mean / p95 | 6 / 12% | 7 / 14% | 6 / 12% | 4 / 13% | 3 / 12% |
+
+In the reservation runs the per-request shape bill is what the reserved tenants would have paid on
+demand; the market section of the report prices each run's traffic at the reference's per-token
+rates, so its reservation-run margins (−8% / −22%) are for the traffic, not for what was billed.
+
+| reservation | slots × hours | served / timeouts | queue on own slots p50 / p95 | used fill / idle slot-hours | bill | per-request shape / per-token it would have paid |
+|---|---|---|---|---|---|---|
+| chat, burst on | 4 × 0.30 h | 283 / 0 | 13 ms / 1.6 s | 24% / 0.91 | $0.0194 | $0.0615 / $0.0643 (0.32× / 0.30×) |
+| chat, burst off | 4 × 0.30 h | 282 / 0 | 13 ms / 2.2 s | 21% / 0.94 | $0.0194 | $0.0637 / $0.0639 (0.31× / 0.30×) |
+| note-taker, burst on | 1 × 0.30 h | 15 / 0 | 18 / 26 ms | 12% / 0.26 | $0.0061 | $0.0064 / $0.0062 (0.95× / 0.97×) |
+| note-taker, burst off | 1 × 0.30 h | 15 / 0 | 17 / 23 ms | 12% / 0.26 | $0.0061 | $0.0067 / $0.0062 (0.91× / 0.97×) |
+
+What the runs show:
+
+- **tps burst is free throughput.** The same GPU time produced 12–15% more output (114k → 128k /
+  131k tokens; 371k → 424k / 436k per GPU-hour) with the engine running 2.3 streams instead of 2.0:
+  requests finish sooner, so the closed-loop tenants (batch at concurrency 2, agent sessions) send
+  the next one sooner. Chat was delivered at 64–67 tok/s on its 30 tps shape, batch at 77–80 on 15
+  tps lazy, with batch completions 33 → 62 / 70 and its e2e p50 33 s → 7–8 s; throttled time fell
+  from 2,058 s to 219–250 s per run. 32–33% of all output tokens were burst, and the lent rate per
+  running request averaged 56 tok/s, the engine's spare at 2–3 streams. Chat's queue (p50 11–13 s)
+  and TTFT did not move: queueing is admission's price, bursting only shortens generation. The clean
+  number is in the reservation runs, where chat never queues: e2e p50 6.1 s without burst, 3.4 s with.
+- **The burst discount is 4% of the bill and 30% of its runtime part.** Bound − billed rose from
+  $0.002 to $0.006–0.007 on a $0.15 bill, because at parity prices 90% of the bill is prefill
+  (1.7–1.8M prompt tokens at $0.0755 per 1M = $0.13; runtime bound ≈ $0.02). Giving the spare rate
+  away costs the provider little on prompt-heavy traffic; it would cost a third of a decode-only bill.
+- **Lending spends the pacer's smoothing margin.** Floor violations went 57 → 67 with 7% more
+  requests (`abort` run: 57), the agent's share 18% → 28% / 24% and chat's 14% → 18% / 16%; in the
+  interference split, agent streams overlapping a long prefill violated 27% of the time without burst
+  and 41% / 36% with it, streams with no prefill in flight 1.8% in all three. Without burst a request
+  paced at its tps banks the engine's surplus in its buffer and rides out a prefill stall from it;
+  with burst the surplus is delivered as it arrives (one bucket depth of credit, never banked), so a
+  stall lands on an empty buffer and the whole-stream average drops below the floor. A lending
+  reserve (lend only above a margin kept banked) is the knob to try; it was not built.
+- **Context bursts at the shape's own tps do not fit on this card.** 37 / 32 agent steps that had
+  outgrown 8k were classified as context bursts instead of being refused. A burst keeps its shape's
+  tps, so a 60 tps burst needs the replica at ≤ 1 other hold (`n_max(60)` = 2); the burst queue is
+  served only when nothing else waits, and at peak 2–8 holds were running. 3 bursts ran in the `grace`
+  run (8.7–14.8k prompts, 9–11 s each), none in the `abort` run; the other 34 + 32 waited the full 30
+  s and were refused `capacity:seat`. Against the burst-off run, where the same steps got an instant
+  `429` and the session ended, the agent lost 30 s per step for the same answer. No burst was ever
+  revoked (`grace` and `abort` runs are identical in this respect), so the revocation policies were
+  exercised only by the fake-replica tests, and whether revocation hurts guaranteed traffic is
+  unanswered on hardware. The design change this asks for (not built): admit context bursts as best
+  effort at the slowest tps class, which is what a request with no floor is, and give the burst queue
+  a short wait (a few seconds), because a burst that cannot be placed now should fail fast.
+- **Reservations give the reserved tenants a different product.** Chat on its four slots: queue p50
+  13 ms and p95 1.6–2.2 s against 10–13 s / 23–25 s on demand, e2e p50 3.4 s (burst) / 6.1 s, 0
+  timeouts, no seat refusals; the note-taker's 15 requests queued ≤ 26 ms. Used fill was 21–24% (chat)
+  and 12% (note-taker): 0.91 of 1.20 chat slot-hours and 0.26 of 0.30 note-taker slot-hours idle,
+  about what the what-if predicted (31% / 14%) for a whole-run reservation across quiet and peak.
+  With burst on, the idle reserved rate went to the lazy tenant: batch completed 163 requests (62 on
+  demand with burst, 33 without), 59% of all output tokens were burst, and chat's own delivered rate
+  was 73 tok/s. Floor violations fell to 14 / 20 because the fast shape was absent (next bullet).
+- **Standing holds of a slow shape lock the fast shape out.** Five reserved 30 tps slots count as
+  seats whether idle or occupied, and the 60 tps ceiling is 2 seats, so no agent request could be
+  placed at any time: 38 / 38 refused `capacity:seat` after 30 s, 18 of them while nothing at all
+  was running. That is the nesting rule applied to standing holds, as designed (the idle slots are
+  the guarantee), and on this card it means a reservation of two or more slots of any shape removes
+  the 60 tps shape from sale on that replica; the agent tenant's $0.08 per run, half the on-demand
+  revenue, went with it. Reservations and the 60 tps shape need separate replicas here, or the 60 tps
+  shape is not sold (RESULTS.md Q3).
+- **At parity prices a reservation is a gift.** Chat paid $0.0194 for four slots (4 × 0.3 h × $0.0162)
+  against $0.0615–0.0637 per request on demand (0.31–0.32×; 0.30× of per-token), the note-taker
+  $0.0061 against $0.0064–0.0067 (0.91–0.95×). The reserved slice is 5 of 8 seats, $0.056 of the
+  run's $0.090 GPU cost, and earned $0.0255: 0.45× its cost share. Revenue per run fell from $0.146–
+  0.153 (1.6–1.7× GPU cost) to $0.043 / $0.032 (0.48× / 0.35×), the agent lockout and the cheap
+  reservation in about equal parts; bursting over the idle slots recovered $0.011 of it through
+  batch. For chat's reservation to match its per-request bill `reservation_price_factor` would be
+  ≈ 3.2 (one over used fill, less the prefill charge it no longer pays); to cover the slice's cost
+  share, ≥ 2.3 ($0.0375 per slot-hour = $0.30 ÷ 8 seats, the what-if's $0.038). The knob exists;
+  the config keeps 1.0 so the report shows the parity case.
+
 ## Environment the numbers depend on
 
 - Docker Desktop 4.2.0 with the WSL driver-store workaround (`scripts/vllm-entrypoint.sh`); WSL kernel

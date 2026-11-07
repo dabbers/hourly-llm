@@ -11,6 +11,7 @@ import pytest
 from slotgw.app import create_app
 from slotgw.config import (
     AdmissionSettings,
+    BurstSettings,
     GatewaySettings,
     PacingSettings,
     ReplicaConfig,
@@ -39,17 +40,28 @@ def _shapes(queue_s: float, lazy_queue_s: float = 60.0) -> list[Shape]:
 
 
 class Cluster:
-    def __init__(self, curves: list[str], admission: AdmissionSettings, queue_s: float, meter_path: Path):
+    def __init__(
+        self,
+        curves: list[str],
+        admission: AdmissionSettings,
+        queue_s: float,
+        meter_path: Path,
+        burst: BurstSettings | None = None,
+        kv_tokens: int | None = None,
+    ):
         self.fakes = [ServerHandle(create_fake_app(curve=c, prefill_tps=50_000.0)).start() for c in curves]
         config = load_config(REPO / "config")
         config = config.model_copy(
             update={
                 "shapes": _shapes(queue_s),
                 "replicas": [
-                    ReplicaConfig(id=f"fake-{i}", kind="fake", url=f.url, model="small", curve=c)
+                    ReplicaConfig(id=f"fake-{i}", kind="fake", url=f.url, model="small", curve=c, kv_tokens=kv_tokens)
                     for i, (f, c) in enumerate(zip(self.fakes, curves, strict=True))
                 ],
-                "gateway": GatewaySettings(pacing=PacingSettings(enabled=True, bucket_depth_s=1.0), admission=admission),
+                "gateway": GatewaySettings(
+                    pacing=PacingSettings(enabled=True, bucket_depth_s=1.0), admission=admission,
+                    burst=burst or BurstSettings(enabled=False),
+                ),
             }
         )
         self.meter_path = meter_path
@@ -61,12 +73,12 @@ class Cluster:
         for f in self.fakes:
             f.stop()
 
-    def rows(self):
+    def rows(self, table: str = "requests"):
         import sqlite3
 
         conn = sqlite3.connect(str(self.meter_path))
         conn.row_factory = sqlite3.Row
-        rows = [dict(r) for r in conn.execute("SELECT * FROM requests").fetchall()]
+        rows = [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
         conn.close()
         return rows
 
@@ -150,7 +162,7 @@ async def test_lazy_waits_while_interactive_is_queued(tmp_path):
     lazy = asyncio.create_task(_post(gw, {"model": "small.8k.15tps.lazy", "messages": MSG, "max_tokens": 10, "ignore_eos": True}, key="sk-local-batch"))
     await asyncio.sleep(0.2)
     snap = await _admin(gw)
-    assert snap["scheduler"]["queues"] == {"interactive": 1, "lazy": 1}
+    assert snap["scheduler"]["queues"] == {"interactive": 1, "lazy": 1, "burst": 0}
     ri = await interactive
     rl = await lazy
     assert ri.status_code == 200 and rl.status_code == 200

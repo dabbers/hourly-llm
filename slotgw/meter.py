@@ -41,7 +41,24 @@ CREATE TABLE IF NOT EXISTS requests (
   load_run TEXT,
   scenario TEXT,
   seed INTEGER,
-  delivered_tokens INTEGER
+  delivered_tokens INTEGER,
+  reservation_id TEXT
+);
+CREATE TABLE IF NOT EXISTS reservations (
+  run_id TEXT NOT NULL,
+  reservation_id TEXT PRIMARY KEY,
+  tenant TEXT NOT NULL,
+  shape TEXT NOT NULL,
+  slots INTEGER NOT NULL,
+  replicas TEXT,
+  t_start REAL NOT NULL,
+  t_end REAL,
+  price_per_second REAL NOT NULL,
+  served INTEGER NOT NULL,
+  timeouts INTEGER NOT NULL,
+  load_run TEXT,
+  scenario TEXT,
+  seed INTEGER
 );
 """
 
@@ -76,6 +93,7 @@ class RequestRecord:
     scenario: str | None = None
     seed: int | None = None
     delivered_tokens: int = 0  # tokens the client actually received (billed quantity)
+    reservation_id: str | None = None  # served from this reservation's slot (milestone 4)
 
     @property
     def ttft_ms(self) -> float | None:
@@ -93,6 +111,28 @@ class RequestRecord:
 _COLUMNS = [f.name for f in fields(RequestRecord)] + ["ttft_ms", "e2e_ms"]
 
 
+@dataclass
+class ReservationRecord:
+    """One standing reservation: billed slots x (t_end - t_start) x price_per_second (DESIGN 8)."""
+
+    reservation_id: str
+    tenant: str
+    shape: str
+    slots: int
+    t_start: float
+    price_per_second: float
+    replicas: str | None = None
+    t_end: float | None = None
+    served: int = 0
+    timeouts: int = 0
+    load_run: str | None = None
+    scenario: str | None = None
+    seed: int | None = None
+
+
+_RES_COLUMNS = [f.name for f in fields(ReservationRecord)]
+
+
 class Meter:
     """Append-only request log. Writes are tiny and synchronous; a lock makes it safe to call
     from the event loop and from worker threads."""
@@ -107,7 +147,8 @@ class Meter:
         self._conn.executescript(SCHEMA)
         have = {row[1] for row in self._conn.execute("PRAGMA table_info(requests)")}
         for col, typ in (
-            ("load_run", "TEXT"), ("scenario", "TEXT"), ("seed", "INTEGER"), ("delivered_tokens", "INTEGER")
+            ("load_run", "TEXT"), ("scenario", "TEXT"), ("seed", "INTEGER"), ("delivered_tokens", "INTEGER"),
+            ("reservation_id", "TEXT"),
         ):
             if col not in have:  # meter files written before milestone 2
                 self._conn.execute(f"ALTER TABLE requests ADD COLUMN {col} {typ}")
@@ -122,6 +163,15 @@ class Meter:
         cols = ["run_id"] + _COLUMNS
         values = [self.run_id] + [row[c] for c in _COLUMNS]
         sql = f"INSERT OR REPLACE INTO requests ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})"
+        with self._lock:
+            self._conn.execute(sql, values)
+            self._conn.commit()
+
+    def record_reservation(self, rec: ReservationRecord) -> None:
+        row = asdict(rec)
+        cols = ["run_id"] + _RES_COLUMNS
+        values = [self.run_id] + [row[c] for c in _RES_COLUMNS]
+        sql = f"INSERT OR REPLACE INTO reservations ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})"
         with self._lock:
             self._conn.execute(sql, values)
             self._conn.commit()

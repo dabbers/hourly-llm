@@ -1,6 +1,6 @@
 """OpenAI-compatible API. The OpenAI `model` field names the shape to run against
-(docs/DESIGN.md section 4.1). Milestone 3: auth, shape check, admission (ledgers + queue), pacing,
-billing, meter."""
+(docs/DESIGN.md section 4.1): auth, shape check (context bursts), admission (ledgers, reservations,
+queues), pacing with burst, billing, meter; admin endpoints for replicas and reservations."""
 
 from __future__ import annotations
 
@@ -15,11 +15,11 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import __version__
-from .admission import Hold, QueueTimeout, Scheduler, Unsellable
+from .admission import Hold, QueueTimeout, ReservationCapacity, Scheduler, Unsellable
 from .billing import Bill, bill_request
 from .clock import now
 from .config import Config, Shape, Tenant
-from .meter import Meter, RequestRecord
+from .meter import Meter, RequestRecord, ReservationRecord
 from .pacing import Pacer
 from .replicas.base import Replica, ReplicaError, TokenChunk, Usage
 
@@ -28,7 +28,12 @@ log = logging.getLogger("slotgw.api")
 _PASSTHROUGH_EXCLUDE = {"model", "shape", "stream", "stream_options", "priority"}
 PRIORITY_INTERACTIVE = 0  # vLLM --scheduling-policy priority: lower runs first
 PRIORITY_LAZY = 5
+PRIORITY_BURST = 10
 RETRY_AFTER_S = 5
+
+
+class BurstRevoked(Exception):
+    """The burst manager aborted this context burst for a guaranteed admission."""
 
 
 class GatewayState:
@@ -52,6 +57,12 @@ class GatewayState:
     def pacer_for(self, shape: Shape) -> Pacer:
         p = self.config.gateway.pacing
         return Pacer(shape.tps, p.bucket_depth_s, p.enabled)
+
+    def context_burst_cap(self, shape: Shape) -> int:
+        cap = self.config.gateway.burst.max_context_tokens
+        if cap > 0:
+            return cap
+        return max(s.max_context for s in self.config.shapes if s.model == shape.model)
 
 
 def openai_error(
@@ -104,6 +115,25 @@ def _prefill_done(state: GatewayState, hold: Hold | None) -> None:
         state.scheduler.mark_prefill_done(hold)
 
 
+def _reservation_record(state: GatewayState, res, shape: Shape) -> ReservationRecord:
+    factor = state.config.pricing.shape.reservation_price_factor
+    return ReservationRecord(
+        reservation_id=res.id,
+        tenant=res.tenant,
+        shape=shape.name,
+        slots=len(res.slots),
+        t_start=res.t_start,
+        t_end=res.t_end,
+        price_per_second=(shape.price_per_second or 0.0) * factor,
+        replicas=";".join(sorted({s.ledger.id for s in res.slots})),
+        served=res.served,
+        timeouts=res.timeouts,
+        load_run=res.tags.get("load_run"),
+        scenario=res.tags.get("scenario"),
+        seed=res.tags.get("seed"),
+    )
+
+
 def build_router() -> APIRouter:
     router = APIRouter()
 
@@ -116,6 +146,8 @@ def build_router() -> APIRouter:
             "run_id": state.meter.run_id,
             "pacing": state.config.gateway.pacing.model_dump(),
             "admission": state.config.gateway.admission.model_dump(),
+            "burst": state.config.gateway.burst.model_dump(),
+            "price_reference": state.config.pricing.token.reference,
         }
 
     @router.get("/admin/replicas")
@@ -153,8 +185,60 @@ def build_router() -> APIRouter:
         sched = None
         if state.scheduler:
             snap = state.scheduler.snapshot()
-            sched = {"queues": snap["queues"], "preemptions": snap["preemptions"], "timeouts": snap["timeouts"]}
+            sched = {k: v for k, v in snap.items() if k != "ledgers"}
         return {"replicas": out, "scheduler": sched}
+
+    @router.get("/admin/reservations")
+    async def admin_reservations(request: Request) -> dict[str, Any]:
+        state: GatewayState = request.app.state.gw
+        if state.scheduler is None:
+            return {"reservations": []}
+        return {"reservations": [r.snapshot() for r in state.scheduler.reservations.values()]}
+
+    @router.post("/admin/reservations")
+    async def admin_reserve(request: Request):
+        """Create a standing reservation: {tenant, shape, slots, load_run?, scenario?, seed?}."""
+        state: GatewayState = request.app.state.gw
+        if state.scheduler is None:
+            return openai_error(503, "admission control is off; reservations need ledgers", code="no_admission", type_="server_error")
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return openai_error(400, "request body is not valid JSON")
+        tenant = next((t for t in state.config.tenants if t.name == body.get("tenant")), None)
+        if tenant is None:
+            return openai_error(404, f"unknown tenant {body.get('tenant')!r}", code="tenant_not_found")
+        shape = state.config.shape(str(body.get("shape") or tenant.default_shape))
+        if shape is None:
+            return openai_error(404, f"unknown shape {body.get('shape')!r}", code="model_not_found")
+        try:
+            slots = int(body.get("slots", 1))
+        except (TypeError, ValueError):
+            return openai_error(400, "'slots' must be an integer")
+        tags = {k: body.get(k) for k in ("load_run", "scenario", "seed") if body.get(k) is not None}
+        try:
+            res = state.scheduler.reserve(tenant.name, shape, slots, body.get("id"), tags)
+        except Unsellable:
+            return openai_error(503, f"no replica can honour shape {shape.name}", code="shape_unsellable", type_="server_error")
+        except ReservationCapacity as e:
+            return openai_error(
+                409, f"{slots} x {shape.name} does not fit ({e.reason}; {e.placed} placed)", code="reservation_capacity", type_="server_error"
+            )
+        except ValueError as e:
+            return openai_error(400, str(e))
+        state.meter.record_reservation(_reservation_record(state, res, shape))
+        return JSONResponse(res.snapshot(), status_code=201)
+
+    @router.delete("/admin/reservations/{reservation_id}")
+    async def admin_unreserve(request: Request, reservation_id: str):
+        state: GatewayState = request.app.state.gw
+        if state.scheduler is None:
+            return openai_error(503, "admission control is off", code="no_admission", type_="server_error")
+        res = state.scheduler.unreserve(reservation_id)
+        if res is None:
+            return openai_error(404, f"no active reservation {reservation_id!r}", code="reservation_not_found")
+        state.meter.record_reservation(_reservation_record(state, res, res.shape))
+        return res.snapshot()
 
     @router.post("/admin/tokenize")
     async def admin_tokenize(request: Request):
@@ -254,26 +338,37 @@ def build_router() -> APIRouter:
             return openai_error(502, f"replica tokenize failed: {e.detail}", code="upstream_error", type_="server_error")
         rec.prompt_tokens = prompt_tokens
 
-        if prompt_tokens + max_tokens > shape.max_context:
-            rec.status, rec.http_status, rec.abort_reason = "refused", 429, "context_exceeds_shape"
-            state.meter.record(rec)
-            return openai_error(
-                429,
-                f"prompt ({prompt_tokens}) + max_tokens ({max_tokens}) exceeds shape {shape.name} context ({shape.max_context})",
-                code="context_exceeds_shape",
-                type_="shape_error",
-            )
+        burst_ctx = False
+        need = prompt_tokens + max_tokens
+        if need > shape.max_context:
+            bs = state.config.gateway.burst
+            if state.scheduler is not None and bs.enabled and bs.context and not shape.lazy and need <= state.context_burst_cap(shape):
+                burst_ctx = True  # context burst: free KV beyond the shape, revocable (DESIGN 7)
+                rec.class_ctx = "burst"
+            else:
+                rec.status, rec.http_status, rec.abort_reason = "refused", 429, "context_exceeds_shape"
+                state.meter.record(rec)
+                return openai_error(
+                    429,
+                    f"prompt ({prompt_tokens}) + max_tokens ({max_tokens}) exceeds shape {shape.name} context ({shape.max_context})",
+                    code="context_exceeds_shape",
+                    type_="shape_error",
+                )
 
         payload = {k: v for k, v in body.items() if k not in _PASSTHROUGH_EXCLUDE}
         payload["max_tokens"] = max_tokens
-        payload["priority"] = PRIORITY_LAZY if shape.lazy else PRIORITY_INTERACTIVE
+        payload["priority"] = PRIORITY_BURST if burst_ctx else (PRIORITY_LAZY if shape.lazy else PRIORITY_INTERACTIVE)
 
+        pacer = state.pacer_for(shape)
         hold: Hold | None = None
         if state.scheduler is not None:
             admission = state.config.gateway.admission
             preemptable = shape.lazy and not stream and admission.lazy_preempt == "requeue"
             try:
-                hold = await state.scheduler.admit(request_id, shape, prompt_tokens, preemptable=preemptable)
+                hold = await state.scheduler.admit(
+                    request_id, shape, prompt_tokens, tenant=tenant.name, preemptable=preemptable,
+                    kv_tokens=need if burst_ctx else None, burst_ctx=burst_ctx,
+                )
             except Unsellable:
                 rec.status, rec.http_status, rec.abort_reason = "refused", 503, "shape_unsellable"
                 state.meter.record(rec)
@@ -293,10 +388,12 @@ def build_router() -> APIRouter:
                 )
             replica = state.replica_by_id(hold.ledger.id)
             rec.replica = replica.id
+            rec.reservation_id = hold.reservation_id if hold.reserved else None
+            hold.pacer = pacer
+            state.scheduler.dispatch()  # lends this request its burst rate
         rec.t_admitted = now()
         rec.queued_ms = (rec.t_admitted - rec.t_arrival) * 1000.0
         created = int(rec.t_admitted)
-        pacer = state.pacer_for(shape)
 
         if stream:
             return StreamingResponse(
@@ -337,14 +434,18 @@ def _slotgw_dict(rec: RequestRecord, shape: Shape, pacer: Pacer, bill: Bill | No
         "request_id": rec.request_id,
         "shape": shape.name,
         "replica": rec.replica,
+        "class_ctx": rec.class_ctx,
+        "reservation_id": rec.reservation_id,
         "ttft_ms": rec.ttft_ms,
         "queued_ms": rec.queued_ms,
         "throttled_ms": rec.throttled_ms,
         "preempted_runs": rec.preempted_runs,
+        "burst_tokens": rec.output_tokens_burst,
+        "burst_rate_max": round(pacer.burst_rate_max, 2),
         "pacing": pacer.enabled,
     }
     if bill is not None:
-        d["billing"] = bill.as_dict()
+        d["billing"] = {**bill.as_dict(), "reserved": rec.reservation_id is not None}
     return d
 
 
@@ -352,10 +453,14 @@ def _finalize(rec: RequestRecord, usage: Usage | None, counted: int, pacer: Pace
     rec.output_tokens = usage.completion_tokens if usage else counted
     if usage and usage.prompt_tokens:
         rec.prompt_tokens = usage.prompt_tokens
-    rec.output_tokens_guaranteed = rec.output_tokens  # milestone 3: everything is guaranteed
-    rec.output_tokens_burst = 0
+    rec.output_tokens_burst = min(rec.output_tokens, pacer.burst_tokens)
+    rec.output_tokens_guaranteed = rec.output_tokens - rec.output_tokens_burst
     rec.throttled_ms = pacer.throttled_ms
     rec.delivered_tokens = max(0, delivered)
+
+
+def _revoked(rec: RequestRecord) -> None:
+    rec.status, rec.http_status, rec.abort_reason, rec.revoked = "revoked", 503, "burst_revoked", True
 
 
 async def _consume_engine(
@@ -422,6 +527,16 @@ async def _complete_response(
             state.meter.record(rec)
             return openai_error(502, f"replica error: {e.detail}", code="upstream_error", type_="server_error")
         except asyncio.CancelledError:
+            if hold is not None and hold.revoked:
+                rec.t_engine_done = now()
+                _finalize(rec, None, progress["counted"], pacer, 0)
+                rec.wasted_tokens += progress["counted"]
+                _revoked(rec)
+                state.meter.record(rec)
+                return openai_error(
+                    503, "context burst revoked: a guaranteed request needed the capacity", code="burst_revoked",
+                    type_="server_error", headers={"Retry-After": str(RETRY_AFTER_S)},
+                )
             if hold is not None and hold.preempted and state.scheduler is not None:
                 # Policy `requeue`: the run is discarded unbilled and the request re-enters at the
                 # head of the lazy queue (docs/DESIGN.md 4.1 step 9).
@@ -432,7 +547,7 @@ async def _complete_response(
                 pacer = state.pacer_for(shape)
                 try:
                     hold = await state.scheduler.admit(
-                        rec.request_id, shape, rec.prompt_tokens, preemptable=True, front=True
+                        rec.request_id, shape, rec.prompt_tokens, tenant=rec.tenant, preemptable=True, front=True
                     )
                 except QueueTimeout as e:
                     rec.status, rec.http_status, rec.abort_reason = "refused", 503, f"capacity:{e.reason}"
@@ -444,6 +559,7 @@ async def _complete_response(
                     )
                 replica = state.replica_by_id(hold.ledger.id)
                 rec.replica = replica.id
+                hold.pacer = pacer
                 rec.t_admitted = now()  # the billed run starts now; everything before is unbilled
                 rec.queued_ms = (rec.t_admitted - rec.t_arrival) * 1000.0
                 continue
@@ -498,7 +614,7 @@ async def _stream_response(
     usage: Usage | None = None
     finish: str | None = None
     recorded = False
-    queue: asyncio.Queue[TokenChunk | ReplicaError | None] = asyncio.Queue()
+    queue: asyncio.Queue[TokenChunk | ReplicaError | BurstRevoked | None] = asyncio.Queue()
 
     async def produce() -> None:
         nonlocal produced, usage, finish
@@ -518,6 +634,10 @@ async def _stream_response(
             rec.t_engine_done = now()
             await queue.put(e)
         except asyncio.CancelledError:
+            if hold is not None and hold.revoked:
+                rec.t_engine_done = now()
+                await queue.put(BurstRevoked())
+                return
             raise
         except Exception as e:  # noqa: BLE001 - anything else is an upstream failure to the client
             rec.t_engine_done = now()
@@ -526,6 +646,8 @@ async def _stream_response(
             _release(state, hold)
 
     producer = asyncio.create_task(produce())
+    if hold is not None:
+        hold.task = producer
 
     def chunk_obj(delta: dict[str, Any], finish_reason: str | None, delivered_tokens: int | None = None) -> dict[str, Any]:
         obj: dict[str, Any] = {
@@ -545,7 +667,7 @@ async def _stream_response(
             item = await queue.get()
             if item is None:
                 break
-            if isinstance(item, ReplicaError):
+            if isinstance(item, (ReplicaError, BurstRevoked)):
                 raise item
             if item.text or item.n_tokens:
                 t_now = now()
@@ -569,6 +691,14 @@ async def _stream_response(
         rec.status = "ok"
         state.meter.record(rec)
         recorded = True
+    except BurstRevoked:
+        _finalize(rec, usage, produced, pacer, delivered)
+        rec.wasted_tokens = max(0, produced - delivered)
+        _revoked(rec)
+        state.meter.record(rec)
+        recorded = True
+        yield _sse({"error": {"message": "context burst revoked: a guaranteed request needed the capacity", "type": "server_error", "code": "burst_revoked"}})
+        yield "data: [DONE]\n\n"
     except ReplicaError as e:
         rec.status, rec.http_status, rec.abort_reason = "upstream_error", 502, e.detail
         _finalize(rec, usage, produced, pacer, delivered)

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from slotgw.app import create_app
-from slotgw.config import ReplicaConfig, load_config
+from slotgw.config import BurstSettings, ReplicaConfig, load_config
 from slotgw.meter import Meter
 from slotgw.replicas.fake_server import create_fake_app
 
@@ -39,7 +39,9 @@ def gateway(fake_server, meter_path):
                     id="fake-0", kind="fake", url=fake_server.url, model="small", curve=FAKE_CURVE,
                     slot_plan={"small.8k.30tps": 8},
                 )
-            ]
+            ],
+            # the pacing tests measure delivery at the shape's rate; burst would lend the fake engine's spare rate
+            "gateway": config.gateway.model_copy(update={"burst": BurstSettings(enabled=False)}),
         }
     )
     meter = Meter(meter_path, run_id="test")

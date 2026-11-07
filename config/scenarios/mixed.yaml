@@ -18,6 +18,7 @@ tenants:
     shape: small.8k.30tps
     profile: {kind: chat, turns: [3, 10], first_user_tokens: [200, 800], user_tokens_per_turn: [200, 800], output_tokens: [50, 300], think_s: [5, 30]}
     arrivals: {kind: diurnal, rate_per_min: 4.5}
+    reservation: {slots: 4}         # p95 of its measured occupancy (ASSUMPTIONS.md "Reservation what-if"); --no-reservations for on-demand
   - name: agent                     # agentic loops: streamed, context grows per step, bursty sessions
     api_key: sk-local-agent
     shape: small.8k.60tps
@@ -28,6 +29,7 @@ tenants:
     shape: small.16k.30tps
     profile: {kind: notetaker, prompt_tokens: [3000, 8000], output_tokens: [150, 400]}
     arrivals: {kind: hourmark, per_mark: 8, sigma_s: 120, background_per_min: 0.5}
+    reservation: {slots: 1}
   - name: batch                     # closed-loop batch work on the lazy shape
     api_key: sk-local-batch
     shape: small.8k.15tps.lazy

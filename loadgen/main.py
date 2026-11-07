@@ -23,6 +23,7 @@ def main() -> None:
     p.add_argument("--config-dir", default=os.environ.get("SLOTGW_CONFIG_DIR", "config"))
     p.add_argument("--load-run-id", default=None, help="default: <scenario>[-label]-s<seed>-<timestamp>")
     p.add_argument("--label", default=None, help="tag for the gateway settings under test (e.g. oc1.5); keeps runs apart in the report")
+    p.add_argument("--no-reservations", action="store_true", help="ignore the scenario's reservation specs (on-demand only)")
     p.add_argument("--plan-only", action="store_true", help="print the plan as JSON and exit")
     p.add_argument("--log-level", default=os.environ.get("LOADGEN_LOG_LEVEL", "info"))
     args = p.parse_args()
@@ -43,6 +44,7 @@ def main() -> None:
         config_dir=args.config_dir,
         scenario_path=args.scenario,
         label=args.label,
+        reservations=not args.no_reservations,
     )
     meta = asyncio.run(runner.run())
     print(json.dumps({k: meta[k] for k in ("load_run", "gateway_run_id", "plan_digest", "counters", "elapsed_s")}, indent=1))

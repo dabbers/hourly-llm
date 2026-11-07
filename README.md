@@ -47,8 +47,9 @@ docker compose run --rm report runs/<run_id>
 
 `<run_id>` is printed by the load generator (`gateway_run_id`) and by `GET /healthz`. The report
 (`runs/<run_id>/report/report.html` plus CSVs) compares per-token and shape bills (billed, uncapped,
-bound), their variance across seeds, latency, throttled time, floor violations, a timeline and
-prefill interference. `config/scenarios/smoke.yaml` is a two-minute version of the same workload.
+bound), their variance across seeds, latency, throttled time, floor violations, a timeline,
+prefill interference, bursting (burst tokens, discount, revocations), reservations and their bills,
+replica fill and break-even, market reference prices and margin, and a reservation what-if. `config/scenarios/smoke.yaml` is a two-minute version of the same workload.
 
 Settings that are worth varying per run are environment overrides, so one run differs from the next
 by a prefix, and `--label` keeps them apart in the report:
@@ -61,11 +62,26 @@ SLOTGW_TPS_OVERCOMMIT=1.5 docker compose --profile gpu up -d gateway-gpu
 docker compose run --rm loadgen --scenario config/scenarios/mixed.yaml --seed 1 --label oc1.5
 ```
 
+A scenario can give tenants standing reservations (`reservation: {slots: 4}` in `mixed.yaml`); the
+load generator creates them through `POST /admin/reservations` at the start (or per named phase) and
+releases them at the end. `--no-reservations` runs the same scenario on demand, so bursting and
+reservations can be switched per run:
+
+```bash
+SLOTGW_BURST=false docker compose --profile gpu up -d gateway-gpu
+```
+
+```bash
+docker compose run --rm loadgen --scenario config/scenarios/mixed.yaml --seed 1 --no-reservations --label burstoff
+```
+
 | Variable | Default | What |
 |---|---|---|
 | `SLOTGW_TPS_OVERCOMMIT` | 1.0 | seats = calibrated `n_max` × this (the vCPU lever) |
 | `SLOTGW_LAZY_PREEMPT` | never | `requeue` lets an interactive request evict a running lazy (complete-mode) request |
 | `SLOTGW_MAX_PREFILL_TOKENS` | 0 | cap on prompt tokens prefilling at once per replica; 0 = off |
+| `SLOTGW_BURST` | true | burst manager: lend idle step rate to running requests and admit over-context requests into free KV |
+| `SLOTGW_BURST_REVOKE` | grace | `finish` / `grace` (15 s) / `abort`: what happens to a context burst when a guaranteed request needs its capacity |
 | `SLOTGW_PRICE_REFERENCE` | basket-3b | per-token market reference from `config/price_references.yaml` (`gpt-4o-mini`, `llama-3.2-3b`, …, or `custom`); shape prices derive from it |
 | `SLOTGW_PROMPT_USD_PER_MILLION` | auto | prefill charge added to shape bills; auto = the reference's input price, 0 = runtime only |
 | `VLLM_MAX_NUM_BATCHED_TOKENS` | 128 | vLLM prefill chunk size (vLLM's own default is 2048); smaller = less decode interference |
@@ -90,7 +106,7 @@ Knobs: `config/shapes.yaml` (catalog; prices derive from the active reference un
 `config/tenants.yaml` (API keys are local test values), `config/pricing.yaml` (active price reference,
 GPU cost, margin targets, prefill charge), `config/price_references.yaml` (OpenRouter snapshot),
 `config/gateway.yaml`
-(pacing, admission margins, overcommit, lazy share and preemption, prefill cap), `config/replicas.yaml`
+(pacing, admission margins, overcommit, lazy share and preemption, prefill cap, burst manager), `config/replicas.yaml`
 (replica URLs, calibration curve, slot plan), `config/scenarios/*.yaml` (profiles, arrivals, phases).
 
 ## Layout
@@ -116,8 +132,11 @@ Docker Desktop, that is a no-op.
 
 ## Status
 
-Milestones 1–3 built and verified on the local GPU: vLLM + gateway + meter, per-request pacing +
+Milestones 1–4 built and verified on the local GPU: vLLM + gateway + meter, per-request pacing +
 seeded load generator + report, admission control + multi-replica scheduler + prefill-interference
-mitigation (measured defaults: 128-token prefill chunks, overcommit 1.0, lazy requeue off). Next:
-milestone 4 (burst manager, bursting on/off comparison, `docs/RESULTS.md`). See `docs/DESIGN.md`
-section 11 and `docs/ASSUMPTIONS.md` "Milestone 3 measurements".
+mitigation (measured defaults: 128-token prefill chunks, overcommit 1.0, lazy requeue off), the
+burst manager (tps and context bursts, revocation policies) and reservations as standing holds,
+with bursting on/off and reservation runs in the report. The answers to the design questions are in
+`docs/RESULTS.md`; the measurements behind them in `docs/ASSUMPTIONS.md` ("Milestone 4
+measurements"); what the runs showed should change next (context bursts at the slowest tps class, a
+lending reserve, a reservation price above parity) is in `docs/DESIGN.md` sections 11–13.

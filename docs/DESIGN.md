@@ -355,6 +355,36 @@ Metrics: burst tokens by kind, revocations (tps throttled, bursts refused, burst
 admissions delayed by bursts, and **floor violations** (any 1 s window where a guaranteed request with a
 non-empty buffer received < `tps`). `burst.enabled=false` turns the whole module off.
 
+Implementation (milestone 4, `slotgw/admission.py`, `slotgw/pacing.py`, `slotgw/api.py`):
+
+- **tps burst** is computed, not negotiated: with n requests on the engine every stream gets
+  `step_rate(n)` tokens/s, so each running request is lent `step_rate(n) × (1 − tps_margin) − tps`
+  on every ledger change and every tick (`burst.tps`). The pacer has a second, revocable bucket at
+  that rate (one bucket depth of credit when the rate changes, never banked); tokens draw from the
+  guaranteed bucket first and the burst bucket pays the rest, which is how `output_tokens_burst` is
+  counted. Revocation is recomputation: a new admission raises n, lowers the lent rate, and the next
+  chunk is paced accordingly. The engine was generating at that rate anyway, so the burst costs no
+  GPU time; under per-request billing it shortens the bill (the **burst discount**, bound − billed).
+- **context burst** (`burst.context`): a request whose prompt + `max_tokens` exceed its shape's
+  context, up to `burst.max_context_tokens` (default the model's largest shape), is admitted into
+  free KV with vLLM priority 10, from a third queue served only when no interactive or lazy request
+  waits, and metered as `class_ctx = burst`. When a guaranteed admission cannot be placed, the
+  scheduler marks the youngest context bursts whose capacity it needs: `abort` cancels them on the
+  next tick, `grace` after `grace_s`, `finish` never. A revoked burst is unbilled, metered as
+  `revoked` with its wasted tokens, and answered `503 burst_revoked` (an error chunk on a stream).
+- **Reservations** (`POST/DELETE /admin/reservations`): `slots` standing holds of a shape, placed by
+  the usual scoring, all or nothing (`409 reservation_capacity`). A slot counts as a seat and the
+  shape's KV whether idle or occupied, so a 60 tps reservation caps its replica for its whole life;
+  idle slots are not engine streams, so they neither lower the step rate nor receive burst. A
+  request from the tenant on the reserved shape (or a smaller one nested in it) takes a free slot at
+  once, otherwise waits in the reservation's own queue up to `max_queue_s`
+  (`503 capacity:reservation_busy`; `admission.reservation_spill` lets it compete on demand
+  instead). Ending a reservation frees idle slots at once and occupied ones when their request
+  finishes. The meter's `reservations` table holds the standing bill; requests carry
+  `reservation_id`, and their per-request shape bill is reported as what on-demand would have cost.
+  The load generator creates reservations from the scenario (`reservation: {slots, shape?, phases?}`)
+  and releases them at the end; `--no-reservations` runs the same scenario on demand.
+
 ---
 
 ## 8. Meter and billing
@@ -417,6 +447,27 @@ bounds the runtime part). The milestone-2 GPU run showed why: prefill is GPU tim
 rate than decode, and a `price_per_second` derived from the output-token reference leaves it free.
 The default is derived from measured cost (ASSUMPTIONS.md "Prefill pricing"); 0 restores
 runtime-only bills. The report shows the prefill component of each bill separately.
+
+Reservation tier (what-if, post-milestone 3): the other way to sell a shape is a standing
+reservation of N slots for a period, billed slot-seconds whether used or not. Shapes, pacing,
+ledgers and the meter are unchanged; what changes is the billing unit (no cap, no burst discount,
+floor violations become SLA credits), admission (a reserved tenant is never refused for capacity,
+so placement happens at reservation time and a reservation is a long-lived hold on a replica), where
+idle risk sits (sold-but-idle capacity is the customer's cost and the provider's resale pool for
+burst and lazy work), and what overcommit means (overbooking on under-use, not a physics bet). The
+report computes it from measured traffic before anything is built (`reservations.csv`, §10): per
+tenant, the reservation sized at the p50 / p95 / max of its queue-free occupancy, the share of
+requests that would still wait, used fill, idle slot-hours, the bill against the per-request and
+per-token bills, and the GPU cost of the reserved slice with the fastest shapes weighted by the seats
+they displace. Results on the milestone-3 runs: ASSUMPTIONS.md "Reservation what-if".
+
+Reservation billing (milestone 4, built): a reservation bills `slots × (t_end − t_start) ×
+price_per_second × pricing.shape.reservation_price_factor` (default 1, i.e. the shape's parity
+price; the what-if says a sold slot needs more than parity to cover its cost share), no prefill
+charge, whether the slots are used or not. Requests served from a reservation are not billed per
+request; the report shows their per-request bill as the on-demand alternative and the tenant's
+total as reservation plus on-demand bills for requests outside it (`reservation_bills.csv`, §7
+for the mechanics).
 
 Token classification: each delivered token draws from the guaranteed bucket first; if that bucket is
 empty and burst rate is lent, the token is burst. Prompt tokens are guaranteed if the request is within
@@ -500,6 +551,19 @@ reference in `price_references.yaml`, × GPU cost, × shape revenue, gross margi
 price at the measured and the target utilisation; and the per-token prices this provider would have
 to list at each margin target (§8).
 
+Reservation what-if (`reservations.csv`): per tenant and run, reservations sized at the p50 / p95 /
+max of the tenant's queue-free occupancy, with would-queue share, used fill, idle slot-hours, the
+reservation bill against the per-request shape and per-token bills, the GPU cost share of the
+reserved slice (capacity-weighted by the calibration curve), and the slot price per hour at
+break-even and at per-token parity (§8).
+
+Bursting (milestone 4): per run and per tenant, burst tokens and their share of output, the burst
+discount, context bursts admitted and revoked, lent rate (sampled), floor violations, queue, TTFT
+and e2e latency, so bursting-on and bursting-off runs of the same seed read side by side.
+Reservations (`reservation_bills.csv`): each standing reservation's bill, served requests, timeouts,
+queue time on its own slots, used fill and idle slot-hours, and the tenant's total against the
+per-request shape and per-token bills.
+
 ---
 
 ## 11. Milestones
@@ -521,6 +585,18 @@ never over a ledger) and by the GPU runs (every admission replayed against the c
 stayed within the seat ceiling; vLLM preemptions 0). Not done as written: the combined 1 real + 3
 fake replica run; the GPU runs used the single real replica. Measured outcomes and the defaults they
 set (chunk 128, overcommit 1.0, `requeue` off) are in ASSUMPTIONS.md "Milestone 3 measurements".
+M4 done (2026-11-07): tps burst, context burst with the three revocation policies, reservations
+as standing holds with their own queue and billing, scenario reservations in the load generator,
+bursting and reservation sections in the report; unit and HTTP tests with fake replicas cover
+lending, classification, revocation order and reservation semantics; five GPU runs of the mixed
+scenario (burst off / on with `grace` / on with `abort`, each on demand, and burst on / off with
+reservations) in ASSUMPTIONS.md "Milestone 4 measurements", the answers to Q1–Q4 in
+docs/RESULTS.md. Acceptance met for burst share, floor violations and utilisation with and without
+bursting; "revocation under injected guaranteed load restores shape rates within one tick" is met
+by the fake-replica tests only: on the GPU no context burst was ever revoked, because a context
+burst that keeps the 60 tps shape's rate could not be placed (34 of 37 timed out unserved). That
+result, the floor-violation cost of lending and the reservation lockout of the fast shape are
+recorded as post-M4 decisions in §12 and risks in §13; none of the three fixes is built.
 
 ---
 
@@ -553,6 +629,14 @@ set (chunk 128, overcommit 1.0, `requeue` off) are in ASSUMPTIONS.md "Milestone 
 | Slot plan (M3) | `replicas.yaml` `slot_plan` (e.g. 8 × small.8k.30tps) is the provider's sellable-capacity accounting for fill rate and break-even | Admission is by resources, so the plan is a reporting choice, not a constraint; the report falls back to the current config for runs whose snapshot has none. |
 | Prefill price (M3) | `pricing.shape.prompt_usd_per_million`: $0.10 per 1M prompt tokens in the milestone-3 runs (measured prefill cost × the decode markup); default now `auto` = the active reference's input price | Prefill was unpriced under shapes (M2 finding); parity with the market's input price once a market reference exists; the report itemises it. |
 | Price reference (post-M3) | `config/price_references.yaml` snapshotted from OpenRouter by `slotgw-fetch-prices`; default `basket-3b` (median of Llama 3.2 3B, Gemma 3 4B, Ministral 3B, Qwen 2.5 7B), `gpt-4o-mini` kept as a named alternative; shape prices derive from the active reference | User: compare against OpenRouter's prices and find where we would have to price. Qwen2.5-3B is not listed, so a basket of 3B-class models; a snapshot keeps runs reproducible. |
+| Reservation tier (post-M3) | Analysed as a what-if from measured per-tenant occupancy in the report before building it; the gateway stays per-request until milestone 4 decides | User raised reservation billing (pay for the allocation, used or not). The data answers whether it beats per-request for these profiles without a redesign; if built, it is a standing hold in the ledger, not a new shape. |
+| Reservations (M4) | Standing holds in the ledger: a slot is a seat and the shape's KV whether idle or occupied; the tenant's requests take a free slot at once and queue only on their own slots (no spill by default); all-or-nothing placement; billed slots × seconds at the shape price × `reservation_price_factor`, no prefill charge | User chose milestone 4 with reservations. Idle slots that still count as seats is what makes the reservation a guarantee; counting them out of the engine's stream count is what lets burst reuse them. |
+| tps burst rule (M4) | Lent rate = `step_rate(n_engine) × (1 − tps_margin) − tps` per running request, recomputed on every ledger change and tick; one bucket depth of credit, never banked | The engine gives every stream the same rate, so the spare is exact and free; recomputation is the revocation. No max-min sharing needed on a homogeneous engine. |
+| Context burst revocation (M4) | Three queues (interactive, lazy, burst); youngest bursts marked when a guaranteed admission cannot be placed; `grace` (15 s) default, `abort` and `finish` as knobs (`SLOTGW_BURST_REVOKE`) | As proposed in §7; a revoked burst is unbilled and answered `503 burst_revoked`. |
+| Context burst tps class (post-M4, not built) | Measured: a context burst keeps its shape's tps, so for the 60 tps shape it needs the replica at ≤ 1 other hold and 34 of 37 waited 30 s and were refused, a worse outcome than the instant `429` it replaced; 0 ran under `abort`, 0 revoked under either policy. Recommended change: admit context bursts as best effort at the slowest tps class (a request with no floor should take the cheapest seat) and cap the burst queue's wait at a few seconds | ASSUMPTIONS.md "Milestone 4 measurements"; RESULTS.md Q4. Until then the revocation policies are exercised only by the fake-replica tests. |
+| Lending reserve (post-M4, not built) | Measured: lending the whole spare rate raised floor violations 57 → 67 (agent 18% → 28%, chat 14% → 18%) because the surplus that used to bank in the pacer's buffer is delivered at once, so a prefill stall lands on an empty buffer. Candidate knob: lend only the rate above a reserve kept banked | ASSUMPTIONS.md; RESULTS.md Q4. The burst discount is 4% of the bill (30% of its runtime part), so the provider's cost is small; the tenant's cost is the floor. |
+| Reservation price (post-M4) | `reservation_price_factor` stays 1.0 in config so the report shows the parity case; measured: chat paid 0.31× its per-request bill at 21–24% used fill, the reserved 5-of-8-seat slice earned 0.45× its cost share, revenue per run fell to 0.35–0.48× GPU cost. A sold slot needs ≥ 2.3× parity to cover its cost share ($0.0375 per 30 tps slot-hour on a $0.30 card) and ≈ 3.2× to match chat's per-request bill | ASSUMPTIONS.md; RESULTS.md Q1/Q2. The what-if's window ($0.038 to $0.05–0.11 per slot-hour) was confirmed; where in it is a product decision. |
+| Reservations and the fast shape (post-M4) | Idle reserved slots stay seats (that is the guarantee); measured consequence: five 30 tps slots locked the 60 tps shape out for the whole run (38 / 38 refused, 18 of them with nothing running). Reservations and the 60 tps shape do not share a replica on this card; separate replicas, or do not sell 60 tps here | RESULTS.md Q3. Counting idle slots out of a faster shape's ceiling would break the reservation when it fills. |
 | Margin basis (post-M3) | Gross margin on revenue at 0 / 25 / 50% and a 70% target utilisation, both config knobs; list prices from measured cost per output-equivalent token | Providers' margins are not public, so a sweep instead of a guess; the two utilisation bases bracket the phase-2 question (a fuller plan or a cheaper card). |
 | Run-time knobs (M3) | `SLOTGW_TPS_OVERCOMMIT`, `SLOTGW_LAZY_PREEMPT`, `SLOTGW_MAX_PREFILL_TOKENS`, `SLOTGW_PROMPT_USD_PER_MILLION`, `SLOTGW_PRICE_REFERENCE`, `VLLM_MAX_NUM_BATCHED_TOKENS` as environment overrides | Lets `docker compose` runs vary one setting per run without editing config; the load generator's `--label` keeps them apart in the report. |
 | Prefill chunk (M3, measured) | `VLLM_MAX_NUM_BATCHED_TOKENS` default 128 | 6× the concurrent decode rate during a 6k prefill for +15% prefill time; no practical chunk size holds a 30 tps floor on this card (ASSUMPTIONS.md). |
@@ -568,10 +652,13 @@ set (chunk 128, overcommit 1.0, `requeue` off) are in ASSUMPTIONS.md "Milestone 
 - Desktop apps share the GPU (WDDM). Free memory varies run to run; the calibration script records it, and runs should close LM Studio.
 - Prefill interference (A4) is not noise on this card, it is a pause: one long prompt stalls every running stream for seconds. Milestone 3 measured the chunk-size mitigation (ASSUMPTIONS.md): 128-token chunks lift the stalled stream from 1.7 to 9.8 tok/s, still under every shape sold, so a 30 tps floor is honest only while no long prompt is prefilling. With admission on, 19% of chat streams that overlap a long prefill still violate (58% before); the provider carries it through the cap.
 - Revenue at a market reference charges every prompt token at the input price, but vLLM serves most of a multi-turn agent's history from the prefix cache, and providers that publish cache-read prices discount them (Ministral 3B 90%, gpt-4o-mini 50% on OpenRouter). The meter does not record cached tokens yet, so the market revenue, margin and list prices are upper bounds for prompt-heavy traffic; recording `cached_tokens` from vLLM's usage and pricing cache hits separately is the fix.
-- Shape nesting makes the fastest shape sold the capacity cost of the whole replica: `n_max(60)` = 2 at 6k context, so one agent request idles six of eight 30 tps slots for its lifetime (ASSUMPTIONS.md, M3). Selling 60 tps on this card needs its own price or its own replica (Q3, milestone 4).
+- The lent burst rate comes from the calibration curve, not from the engine's live rate: during a long prefill the engine is slower than the curve and the burst bucket simply waits for tokens (no harm), but the `burst_rate_lent` samples overstate what was delivered; `output_tokens_burst` is the delivered truth.
+- Shape nesting makes the fastest shape sold the capacity cost of the whole replica: `n_max(60)` = 2 at 6k context, so one agent request idles six of eight 30 tps slots for its lifetime (ASSUMPTIONS.md, M3), and the rule cuts both ways: two or more standing reservation slots of any shape lock the 60 tps shape out entirely (M4: 38 / 38 agent requests refused with reservations on). Selling 60 tps on this card needs its own replica or its own price, and never a replica shared with reservations (RESULTS.md Q3).
+- Context bursts carry their shape's tps into the seat check, so a burst of a fast shape is nearly unplaceable on a busy replica and waits the full queue time before failing (M4: 34 of 37 agent context bursts refused after 30 s, none revoked). As built, context burst is a worse experience than the `429` it replaces for the 60 tps shape; the fix is to admit bursts at the slowest tps class with a short queue (§12).
+- Lending the whole spare step rate removes the pacer's banked surplus, so prefill stalls hit a guaranteed stream harder with burst on than off (M4: floor violations 57 → 67, agent streams overlapping a long prefill 27% → 41%). A lending reserve is the mitigation (§12); until then burst on trades a few points of floor compliance for 12–15% more throughput.
 - Wall-clock billing needs honest timestamps: queue time must be excluded and the cap needs TTFT, so arrival, admission, first-token, engine-done and delivered are separate meter columns.
 - Prefill is GPU time that the placeholder shape prices do not cover: `price_per_second` was derived from the output-token reference, so a long prompt bills only its TTFT seconds at the decode rate. Measured in the milestone-2 GPU run (ASSUMPTIONS.md): 1.9M prompt tokens vs 140k output tokens, shape revenue a quarter of per-token revenue, roughly GPU cost. Milestone 3 added `shape.prompt_usd_per_million` ($0.10, a placeholder derived from measured prefill cost): with it, shape revenue is 77% of per-token and 2.7× GPU cost in the admission-on runs, and prefill is 70% of the shape bill. The runtime price alone ($0.24 per hour at 28% fill) does not pay for the GPU ($0.30 per hour), so milestone 4's comparison hinges on this price as much as on time-slicing.
-- Under wall-clock billing every tps burst is revenue given away; the report quantifies it so the provider can decide how much latency goodwill to buy.
+- Under wall-clock billing every tps burst is revenue given away; the report quantifies it so the provider can decide how much latency goodwill to buy. Measured (M4): $0.006–0.007 per run, 4% of the bill at parity prices with the prefill charge, 30% of the runtime part; on decode-heavy traffic the discount would be the larger share.
 - Python gateway overhead at a few hundred tokens/s across tens of streams is fine; at phase-2 scale (3–4 replicas) still fine; beyond that a Go rewrite would be the answer.
 
 ---

@@ -5,13 +5,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from slotgw.billing import per_token_usd, shape_seconds
+from slotgw.calibration import profile_for
 from slotgw.config import Config, PriceReference, load_config
 
 LONG_PREFILL_TOKENS = 3000  # a prompt at least this long counts as a "long prefill" (DESIGN A4)
@@ -30,6 +31,9 @@ class LoadRun:
     samples: pd.DataFrame | None
 
 
+RESERVATION_COLUMNS = ["run_id", "reservation_id", "tenant", "shape", "slots", "replicas", "t_start", "t_end", "price_per_second", "served", "timeouts", "load_run", "scenario", "seed"]
+
+
 @dataclass
 class RunData:
     run_dir: Path
@@ -38,12 +42,27 @@ class RunData:
     loads: list[LoadRun]
     config: Config  # the run's own config snapshot when it has one
     fallback_config: Config | None = None  # the --config-dir config, for settings the snapshot lacks
+    reservations: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=RESERVATION_COLUMNS))
 
 
 def read_meter(path: Path) -> pd.DataFrame:
     conn = sqlite3.connect(str(path))
     try:
-        return pd.read_sql_query("SELECT * FROM requests ORDER BY t_arrival", conn)
+        df = pd.read_sql_query("SELECT * FROM requests ORDER BY t_arrival", conn)
+    finally:
+        conn.close()
+    if "reservation_id" not in df:  # meter files written before milestone 4
+        df["reservation_id"] = None
+    return df
+
+
+def read_reservations(path: Path) -> pd.DataFrame:
+    conn = sqlite3.connect(str(path))
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "reservations" not in tables:
+            return pd.DataFrame(columns=RESERVATION_COLUMNS)
+        return pd.read_sql_query("SELECT * FROM reservations ORDER BY t_start", conn)
     finally:
         conn.close()
 
@@ -79,7 +98,10 @@ def load_run_dir(run_dir: str | Path, config_dir: str | Path | None = None) -> R
     if config is None:
         raise FileNotFoundError(f"no config snapshot in {run_dir} and no config at {fallback_dir}")
     run_id = str(df["run_id"].iloc[0]) if not df.empty else run_dir.name
-    return RunData(run_dir=run_dir, run_id=run_id, requests=df, loads=loads, config=config, fallback_config=fallback)
+    return RunData(
+        run_dir=run_dir, run_id=run_id, requests=df, loads=loads, config=config, fallback_config=fallback,
+        reservations=read_reservations(meter),
+    )
 
 
 def enrich(df: pd.DataFrame, config: Config) -> pd.DataFrame:
@@ -98,7 +120,10 @@ def enrich(df: pd.DataFrame, config: Config) -> pd.DataFrame:
     ok = df["status"] == "ok"
     df["ok"] = ok
     df["refused"] = df["status"] == "refused"
-    df["error"] = ~ok & ~df["refused"]
+    df["revoked_run"] = df["status"] == "revoked"  # a context burst aborted for a guaranteed request
+    df["error"] = ~ok & ~df["refused"] & ~df["revoked_run"]
+    df["context_burst"] = df["class_ctx"] == "burst"
+    df["reserved"] = df["reservation_id"].notna()
 
     secs = [
         shape_seconds(r.t_admitted, r.t_first_token, r.t_last_token, int(r.delivered_tokens), float(r.tps))
@@ -149,6 +174,8 @@ def per_tenant(df: pd.DataFrame) -> pd.DataFrame:
         refused_context=("refused_context", "sum"),
         refused_capacity=("refused_capacity", "sum"),
         errors=("error", "sum"),
+        revoked=("revoked_run", "sum"),
+        context_bursts=("context_burst", "sum"),
         lazy=("lazy", "max"),
         tps=("tps", "first"),
         price_per_second=("price_per_second", "first"),
@@ -156,6 +183,8 @@ def per_tenant(df: pd.DataFrame) -> pd.DataFrame:
     okdf = df[df["ok"]]
     ok_rows = okdf.groupby(GROUP, dropna=False).agg(
         ok=("request_id", "count"),
+        reserved_requests=("reserved", "sum"),
+        burst_tokens=("output_tokens_burst", "sum"),
         prompt_tokens=("prompt_tokens", "sum"),
         output_tokens=("output_tokens", "sum"),
         delivered_tokens=("delivered_tokens", "sum"),
@@ -182,7 +211,8 @@ def per_tenant(df: pd.DataFrame) -> pd.DataFrame:
         violation_stream_s=("violation_stream_s", "sum"),
     )
     out = all_rows.join(ok_rows, how="left")
-    counts = ["ok", "prompt_tokens", "output_tokens", "delivered_tokens", "floor_judged", "floor_violations"]
+    counts = ["ok", "reserved_requests", "burst_tokens", "prompt_tokens", "output_tokens", "delivered_tokens",
+              "floor_judged", "floor_violations"]
     sums = ["per_token_usd", "prompt_usd", "shape_usd", "bound_usd", "wall_usd", "billed_s", "bound_s", "wall_s",
             "stream_s", "throttled_s", "violation_stream_s"]
     out[counts] = out[counts].fillna(0).astype(int)
@@ -194,6 +224,7 @@ def per_tenant(df: pd.DataFrame) -> pd.DataFrame:
         out["tokens_per_billed_s"] = np.where(out["billed_s"] > 0, out["delivered_tokens"] / out["billed_s"], np.nan)
         out["throttled_share"] = np.where(out["stream_s"] > 0, out["throttled_s"] / out["stream_s"], np.nan)
         out["floor_violation_share"] = np.where(out["stream_s"] > 0, out["violation_stream_s"] / out["stream_s"], np.nan)
+        out["burst_share"] = np.where(out["output_tokens"] > 0, out["burst_tokens"] / out["output_tokens"], np.nan)
     return out.reset_index()
 
 
@@ -208,9 +239,10 @@ def concurrency_series(ok: pd.DataFrame, t0: float, t1: float) -> np.ndarray:
     return np.cumsum(delta)[:n]
 
 
-def per_run(df: pd.DataFrame, loads: list[LoadRun], config: Config) -> pd.DataFrame:
+def per_run(df: pd.DataFrame, loads: list[LoadRun], config: Config, reservations: pd.DataFrame | None = None) -> pd.DataFrame:
     """One row per load run: totals, both bills, GPU cost, concurrency and sampled replica state."""
     metas = {lr.id: lr for lr in loads}
+    rb = reservation_bills(df, reservations, config) if reservations is not None and len(reservations) else pd.DataFrame()
     rows = []
     for load_run, sub in df.groupby("load_run", sort=False):
         ok = sub[sub["ok"]]
@@ -233,6 +265,15 @@ def per_run(df: pd.DataFrame, loads: list[LoadRun], config: Config) -> pd.DataFr
             "ok": len(ok),
             "refused": int(sub["refused"].sum()),
             "errors": int(sub["error"].sum()),
+            "revoked": int(sub["revoked_run"].sum()),
+            "context_bursts": int(sub["context_burst"].sum()),
+            "reserved_requests": int(ok["reserved"].sum()),
+            "output_tokens_burst": int(ok["output_tokens_burst"].sum()),
+            "burst_share": float(ok["output_tokens_burst"].sum() / ok["output_tokens"].sum()) if ok["output_tokens"].sum() else np.nan,
+            "burst_discount_usd": float(ok["bound_usd"].sum() - ok["shape_usd"].sum()),
+            "reservation_usd": float(rb.loc[rb["load_run"] == load_run, "reservation_usd"].sum()) if len(rb) else 0.0,
+            "tenant_usd": float(ok.loc[~ok["reserved"], "shape_usd"].sum())
+            + (float(rb.loc[rb["load_run"] == load_run, "reservation_usd"].sum()) if len(rb) else 0.0),
             "prompt_tokens": int(ok["prompt_tokens"].sum()),
             "output_tokens": int(ok["output_tokens"].sum()),
             "delivered_tokens": int(ok["delivered_tokens"].sum()),
@@ -251,7 +292,14 @@ def per_run(df: pd.DataFrame, loads: list[LoadRun], config: Config) -> pd.DataFr
             "kv_usage_p95": np.nan,
             "engine_running_mean": np.nan,
             "preemptions": np.nan,
+            "burst_rate_lent_mean": np.nan,
+            "revocations_sampled": np.nan,
         }
+        if samples is not None and "burst_rate_lent" in samples:
+            lent = pd.to_numeric(samples["burst_rate_lent"], errors="coerce").dropna()
+            rev = pd.to_numeric(samples["gw_revocations"], errors="coerce").dropna()
+            row["burst_rate_lent_mean"] = float(lent.mean()) if len(lent) else np.nan
+            row["revocations_sampled"] = float(rev.max()) if len(rev) else np.nan
         if samples is not None and "kv_usage" in samples:
             kv = pd.to_numeric(samples["kv_usage"], errors="coerce").dropna()
             running = pd.to_numeric(samples["running"], errors="coerce").dropna()
@@ -261,6 +309,56 @@ def per_run(df: pd.DataFrame, loads: list[LoadRun], config: Config) -> pd.DataFr
             row["engine_running_mean"] = float(running.mean()) if len(running) else np.nan
             row["preemptions"] = float(pre.max() - pre.min()) if len(pre) else np.nan
         rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def reservation_bills(df: pd.DataFrame, reservations: pd.DataFrame | None, config: Config) -> pd.DataFrame:
+    """Per reservation (load run, tenant): the standing bill, slots x duration x price per second,
+    how much of it the tenant used, and the tenant's bill with the reservation (reservation plus
+    on-demand shape bills for its unreserved requests) against per-request shape and per-token."""
+    if reservations is None or reservations.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, r in reservations.iterrows():
+        run = df[df["load_run"] == r["load_run"]] if pd.notna(r.get("load_run")) else df
+        _t0, t1 = _run_window(run) if len(run) else (float(r["t_start"]), float(r["t_start"]))
+        t_end = float(r["t_end"]) if pd.notna(r["t_end"]) else t1
+        duration = max(0.0, t_end - float(r["t_start"]))
+        slots = int(r["slots"])
+        ok = run[run["ok"] & (run["tenant"] == r["tenant"])]
+        served = ok[ok["reservation_id"] == r["reservation_id"]]
+        used_s = float((served["t_engine_done"] - served["t_admitted"]).clip(lower=0).sum())
+        reserved_s = slots * duration
+        bill = reserved_s * float(r["price_per_second"])
+        on_demand = float(ok.loc[ok["reservation_id"] != r["reservation_id"], "shape_usd"].sum())
+        shape_all = float(ok["shape_usd"].sum())
+        per_token = float(ok["per_token_usd"].sum())
+        rows.append({
+            "scenario": run["scenario"].iloc[0] if len(run) else r.get("scenario"),
+            "load_run": r["load_run"],
+            "tenant": r["tenant"],
+            "reservation_id": r["reservation_id"],
+            "shape": r["shape"],
+            "slots": slots,
+            "replicas": r["replicas"],
+            "duration_s": duration,
+            "price_per_second": float(r["price_per_second"]),
+            "slot_usd_per_hour": float(r["price_per_second"]) * 3600.0,
+            "served": int(r["served"]),
+            "timeouts": int(r["timeouts"]),
+            "reserved_slot_hours": reserved_s / 3600.0,
+            "used_fill": used_s / reserved_s if reserved_s else np.nan,
+            "idle_slot_hours": max(0.0, reserved_s - used_s) / 3600.0,
+            "queued_p50_ms": float(served["queued_ms"].median()) if len(served) else np.nan,
+            "queued_p95_ms": float(served["queued_ms"].quantile(0.95)) if len(served) else np.nan,
+            "reservation_usd": bill,
+            "on_demand_usd": on_demand,
+            "tenant_usd": bill + on_demand,
+            "shape_usd": shape_all,
+            "per_token_usd": per_token,
+            "tenant_vs_shape": (bill + on_demand) / shape_all if shape_all else np.nan,
+            "tenant_vs_per_token": (bill + on_demand) / per_token if per_token else np.nan,
+        })
     return pd.DataFrame(rows)
 
 
@@ -489,6 +587,118 @@ def list_prices(df: pd.DataFrame, config: Config, fallback: Config | None = None
                 "vs_reference": out / tok.output_usd_per_million if tok.output_usd_per_million else np.nan,
                 "vs_reference_at_target": out * scale / tok.output_usd_per_million if tok.output_usd_per_million else np.nan,
             })
+    return pd.DataFrame(rows)
+
+
+RESERVATION_SIZINGS = (("p50", 50.0), ("p95", 95.0), ("max", 100.0))
+
+
+def _seat_weights(config: Config, fallback: Config | None, config_dir: Path | None) -> tuple[dict[str, float], str]:
+    """Capacity weight of each shape in units of the slot plan's first shape: seats(plan tps) ÷
+    seats(shape tps) on the planned replica's calibration curve (shape nesting, DESIGN 5.2), or the
+    tps ratio when no curve can be loaded. Returns the weights and which basis was used."""
+    shapes = {s.name: s for s in config.shapes}
+    plans = _slot_plans(config, fallback)
+    unit_tps = next((shapes[n].tps for p in plans.values() for n in p if n in shapes), None)
+    if unit_tps is None:
+        return {}, "none"
+    profile = None
+    margin = config.gateway.admission.tps_margin
+    for cfg in [*(fallback.replicas if fallback else []), *config.replicas]:
+        if plans.get(cfg.id):
+            try:
+                profile = profile_for(cfg, config_dir)
+                break
+            except (OSError, RuntimeError, ValueError, KeyError):
+                continue
+    if profile is None:
+        return {n: s.tps / unit_tps for n, s in shapes.items()}, "tps ratio"
+    unit_seats = profile.n_max(unit_tps, margin)
+    weights = {}
+    for n, s in shapes.items():
+        seats = profile.n_max(s.tps, margin)
+        weights[n] = unit_seats / seats if seats else np.nan
+    return weights, profile.source
+
+
+def reservations(df: pd.DataFrame, config: Config, fallback: Config | None = None, config_dir: Path | None = None) -> pd.DataFrame:
+    """What-if (DESIGN 8, reservation tier): each tenant reserves N slots of its shape for the whole
+    run and pays slot-seconds instead of per request. Demand is the tenant's queue-free occupancy:
+    each request holds a slot from its arrival for the seat time it measured (admission to engine
+    done); capacity refusals count at the tenant's median seat time, context refusals not at all.
+    N is the p50, p95 and max of that occupancy at one-second resolution. Per sizing: the share of
+    requests that would still wait (all N slots busy at arrival), the reservation's used fill and
+    idle slot-hours (resellable as burst or lazy), the reservation bill at the shape's price per
+    second (slot time covers prefill, so no prefill charge), the run's per-request shape and
+    per-token bills, the GPU cost of the reserved slice of the card (N × capacity weight ÷ plan
+    slots), and the slot prices per hour at break-even and at per-token revenue parity."""
+    shapes = {s.name: s for s in config.shapes}
+    plans = _slot_plans(config, fallback)
+    weights, weight_basis = _seat_weights(config, fallback, config_dir)
+    gpu_h = config.pricing.provider.gpu_usd_per_hour
+    rows = []
+    for load_run, run in df.groupby("load_run", sort=False):
+        t0, t1 = _run_window(run)
+        duration = max(1.0, t1 - t0)
+        n_sec = int(np.ceil(duration)) + 1
+        used_replicas = run.loc[run["ok"], "replica"].dropna().unique()
+        plan_slots = sum(sum(plans.get(rep, {}).values()) for rep in used_replicas)
+        for (tenant, shape_name), sub in run.groupby(["tenant", "shape"], sort=False):
+            shape = shapes.get(shape_name)
+            if shape is None:
+                continue
+            ok = sub[sub["ok"]]
+            cap = sub[sub["abort_reason"].fillna("").astype(str).str.startswith("capacity")]
+            seat_s = (ok["t_engine_done"] - ok["t_admitted"]).clip(lower=0).to_numpy(dtype=float)
+            median_seat = float(np.median(seat_s)) if len(seat_s) else 0.0
+            starts = np.concatenate([ok["t_arrival"].to_numpy(dtype=float), cap["t_arrival"].to_numpy(dtype=float)])
+            durs = np.concatenate([seat_s, np.full(len(cap), median_seat)])
+            if len(starts) == 0:
+                continue
+            delta = np.zeros(n_sec + 1)
+            i0 = np.clip((starts - t0).astype(int), 0, n_sec - 1)
+            i1 = np.clip(np.ceil(starts + durs - t0).astype(int), 0, n_sec)
+            np.add.at(delta, i0, 1)
+            np.add.at(delta, i1, -1)
+            occ = np.cumsum(delta)[:n_sec]
+            weight = weights.get(shape_name, np.nan)
+            for label, pct in RESERVATION_SIZINGS:
+                n_slots = max(1, int(np.ceil(np.percentile(occ, pct))))
+                would_queue = float(np.mean(occ[i0] - 1 >= n_slots))
+                reserved_s = n_slots * duration
+                used_s = float(np.minimum(occ, n_slots).sum())
+                bill = reserved_s * shape.price_per_second
+                cost_share = gpu_h * duration / 3600.0 * n_slots * weight / plan_slots if plan_slots and not np.isnan(weight) else np.nan
+                per_token = float(ok["per_token_usd"].sum())
+                rows.append({
+                    "scenario": run["scenario"].iloc[0],
+                    "seed": int(run["seed"].iloc[0]),
+                    "load_run": load_run,
+                    "tenant": tenant,
+                    "shape": shape_name,
+                    "sizing": label,
+                    "slots": n_slots,
+                    "occupancy_p50": float(np.percentile(occ, 50)),
+                    "occupancy_p95": float(np.percentile(occ, 95)),
+                    "occupancy_max": float(occ.max()),
+                    "requests": len(starts),
+                    "would_queue_share": would_queue,
+                    "reserved_slot_hours": reserved_s / 3600.0,
+                    "used_fill": used_s / reserved_s if reserved_s else np.nan,
+                    "idle_slot_hours": (reserved_s - used_s) / 3600.0,
+                    "reservation_usd": bill,
+                    "shape_usd": float(ok["shape_usd"].sum()),
+                    "per_token_usd": per_token,
+                    "reservation_vs_shape": bill / float(ok["shape_usd"].sum()) if float(ok["shape_usd"].sum()) else np.nan,
+                    "reservation_vs_per_token": bill / per_token if per_token else np.nan,
+                    "capacity_weight": weight,
+                    "weight_basis": weight_basis,
+                    "cost_share_usd": cost_share,
+                    "reservation_vs_cost": bill / cost_share if cost_share else np.nan,
+                    "slot_usd_per_hour": shape.price_per_second * 3600.0,
+                    "breakeven_slot_usd_per_hour": gpu_h * weight / plan_slots if plan_slots and not np.isnan(weight) else np.nan,
+                    "revenue_parity_slot_usd_per_hour": per_token / (reserved_s / 3600.0) if reserved_s else np.nan,
+                })
     return pd.DataFrame(rows)
 
 
