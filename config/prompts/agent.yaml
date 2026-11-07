@@ -11,10 +11,11 @@ prompts:
 
         Ticket LL-4821, filed by the finance team on 3 November:
 
-        "The October 2026 invoice for Harrowgate Logistics (tenant t-00913) shows a total of
-        18,442.17 on the PDF, but if you add up the line items printed on the same PDF you get
-        18,442.21. The invoice does not foot by four cents. We checked September for the same
-        tenant and it was off by one cent. Two other tenants with tiered pricing, Pellworth
+        "The October 2026 invoice for Harrowgate Logistics (tenant t-00913) shows a subtotal
+        of 17,123.54, tax of 1,318.51 and a total of 18,442.05. The four tiered lines are
+        broken into sub-lines, and the sub-lines add up to their line amounts, but the seven
+        line amounts add up to 17,123.58, not 17,123.54. The invoice does not foot by four
+        cents. We checked September for the same tenant and it was off by one cent. Two other tenants with tiered pricing, Pellworth
         Insurance (t-00121) and Marrow and Finch (t-00457), show gaps of between one and five
         cents. Every flat-rate tenant we spot-checked is fine. We cannot close the month until
         invoices foot, and our auditors will ask. We believe this started with the deploy on
@@ -49,6 +50,44 @@ prompts:
           docs/billing-rules.md       the money rules finance signed off on
           tools/run_invoices.py       the monthly entry point
           logs/                       run logs, one file per run
+
+        Comments on the ticket so far:
+
+        [Nov 3, 09:14] Ola Brennan (finance): Attaching the Harrowgate PDF and my spreadsheet.
+        Seven lines. Four of them are tiered products with between two and four sub-lines
+        each. If I add the sub-lines I get the line amounts exactly, every time. If I add the
+        seven line amounts I get 17,123.58, and the PDF prints a subtotal of 17,123.54. So
+        the gap is between the lines and the subtotal, not inside any line.
+
+        [Nov 3, 10:02] Dmitri Vasquez (engineering): Confirmed the tax side is consistent:
+        Harrowgate's rate is 7.7 percent, and 17,123.54 times 0.077 is 1,318.5126, which
+        rounds to the printed 1,318.51. Total 18,442.05 is subtotal plus tax. So tax and
+        total are computed from the printed subtotal; the only question is where the
+        printed subtotal comes from, because it is not the sum of the printed lines.
+
+        [Nov 3, 10:40] Ola Brennan (finance): Our auditors sample twelve invoices a quarter
+        and they will pick the largest tenants. Harrowgate is top five. We need to know by
+        Friday whether we are re-issuing, because re-issue means credit notes and those
+        have to be in the same period.
+
+        [Nov 3, 11:15] Dmitri Vasquez (engineering): The warnings email finance receives
+        after each run. Does anyone read it? I ask because the October run sent 27 warnings
+        and I suspect some of them are relevant. Ola, can you forward it?
+
+        [Nov 3, 11:52] Ola Brennan (finance): Forwarded. In fairness we were told the email
+        was informational. It lists 22 tenants with a "foot_check delta". I did not know
+        what that meant until now.
+
+        [Nov 3, 14:30] Dmitri Vasquez (engineering): Handing this to the agent with the
+        notes above. I have not read the code since the LL-4410 review; I approved that
+        change and my memory is that the intent was to stop rounding error accumulating on
+        tenants with a lot of lines, which seemed sensible at the time. I did not re-read
+        the rules document. Please treat my review as suspect.
+
+        [Nov 3, 14:35] Ola Brennan (finance): One more data point. The Pellworth September
+        re-run on 4 October was sent to Pellworth and they paid it. If it is wrong by one
+        cent we still have to re-issue under our own policy. Please check the policy text
+        before you tell me otherwise.
 
         Tools available to you: read_file(path), run_tests(path, flags), grep(pattern, path),
         git_log(path, flags), read_log(path, filter). Each call returns its output as the
@@ -434,6 +473,45 @@ prompts:
         lines 131-136 are the foot_check warning block in build_invoice. Every tiered test
         above uses quantities and prices whose products are exact to the cent.
 
+        Tool result (read_file tests/factories.py):
+
+        """Test factories. Prices and quantities are passed as strings or ints so that no
+        float ever reaches the billing code by accident, except when a test wants one."""
+        from datetime import datetime, timezone
+        from decimal import Decimal as D
+        from itertools import count
+
+        from ledgerline.models import Tenant, UsageRecord
+
+        _ids = count(1)
+
+
+        def tenant_with(*schedules, tax_rate=D("0.20"), currency="EUR", tenant_id="t-test"):
+            return Tenant(
+                id=tenant_id,
+                name="Test Tenant",
+                currency=currency,
+                tax_rate=tax_rate,
+                schedules={s.product_code: s for s in schedules},
+            )
+
+
+        def record(product_code, quantity, occurred_at=None, currency="EUR"):
+            if occurred_at is None:
+                occurred_at = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
+            return UsageRecord(
+                id=f"u-{next(_ids):06d}",
+                product_code=product_code,
+                quantity=quantity if isinstance(quantity, float) else D(str(quantity)),
+                occurred_at=occurred_at,
+                currency=currency,
+            )
+
+        Note from the harness: no test constructs a tiered schedule whose tier products are
+        inexact at the cent, and no test asserts that subtotal equals the sum of line amounts
+        for a tiered tenant. test_subtotal_equals_sum_of_lines_flat covers flat lines only,
+        and for flat lines raw_amount rounds to the same value as amount by construction.
+
         Decide the next step and explain it.
       - |
         Tool result (grep -n -E "quantize|_cents|ROUND_|raw_amount|\.amount" src/ledgerline/):
@@ -509,6 +587,66 @@ prompts:
         Note from the harness: test_pdf_totals_block_matches_invoice_fields asserts that the
         rendered Subtotal, Tax and Total strings equal the formatted invoice.subtotal, .tax
         and .total fields. It does not compare the subtotal against the rendered line rows.
+
+        Tool result (read_file tickets/LL-4410.md):
+
+        # LL-4410: per-tier minimum charges
+
+        Opened 8 September 2026 by Casimir Delacroix (sales). Assigned to Rhiannon Oakes.
+        Closed 3 October 2026.
+
+        ## Request
+
+        Two enterprise deals (Harrowgate Logistics, Pellworth Insurance) are contingent on a
+        pricing structure where each tier has a minimum monthly charge. Example for
+        Harrowgate's "events" product: first 50,000 events at 0.024 each with a minimum of
+        1,200; next 200,000 at 0.018; thereafter 0.011. If they only send 10,000 events in a
+        month we still bill 1,200 for the first tier. Both customers have seen and accepted
+        this in their order forms. We need it live for the October invoice run.
+
+        ## Discussion
+
+        Rhiannon (9 Sep): Straightforward in rates.py and billing.py. Question for finance:
+        does a tier with zero usage get charged its minimum? The order form is ambiguous.
+
+        Ola Brennan, finance (9 Sep): No. A minimum is a floor on usage that exists, not a
+        standing charge. If they send nothing in a tier, the tier shows zero. If sales wants
+        a standing charge that is a separate flat product. I will add this to the rules
+        document as 4.2.
+
+        Casimir (10 Sep): Agreed, zero usage means zero. Thanks.
+
+        Rhiannon (24 Sep): Implementation note. While testing with Harrowgate's real
+        September usage I noticed that with their tier prices (0.024, 0.018, 0.011) the
+        sub-line amounts are rarely exact to the cent, so summing the rounded sub-lines
+        and then rounding the invoice total separately can differ from rounding once at the
+        end. For Harrowgate it was two cents in September. I am going to compute the
+        subtotal from the unrounded amounts and round once, which is the more accurate
+        number, and log a warning when the two differ so finance can see it.
+
+        Dmitri (25 Sep, review): Makes sense to me. More accurate is better. Approving.
+
+        Ola Brennan (30 Sep): I saw the warning email from the staging run. What does
+        "foot_check delta" mean? Is this something I need to act on?
+
+        Rhiannon (30 Sep): It is informational. It means the printed total is more accurate
+        than the sum of the printed lines by that amount. You do not need to act on it.
+
+        Ola Brennan (30 Sep): Fine, as long as it is informational.
+
+        Rhiannon (3 Oct): Deployed with the October release. Closing.
+
+        ## Acceptance
+
+        - [x] Tier minimums applied when usage is non-zero and below the minimum
+        - [x] Tier with zero usage is not charged (rules 4.2)
+        - [x] Sub-line annotated "minimum" on the PDF when the minimum applies
+        - [x] Unit tests for minimums in test_rates.py and test_billing.py
+        - [ ] Finance sign-off on the rounding change (not requested; considered internal)
+
+        Note from the harness: the final acceptance item was never ticked. The rules document
+        version 1.3 was signed off on 12 September, before the 24 September implementation
+        note, and section 3.3 was not changed by it.
 
         Decide the next step and explain it.
       - |
@@ -783,6 +921,51 @@ prompts:
         intermediate values are not quantized and 6.1 that audit values are never
         used in printed calculations.
 
+        ## Appendix A: worked example of 3.3 with tiers
+
+        A tenant has one tiered product with three tiers: first 1,000 units at 0.0335, next
+        4,000 units at 0.0275, thereafter 0.0190. In a month they use 7,250 units.
+
+        Tier 1: 1,000 x 0.0335 = 33.5000, printed as 33.50.
+        Tier 2: 4,000 x 0.0275 = 110.0000, printed as 110.00.
+        Tier 3: 2,250 x 0.0190 = 42.7500, printed as 42.75 (half-up from 42.750).
+
+        Line amount: 33.50 + 110.00 + 42.75 = 186.25. This is the number printed on the line.
+        The unrounded sum is 186.2500, which happens to agree here. Now change tier 3's
+        price to 0.0191: 2,250 x 0.0191 = 42.9750, printed as 42.98 (half-up). Printed line:
+        33.50 + 110.00 + 42.98 = 186.48. Unrounded sum: 186.4750, which also rounds to
+        186.48. Change it once more to 0.0193: 2,250 x 0.0193 = 43.4250, printed 43.43.
+        Printed line: 186.93. Unrounded: 186.9250, which rounds half-up to 186.93.
+        Agreement is common but not guaranteed: with several tiers each contributing up to
+        half a cent of rounding, the printed sum and the once-rounded total can differ by
+        up to one cent per tier in the worst case, and a tenant with four tiered lines of
+        three tiers each can be off by several cents.
+
+        Rule 3.3 resolves this by definition: the printed line amount is the sum of the
+        printed sub-lines, and the printed subtotal is the sum of the printed lines. The
+        unrounded values are retained for audit (6.1) and nothing else. If engineering
+        believes a more accurate figure should be billed, the correct remedy is to change
+        the prices or the tier structure, not to print a total that cannot be reproduced
+        from the invoice.
+
+        ## Appendix B: questions finance has been asked
+
+        Q: The customer says our total is a cent higher than their own calculation from our
+        sub-lines. Who is right?
+        A: If they added our printed figures correctly, they are, and the invoice is
+        defective under 3.3 and 5.3.
+
+        Q: Is a one-cent difference material?
+        A: Not financially. It is material for audit because it means the invoice does not
+        foot, and an invoice that does not foot cannot be relied on as evidence.
+
+        Q: Can we fix a sent invoice by sending a corrected PDF with the same number?
+        A: No. 5.1 applies. Credit note and new invoice.
+
+        Q: The run log shows a warning for a tenant. Do we hold the invoice?
+        A: A warning that names a printed figure (subtotal, tax, total) means the invoice
+        should be held until engineering confirms it foots. Other warnings are informational.
+
         Decide the next step and explain it.
       - |
         Tool result (read_log logs/invoice-run-2026-10-31.log, filter "WARN|t-00913|t-00121|t-00457|summary"):
@@ -802,7 +985,7 @@ prompts:
         2026-10-31T02:01:07Z WARN  foot_check tenant=t-00644 subtotal=15002.11 display_sum=15002.10 delta=0.01
         2026-10-31T02:01:19Z INFO  tenant=t-00913 name="Harrowgate Logistics" records=211870 products=7
         2026-10-31T02:01:19Z DEBUG tenant=t-00913 tier "first 50k" below minimum 1200.00, charging minimum
-        2026-10-31T02:01:19Z INFO  tenant=t-00913 lines=7 subtotal=17123.54 tax=1318.63 total=18442.17
+        2026-10-31T02:01:19Z INFO  tenant=t-00913 lines=7 subtotal=17123.54 tax=1318.51 total=18442.05
         2026-10-31T02:01:19Z WARN  foot_check tenant=t-00913 subtotal=17123.54 display_sum=17123.58 delta=-0.04
         2026-10-31T02:01:33Z WARN  foot_check tenant=t-00977 subtotal=441.19 display_sum=441.20 delta=-0.01
         2026-10-31T02:01:41Z WARN  tenant=t-01002: dropped 1 records outside 2026-10
@@ -850,6 +1033,93 @@ prompts:
         check did not exist at git b77e03d. 22 of the 61 tiered tenants in the October run
         have a non-zero delta. All 22 October invoices and the 4 October Pellworth re-run
         were sent to tenants on 1 November.
+
+        Tool result (read_log logs/invoice-run-2026-10-31.log, filter "t-00913" --verbose):
+
+        2026-10-31T02:01:19Z DEBUG tenant=t-00913 line api-calls flat qty=1577540 unit=0.0020 raw=3155.0800 amount=3155.08
+        2026-10-31T02:01:19Z DEBUG tenant=t-00913 line storage-gb flat qty=18420 unit=0.0350 raw=644.7000 amount=644.70
+        2026-10-31T02:01:19Z DEBUG tenant=t-00913 line seats flat qty=312 unit=9.00 raw=2808.0000 amount=2808.00
+        2026-10-31T02:01:19Z DEBUG tenant=t-00913 line events tiered sub_lines=3 raw=1200.0000 amount=1200.00 tiers=[first 50k: minimum 1200.00 applied; next 200k: 0.00; thereafter: 0.00]
+        2026-10-31T02:01:19Z DEBUG tenant=t-00913 line messages tiered sub_lines=3 raw=4737.4950 amount=4737.51 tiers=[1149.9950->1150.00; 3399.9950->3400.00; 187.5050->187.51]
+        2026-10-31T02:01:19Z DEBUG tenant=t-00913 line webhooks tiered sub_lines=2 raw=1561.3100 amount=1561.32 tiers=[1374.1250->1374.13; 187.1850->187.19]
+        2026-10-31T02:01:19Z DEBUG tenant=t-00913 line exports tiered sub_lines=3 raw=3016.9562 amount=3016.97 tiers=[400.9962->401.00; 2211.8450->2211.85; 404.1150->404.12]
+        2026-10-31T02:01:19Z DEBUG tenant=t-00913 raw_sum=17123.5412 display_sum=17123.58 subtotal=_cents(raw_sum)=17123.54
+
+        Note from the harness: the arithmetic that matters is on the last line. The seven
+        displayed amounts add to 17,123.58. The seven raw amounts add to 17,123.5412, and
+        quantizing that once gives 17,123.54. Eight of the eleven tiered sub-lines rounded
+        up, by between 0.0038 and 0.0050 each, 0.0388 in total, which is where the four
+        cents come from. The flat tenants in this run all happen to have raw sums that
+        quantize to the same value as their display sums; whether that is luck or pricing
+        structure is not something the run log can tell you.
+
+        Tool result (read_file mail/finance-billing/2026-10-31-warnings.txt):
+
+        From: invoice-runner@ledgerline.example
+        To: finance-billing@ledgerline.example
+        Date: 31 October 2026 02:07
+        Subject: invoice run 2026-10: 27 warnings
+
+        The invoice run for 2026-10 completed with 27 warnings. Warnings are informational
+        and do not indicate a failed run. Details:
+
+        foot_check (22): t-00121 delta=-0.02, t-00457 delta=-0.01, t-00611 delta=-0.03,
+        t-00644 delta=0.01, t-00913 delta=-0.04, t-00977 delta=-0.01, t-01044 delta=-0.02,
+        t-01090 delta=-0.01, t-01133 delta=-0.05, t-01160 delta=0.01, t-01201 delta=-0.02,
+        t-01249 delta=-0.01, t-01277 delta=-0.02, t-01301 delta=-0.01, t-01340 delta=-0.01,
+        t-01366 delta=-0.02, t-01389 delta=-0.01, t-01402 delta=0.01, t-01418 delta=-0.01,
+        t-01450 delta=-0.03, t-01471 delta=-0.01, t-01499 delta=-0.02
+        dropped_records (2): t-00188 (2 records), t-01002 (1 record)
+        unpriced (2): t-00502 "webhook-retries", t-01222 "sandbox-calls"
+        other (1): t-00733 PDF rendered with fallback font
+
+        ---
+
+        From: Ola Brennan
+        To: finance-billing
+        Date: 31 October 2026 09:12
+        Subject: Re: invoice run 2026-10: 27 warnings
+
+        The unpriced products are the usual two; I have asked sales again about
+        webhook-retries. Dropped records for t-00188 are the late September corrections, as
+        expected. The foot_check list is longer than last month (the September re-run had
+        one, this has 22) but I was told these are informational. Releasing the invoices
+        for sending tomorrow morning unless anyone objects.
+
+        ---
+
+        From: Tariq Mensah
+        To: finance-billing
+        Date: 31 October 2026 09:40
+        Subject: Re: invoice run 2026-10: 27 warnings
+
+        No objection. For what it is worth, 22 of 61 tiered tenants is a lot of
+        "informational". Is the delta the amount by which the PDF subtotal differs from the
+        lines? If so, is that not exactly the thing the auditors check? Not blocking, just
+        asking. Also, every flat tenant is clean and every affected tenant is tiered, which
+        does not look like coincidence.
+
+        ---
+
+        From: Ola Brennan
+        To: finance-billing
+        Date: 31 October 2026 09:55
+        Subject: Re: invoice run 2026-10: 27 warnings
+
+        I think it is the other way round, the total is more accurate than the lines. That
+        is what Rhiannon said in the ticket. I will raise it after month end if nobody else
+        does. Scheduling the send for tomorrow at 09:00.
+
+        ---
+
+        From: Tariq Mensah
+        To: finance-billing
+        Date: 3 November 2026 08:50
+        Subject: Re: invoice run 2026-10: 27 warnings
+
+        Harrowgate's accounts payable has written to say the invoice does not add up. Four
+        cents. Which is exactly the t-00913 delta in the list above. Filing LL-4821 and
+        attaching this thread.
 
         Decide the next step and explain it.
       - |
@@ -1004,9 +1274,11 @@ prompts:
 
         "tests/integration/test_retry.py::test_backoff_respects_deadline fails roughly one
         run in eight on the CI runners and has never been seen failing on a laptop. The
-        failure message is always a variant of 'attempt 3 scheduled at 1730893021.84,
-        deadline was 1730893021.80' with the scheduled time between 20 and 90 milliseconds
-        past the deadline. Reruns pass. It started failing in the week of 13 October. The
+        failure message is always 'attempt 3 scheduled at 1730000014.0, deadline was
+        1730000013.95'. The test deliberately puts the third retry 50 milliseconds past the
+        deadline as a boundary case, and on the failing runs the scheduler reschedules the
+        job anyway instead of marking it dead. Reruns pass. It started failing in the week
+        of 13 October. The
         retry code was last touched on 9 October (QR-2190, a timezone fix for the admin UI
         countdown). The test itself has not changed since July. We have disabled the test
         on main as of this morning with a skip marker referencing this issue, so the build
@@ -1043,6 +1315,51 @@ prompts:
           tests/integration/conftest.py      fixtures: compose services, FakeClock
           docs/design/retry-semantics.md     the intended behaviour
           ci/                                CI logs are archived here per run
+
+        Comments on the issue so far:
+
+        [Oct 20] Soren Adeyemi: I looked at the four failures we have logs for. In each one
+        the job was rescheduled at t=14.0 instead of being marked dead. The next_attempt
+        debug line says ok=False in all four, which is what I would expect, and then the
+        job is rescheduled anyway. So something after that line is overriding the decision.
+        I do not see how that can be the FakeClock, since the logged times are all exactly
+        what the test sets up.
+
+        [Oct 21] Mei Lindqvist: I tried to reproduce by running the integration suite in a
+        loop on my laptop for two hours, 140 runs, zero failures. I also tried it on the
+        slowest CI runner class with the rest of the suite disabled, 40 runs, zero
+        failures. It only fails when the whole suite runs on a loaded runner, which smells
+        like timing, but the test does not sleep and the clock is fake, so I do not see
+        what timing could matter.
+
+        [Oct 22] Soren Adeyemi: Could it be the broker? The compose broker sometimes takes
+        a few hundred milliseconds to acknowledge on the loaded runners. But the retry
+        decision happens before anything is published to the broker.
+
+        [Oct 23] Mei Lindqvist: Database then. The reschedule UPDATE is slow on the loaded
+        runners, I have seen 300 ms. But again, the decision is made before the UPDATE,
+        and the UPDATE writes whatever the decision said. Unless the decision reads
+        something that the slowness changes.
+
+        [Oct 27] On-call (Priya Natarajan): Skipping the test on main as of this morning;
+        the rerun button is being pressed without anyone looking and we merged a genuine
+        failure in the admin module on Friday because of it. Please treat the skip as
+        temporary. I have also pulled the pool b production logs for the retry decisions
+        since 13 October, because if this is a real behaviour difference we may have jobs
+        that were retried past their deadline, and the finance export jobs in pool b are
+        exactly the ones with tight deadlines.
+
+        [Oct 28] Soren Adeyemi: For the record, QR-2190 was my change. I added a second
+        deadline check against the wall clock to make the admin countdown agree with the
+        scheduler. I did run the integration suite locally and it was green. If that is
+        the cause I would like to understand why it only shows up under load, because the
+        logic seemed sound to me and Mei reviewed it.
+
+        [Oct 28] Mei Lindqvist: I reviewed it, and I remember asking whether reading the
+        wall clock inside the policy broke the design note's rule about the policy being
+        pure. We agreed it did not count because it only "corrected" the deadline and did
+        not change the scheduled time. I would like that reasoning checked rather than
+        assumed.
 
         Tools available to you: read_file(path), run_tests(path, flags), grep(pattern, path),
         git_log(path, flags), read_log(path, filter). Each call returns its output as the
@@ -1122,12 +1439,13 @@ prompts:
         def test_backoff_respects_deadline(scheduler, clock, db):
             """A retry that would land after the deadline marks the job dead instead.
 
-            Deadline is 7.8 seconds after EPOCH. Attempts: t=0 fails, retry at 2.0;
+            Deadline is 13.95 seconds after EPOCH. Attempts: t=0 fails, retry at 2.0;
             t=2.0 fails, retry at 6.0; t=6.0 fails, retry would be at 14.0 which is
-            past the deadline, so the job must be DEAD after the third attempt and
-            never scheduled at 14.0.
+            50 ms past the deadline, so the job must be DEAD after the third attempt
+            and never scheduled at 14.0. The 50 ms margin is deliberate: it is the
+            boundary case, and R5 says the decision must not depend on real time.
             """
-            job = _failing_job(deadline_offset=7.8)
+            job = _failing_job(deadline_offset=13.95)
             scheduler.submit(job)
 
             scheduler.run_once()  # attempt 1 at t=0
@@ -1138,7 +1456,7 @@ prompts:
             assert db.get_job(job.id).next_attempt_at == pytest.approx(EPOCH + 6.0, abs=0.05)
             clock.advance(4.0)
 
-            scheduler.run_once()  # attempt 3 at t=6; next would be t=14 > deadline 7.8
+            scheduler.run_once()  # attempt 3 at t=6; next would be t=14 > deadline 13.95
             stored = db.get_job(job.id)
             assert stored.state == JobState.DEAD, (
                 f"attempt {stored.attempt} scheduled at {stored.next_attempt_at}, "
@@ -1218,6 +1536,47 @@ prompts:
             yield d
             d.close()
 
+        Tool result (read_file tests/integration/README.md):
+
+        # Integration tests
+
+        These tests run the real scheduler against a real broker and a real database,
+        started by compose, with one deliberate exception: time. The scheduler receives a
+        FakeClock, and the tests move it explicitly. This is what lets us test backoff
+        intervals of minutes in a suite that runs in under a minute, and it is also what
+        lets us assert exact scheduled times rather than ranges.
+
+        Conventions:
+
+        1. Every test that cares about time uses the `clock` fixture and never calls
+           time.sleep. If you need to wait for the broker or database, poll with a short
+           real timeout in a helper, but do not advance the fake clock to do it.
+        2. EPOCH is a fixed constant so that assertions can use literal values. Do not
+           use time.time() to seed the FakeClock; it makes failures impossible to compare
+           across runs.
+        3. Assertions on scheduled times use abs=0.001 unless jitter is enabled. If you
+           find yourself widening a tolerance, stop and find out why the value moved; the
+           clock is fake, so it should not have.
+        4. Tests that drive several ticks call run_once() repeatedly and advance the
+           clock between calls by exactly the expected delay. This keeps the tick count
+           and the clock in lockstep.
+        5. The broker and database fixtures purge and truncate before each test, not
+           after, so that a failed test leaves its state behind for inspection.
+
+        Runner notes:
+
+        The CI runners are shared virtual machines. Under load, database round trips that
+        take 10 ms on a laptop take 200 to 400 ms, and the broker can take a similar time
+        to acknowledge a publish. None of this should affect any assertion in this
+        directory, because nothing here measures real time. If a test in this directory
+        is sensitive to runner load, that is a bug in the code under test or in the test,
+        never something to paper over with a retry marker. We removed the last `flaky`
+        marker from this directory in 2025 and would like to keep it that way.
+
+        Running locally: `make integration` starts compose, waits for the services, runs
+        pytest with QR_LOG_LEVEL=DEBUG and tears the services down. Logs from the scheduler
+        and retry modules are captured per test and shown on failure.
+
         Decide the next step and explain it.
       - |
         Tool result (read_log ci/run-7731/integration.log, filter "test_retry|FAIL|Error|assert|QR_|clock|time"):
@@ -1232,24 +1591,27 @@ prompts:
         [10:41:11.232]   DEBUG quillrun.scheduler: job 7f3a attempt=1 failed: AlwaysFail
         [10:41:11.233]   DEBUG quillrun.retry: next_attempt attempt=1 delay=2.000 scheduled=1730000002.000 deadline=1730000600.000 ok=True
         [10:41:12.904] tests/integration/test_retry.py::test_backoff_doubles_each_attempt PASSED
-        [10:41:14.112] tests/integration/test_retry.py::test_backoff_respects_deadline FAILED
-        [10:41:14.113]   DEBUG quillrun.scheduler: run_once pool=test now=1730000000.000 picked=1
-        [10:41:14.113]   DEBUG quillrun.scheduler: job 91c2 attempt=1 failed: AlwaysFail
-        [10:41:14.114]   DEBUG quillrun.retry: next_attempt attempt=1 delay=2.000 scheduled=1730000002.000 deadline=1730000007.800 ok=True
-        [10:41:14.561]   DEBUG quillrun.scheduler: run_once pool=test now=1730000002.000 picked=1
-        [10:41:14.562]   DEBUG quillrun.scheduler: job 91c2 attempt=2 failed: AlwaysFail
-        [10:41:14.562]   DEBUG quillrun.retry: next_attempt attempt=2 delay=4.000 scheduled=1730000006.000 deadline=1730000007.800 ok=True
-        [10:41:15.039]   DEBUG quillrun.scheduler: run_once pool=test now=1730000006.000 picked=1
-        [10:41:15.040]   DEBUG quillrun.scheduler: job 91c2 attempt=3 failed: AlwaysFail
-        [10:41:15.041]   DEBUG quillrun.retry: next_attempt attempt=3 delay=8.000 scheduled=1730000014.000 deadline=1730000007.800 ok=True
-        [10:41:15.041]   DEBUG quillrun.retry: deadline_check wall=1730893021.846 scheduled_wall=1730893029.846 deadline_rel=7.800 elapsed_rel=... ok=True
-        [10:41:15.042]   DEBUG quillrun.scheduler: job 91c2 rescheduled attempt=3 next=1730000014.000
-        [10:41:15.044]   FAILED tests/integration/test_retry.py::test_backoff_respects_deadline
-        [10:41:15.044]   AssertionError: attempt 3 scheduled at 1730000014.0, deadline was 1730000007.8
-        [10:41:15.044]   assert <JobState.WAITING: 'waiting'> == <JobState.DEAD: 'dead'>
+        [10:41:13.600] tests/integration/test_retry.py::test_backoff_respects_deadline FAILED
+        [10:41:13.921]   DEBUG quillrun.scheduler: run_once pool=test now=1730000000.000 picked=1
+        [10:41:13.922]   DEBUG quillrun.scheduler: job 91c2 attempt=1 failed: AlwaysFail
+        [10:41:13.923]   DEBUG quillrun.retry: next_attempt attempt=1 delay=2.000 scheduled=1730000002.000 deadline=1730000013.950 ok=True
+        [10:41:13.923]   DEBUG quillrun.retry: deadline_check wall=1730893020.923 tick_start=1730893020.602 elapsed=0.321 remaining=13.950 credited=14.271 delay=2.000 ok=True
+        [10:41:14.571]   DEBUG quillrun.scheduler: run_once pool=test now=1730000002.000 picked=1
+        [10:41:14.572]   DEBUG quillrun.scheduler: job 91c2 attempt=2 failed: AlwaysFail
+        [10:41:14.572]   DEBUG quillrun.retry: next_attempt attempt=2 delay=4.000 scheduled=1730000006.000 deadline=1730000013.950 ok=True
+        [10:41:14.573]   DEBUG quillrun.retry: deadline_check wall=1730893021.573 tick_start=1730893021.347 elapsed=0.226 remaining=11.950 credited=12.176 delay=4.000 ok=True
+        [10:41:15.285]   DEBUG quillrun.scheduler: run_once pool=test now=1730000006.000 picked=1
+        [10:41:15.286]   DEBUG quillrun.scheduler: job 91c2 attempt=3 failed: AlwaysFail
+        [10:41:15.287]   DEBUG quillrun.retry: next_attempt attempt=3 delay=8.000 scheduled=1730000014.000 deadline=1730000013.950 ok=False
+        [10:41:15.287]   DEBUG quillrun.retry: deadline_check wall=1730893022.287 tick_start=1730893021.932 elapsed=0.355 remaining=7.950 credited=8.305 delay=8.000 ok=True
+        [10:41:15.288]   DEBUG quillrun.scheduler: job 91c2 rescheduled attempt=3 next=1730000014.000
+        [10:41:15.610]   FAILED tests/integration/test_retry.py::test_backoff_respects_deadline
+        [10:41:15.610]   AssertionError: attempt 3 scheduled at 1730000014.0, deadline was 1730000013.95
+        [10:41:15.610]   assert <JobState.WAITING: 'waiting'> == <JobState.DEAD: 'dead'>
         [10:41:16.317] tests/integration/test_retry.py::test_deadline_exactly_on_retry_time_is_allowed PASSED
         [10:41:17.002] tests/integration/test_retry.py::test_dead_job_emits_event PASSED
         [10:41:17.003]   DEBUG quillrun.retry: next_attempt attempt=1 delay=2.000 scheduled=1730000002.000 deadline=1730000001.000 ok=False
+        [10:41:17.003]   DEBUG quillrun.retry: deadline_check wall=1730893024.003 tick_start=1730893023.611 elapsed=0.392 remaining=1.000 credited=1.392 delay=2.000 ok=False
         [10:41:17.003]   DEBUG quillrun.scheduler: job 2be0 marked DEAD reason=deadline
         [10:41:17.990] tests/integration/test_retry.py::test_jitter_stays_within_bounds PASSED
         [10:41:58.411] ====== 1 failed, 60 passed in 48.5s ======
@@ -1258,8 +1620,8 @@ prompts:
 
         [09:12:40.004] runner=ci-shared-vm-02 load_avg=0.92 cpus=4 mem_free=3.8G
         [09:12:51.876] tests/integration/test_retry.py::test_backoff_respects_deadline PASSED
-        [09:12:51.875]   DEBUG quillrun.retry: next_attempt attempt=3 delay=8.000 scheduled=1730000014.000 deadline=1730000007.800 ok=False
-        [09:12:51.875]   DEBUG quillrun.retry: deadline_check wall=1730887971.802 scheduled_wall=1730887979.802 deadline_rel=7.800 elapsed_rel=... ok=False
+        [09:12:51.874]   DEBUG quillrun.retry: next_attempt attempt=3 delay=8.000 scheduled=1730000014.000 deadline=1730000013.950 ok=False
+        [09:12:51.875]   DEBUG quillrun.retry: deadline_check wall=1730887971.875 tick_start=1730887971.844 elapsed=0.031 remaining=7.950 credited=7.981 delay=8.000 ok=False
         [09:12:51.876]   DEBUG quillrun.scheduler: job 4a17 marked DEAD reason=deadline
 
         Tool result (read_log ci/run-7731/integration.log, filter "ntp|chrony|clock step|time jump"):
@@ -1286,12 +1648,62 @@ prompts:
         ci/run-7738/integration.log:0
         ci/run-7740/integration.log:0
 
+        Tool result (read_log ci/run-7731/integration.log, filter "slowest"):
+
+        ============================ slowest 10 durations ==============================
+        1.43s call     tests/integration/test_retry.py::test_backoff_doubles_each_attempt
+        1.21s call     tests/integration/test_retry.py::test_backoff_respects_deadline
+        0.98s call     tests/integration/test_pools.py::test_pool_isolation
+        0.91s call     tests/integration/test_leases.py::test_expired_lease_is_reclaimed
+        0.88s call     tests/integration/test_retry.py::test_jitter_stays_within_bounds
+        0.74s setup    tests/integration/test_retry.py::test_first_failure_schedules_retry_after_base
+        0.69s call     tests/integration/test_events.py::test_done_event_published_once
+        0.61s call     tests/integration/test_retry.py::test_dead_job_emits_event
+        0.58s call     tests/integration/test_retry.py::test_deadline_exactly_on_retry_time_is_allowed
+        0.55s call     tests/integration/test_leases.py::test_lease_renewal
+
+        Tool result (read_log ci/run-7729/integration.log, filter "slowest"):
+
+        ============================ slowest 10 durations ==============================
+        0.21s call     tests/integration/test_retry.py::test_backoff_doubles_each_attempt
+        0.14s call     tests/integration/test_pools.py::test_pool_isolation
+        0.12s call     tests/integration/test_retry.py::test_backoff_respects_deadline
+        0.11s call     tests/integration/test_leases.py::test_expired_lease_is_reclaimed
+        0.09s call     tests/integration/test_retry.py::test_jitter_stays_within_bounds
+        0.08s setup    tests/integration/test_retry.py::test_first_failure_schedules_retry_after_base
+        0.07s call     tests/integration/test_events.py::test_done_event_published_once
+        0.06s call     tests/integration/test_retry.py::test_dead_job_emits_event
+        0.06s call     tests/integration/test_retry.py::test_deadline_exactly_on_retry_time_is_allowed
+        0.05s call     tests/integration/test_leases.py::test_lease_renewal
+
+        Tool result (read_log ci/run-7736/integration.log, filter "test_backoff_respects_deadline|deadline_check|load_avg|chronyd"):
+
+        [14:02:11.530] runner=ci-shared-vm-11 load_avg=3.94 cpus=2 mem_free=1.6G
+        [14:02:24.871]   DEBUG quillrun.retry: deadline_check wall=1731074544.871 tick_start=1731074544.602 elapsed=0.269 remaining=13.950 credited=14.219 delay=2.000 ok=True
+        [14:02:25.402]   DEBUG quillrun.retry: deadline_check wall=1731074545.402 tick_start=1731074545.160 elapsed=0.242 remaining=11.950 credited=12.192 delay=4.000 ok=True
+        [14:02:25.988]   DEBUG quillrun.retry: deadline_check wall=1731074545.988 tick_start=1731074545.700 elapsed=0.288 remaining=7.950 credited=8.238 delay=8.000 ok=True
+        [14:02:26.301] tests/integration/test_retry.py::test_backoff_respects_deadline FAILED
+        [14:02:26.301]   AssertionError: attempt 3 scheduled at 1730000014.0, deadline was 1730000013.95
+
+        Note from the harness: run 7736 has no chronyd lines at all, so the clock step seen in
+        run 7731 is not a necessary condition for the failure. In all four failing runs the
+        elapsed value on the third deadline_check line is between 0.269 and 0.355 seconds; in
+        all passing runs it is between 0.012 and 0.047 seconds. The margin the test sets up
+        between the scheduled retry and the deadline is 0.050 seconds.
+
+        Note from the harness: the same test takes 1.21 s on the failing runner and 0.12 s
+        on the passing one. In both runs the FakeClock readings logged by the scheduler are
+        identical to the millisecond: now=1730000000.000, 1730000002.000, 1730000006.000.
+        The only values that differ between the two runs are the wall-clock fields on the
+        deadline_check line and the database statement durations.
+
         Note from the harness: in every failing run the "deadline_check" line reports
-        ok=True while the "next_attempt" line immediately above it reports scheduled past
-        deadline. In every passing run the two lines agree. The deadline_check line prints
-        wall-clock timestamps (1730893021.846) while next_attempt prints FakeClock
-        timestamps (1730000014.000). Failing runs: 7705 (load_avg 4.2), 7718 (load_avg 6.0),
-        7731 (load_avg 5.8), 7736 (load_avg 3.9). Passing runs all had load_avg below 2.
+        ok=True while the "next_attempt" line immediately above it reports ok=False, and
+        the job is rescheduled. In every passing run the two lines agree. The deadline_check
+        line prints wall-clock timestamps (1730893022.287) while next_attempt prints
+        FakeClock timestamps (1730000014.000). Failing runs: 7705 (load_avg 4.2), 7718
+        (load_avg 6.0), 7731 (load_avg 5.8), 7736 (load_avg 3.9). Passing runs all had
+        load_avg below 2, and in every passing run the logged elapsed value was below 0.05.
 
         Decide the next step and explain it.
       - |
@@ -1370,25 +1782,25 @@ prompts:
 
             @staticmethod
             def _wall_clock_deadline_check(now: float, scheduled: float, deadline: float) -> bool:
-                """Compare the time remaining until the deadline against the delay, using
-                the system wall clock as the reference frame.
+                """Re-check the deadline the way the admin UI countdown sees it.
 
-                The relative deadline is deadline - now on the scheduler's clock; the
-                relative delay is scheduled - now. We then ask whether, starting from the
-                wall clock reading taken here, the delay would land before the relative
-                deadline measured from the same wall clock reading.
+                `now` was read from the scheduler clock at the start of the tick, but the
+                wall clock has moved on since then, and the UI computes remaining time
+                from the wall clock. From the UI's point of view the job still has
+                (deadline - now) plus the time already spent in this tick before it is
+                dead, so credit that elapsed time back. This can only make the check more
+                permissive, never less, so it cannot mark a job dead early.
                 """
                 wall = time.time()
-                deadline_rel = deadline - now
-                scheduled_wall = wall + (scheduled - now)
-                # Allow for the time already spent in this scheduler tick, otherwise a
-                # slow tick makes the deadline look closer than it is.
                 tick_start = _TICK_START.get()
-                elapsed_rel = (wall - tick_start) if tick_start is not None else 0.0
-                ok = scheduled_wall <= wall + deadline_rel + elapsed_rel
+                elapsed = (wall - tick_start) if tick_start is not None else 0.0
+                remaining = deadline - now
+                delay = scheduled - now
+                ok = delay <= remaining + elapsed
                 log.debug(
-                    "deadline_check wall=%.3f scheduled_wall=%.3f deadline_rel=%.3f elapsed_rel=%.3f ok=%s",
-                    wall, scheduled_wall, deadline_rel, elapsed_rel, ok,
+                    "deadline_check wall=%.3f tick_start=%s elapsed=%.3f remaining=%.3f credited=%.3f delay=%.3f ok=%s",
+                    wall, f"{tick_start:.3f}" if tick_start is not None else "none",
+                    elapsed, remaining, remaining + elapsed, delay, ok,
                 )
                 return ok
 
@@ -1420,6 +1832,31 @@ prompts:
         src/quillrun/scheduler.py:141:        mark_tick_start(time.time())
         src/quillrun/admin/views.py:88:    now = datetime.now(tz=settings.ADMIN_TZ)
         src/quillrun/admin/views.py:89:    remaining = seconds_until(job.deadline, now.timestamp())
+
+        Tool result (read_file src/quillrun/admin/views.py, lines 80-102):
+
+        def job_detail(request, job_id: str):
+            job = db.get_job(job_id)
+            now = datetime.now(tz=settings.ADMIN_TZ)
+            remaining = seconds_until(job.deadline, now.timestamp())
+            # QR-2190: before this fix the countdown used job.deadline - now.timestamp()
+            # without the clamp and showed negative values for jobs the scheduler was
+            # still retrying. The scheduler now re-checks the deadline against the wall
+            # clock as well, so the two should agree; if you see a negative countdown
+            # here again, that is a bug in retry.py, not in this view.
+            return render(request, "job_detail.html", {
+                "job": job,
+                "remaining_seconds": remaining,
+                "next_attempt_in": (job.next_attempt_at - now.timestamp()) if job.next_attempt_at else None,
+                "attempts": db.attempts_for(job_id),
+            })
+
+        Note from the harness: the admin process runs with SystemClock in production, so
+        now.timestamp() here and the scheduler's clock agree to within milliseconds. In the
+        original QR-2190 bug report, the two jobs with negative countdowns had deadlines that
+        were exactly two hours off, because api/jobs.py parsed a local-time string as if it
+        were UTC. That parsing bug was fixed separately in QR-2193 on 10 October, one day
+        after QR-2190 was merged.
 
         Decide the next step and explain it.
       - |
@@ -1571,6 +2008,40 @@ prompts:
                 self._now += seconds
                 self._mono += seconds
 
+        Tool result (grep -rn "FakeClock\|SystemClock\|mark_tick_start" tests/ src/quillrun/__main__.py):
+
+        src/quillrun/__main__.py:31:    clock = SystemClock()
+        src/quillrun/__main__.py:44:    scheduler = Scheduler(broker=broker, db=db, clock=clock, retry_policy=policy, pool=args.pool, batch=args.batch)
+        tests/integration/test_retry.py:11:from quillrun.clock import FakeClock
+        tests/integration/test_retry.py:22:    return FakeClock(start=EPOCH)
+        tests/integration/test_leases.py:9:from quillrun.clock import FakeClock
+        tests/integration/test_pools.py:8:from quillrun.clock import FakeClock
+        tests/unit/test_clock.py:3:from quillrun.clock import FakeClock, SystemClock
+        tests/unit/test_clock.py:14:def test_fake_clock_now_and_monotonic_advance_together():
+        tests/unit/test_clock.py:22:def test_fake_clock_refuses_to_go_backwards():
+        tests/unit/test_scheduler.py:15:from quillrun.clock import FakeClock
+        tests/unit/test_scheduler.py:61:def test_run_once_marks_tick_start(monkeypatch):
+        tests/unit/test_scheduler.py:63:    monkeypatch.setattr("quillrun.scheduler.time.time", lambda: 1234.5)
+
+        Tool result (read_file tests/unit/test_scheduler.py, lines 58-70):
+
+        def test_run_once_marks_tick_start(monkeypatch):
+            """QR-2190: the scheduler records the wall clock at the start of each tick."""
+            monkeypatch.setattr("quillrun.scheduler.time.time", lambda: 1234.5)
+            captured = {}
+            monkeypatch.setattr("quillrun.scheduler.mark_tick_start", lambda t: captured.setdefault("t", t))
+            s = Scheduler(broker=FakeBroker(), db=FakeDb(), clock=FakeClock(start=0.0), retry_policy=RetryPolicy(), pool="unit")
+            s.run_once()
+            assert captured["t"] == 1234.5
+
+        Note from the harness: nothing in tests/ patches time.time inside quillrun.retry. In
+        the integration tests the retry module therefore reads the real wall clock while
+        everything else reads the FakeClock. In production both are the system clock, but
+        `now` is read once at the start of the tick, while the wall clock is read per job
+        after that job's handler and all preceding jobs' handlers in the batch have run;
+        with batch=50 and handlers that take seconds, elapsed can reach tens of seconds
+        inside one tick.
+
         Decide the next step and explain it.
       - |
         Tool result (read_file docs/design/retry-semantics.md):
@@ -1664,6 +2135,25 @@ prompts:
         - Should the deadline comparison use `<` instead of `<=`? Finance-adjacent
           jobs have asked for "strictly before". Not decided; current behaviour is `<=`.
 
+        ## Appendix: the 2024 incident that motivated R5
+
+        On 19 November 2024 a system clock step of 1.4 seconds on the pool a host, caused by
+        a misconfigured time daemon after a kernel upgrade, coincided with a tick in which
+        the old scheduler compared a scheduled time computed before the step against a
+        deadline read after it. Eleven invoice export jobs were marked dead 1.4 seconds
+        before their deadlines. They were re-queued by hand the next morning, but two of
+        them had already triggered the "export missed" alert to the finance team, who then
+        processed the month end manually and did not trust the automated export for the
+        following two cycles. The incident review concluded that the problem was not the
+        clock step itself but the fact that a scheduling decision had been made from two
+        different clock readings. R5 is the direct result: one reading of one clock per
+        tick, passed down to every decision made in that tick. The review also noted that
+        any future change that "just reads the clock once more to be safe" should be
+        rejected in review with a link to this appendix. A secondary conclusion was that
+        the scheduler's debug log must contain enough information to replay every decision
+        offline; that is why the next_attempt line logs now, delay, scheduled and deadline,
+        and why the property test described above existed.
+
         Tool result (git_log docs/design/retry-semantics.md --format="%h %ad %s"):
 
         8d2f0a1 2026-07-14 retry-semantics: note the property test and the <= boundary
@@ -1684,12 +2174,15 @@ prompts:
         broker-1  | 10:41:11.100 [info] queue quillrun.test purged
         broker-1  | 10:41:11.101 [info] queue quillrun.events purged
         db-1      | 10:41:11.104 LOG:  statement: TRUNCATE jobs, attempts, events RESTART IDENTITY
-        db-1      | 10:41:14.330 LOG:  duration: 318.442 ms  statement: UPDATE jobs SET state='waiting', attempt=$1, next_attempt_at=$2, error=$3 WHERE id=$4
-        db-1      | 10:41:14.331 WARNING:  checkpoint occurring too frequently (2 seconds apart)
-        db-1      | 10:41:14.331 HINT:  Consider increasing the configuration parameter "max_wal_size".
-        db-1      | 10:41:14.790 LOG:  duration: 221.903 ms  statement: SELECT ... FROM jobs WHERE pool=$1 AND state='waiting' AND next_attempt_at <= $2 ORDER BY next_attempt_at LIMIT $3 FOR UPDATE SKIP LOCKED
-        db-1      | 10:41:15.038 LOG:  duration: 244.117 ms  statement: UPDATE jobs SET state='waiting', attempt=$1, next_attempt_at=$2, error=$3 WHERE id=$4
-        broker-1  | 10:41:15.043 [info] publish to quillrun.events (0 consumers, message retained in queue)
+        db-1      | 10:41:13.921 LOG:  duration: 319.004 ms  statement: SELECT ... FROM jobs WHERE pool=$1 AND state='waiting' AND next_attempt_at <= $2 ORDER BY next_attempt_at LIMIT $3 FOR UPDATE SKIP LOCKED
+        db-1      | 10:41:14.242 LOG:  duration: 318.442 ms  statement: UPDATE jobs SET state='waiting', attempt=$1, next_attempt_at=$2, error=$3 WHERE id=$4
+        db-1      | 10:41:14.243 WARNING:  checkpoint occurring too frequently (2 seconds apart)
+        db-1      | 10:41:14.243 HINT:  Consider increasing the configuration parameter "max_wal_size".
+        db-1      | 10:41:14.570 LOG:  duration: 221.903 ms  statement: SELECT ... FROM jobs WHERE pool=$1 AND state='waiting' AND next_attempt_at <= $2 ORDER BY next_attempt_at LIMIT $3 FOR UPDATE SKIP LOCKED
+        db-1      | 10:41:14.818 LOG:  duration: 244.117 ms  statement: UPDATE jobs SET state='waiting', attempt=$1, next_attempt_at=$2, error=$3 WHERE id=$4
+        db-1      | 10:41:15.284 LOG:  duration: 351.208 ms  statement: SELECT ... FROM jobs WHERE pool=$1 AND state='waiting' AND next_attempt_at <= $2 ORDER BY next_attempt_at LIMIT $3 FOR UPDATE SKIP LOCKED
+        db-1      | 10:41:15.602 LOG:  duration: 312.990 ms  statement: UPDATE jobs SET state='waiting', attempt=$1, next_attempt_at=$2, error=$3 WHERE id=$4
+        broker-1  | 10:41:17.004 [info] publish to quillrun.events (0 consumers, message retained in queue)
         db-1      | 10:41:16.300 LOG:  duration: 102.871 ms  statement: TRUNCATE jobs, attempts, events RESTART IDENTITY
         db-1      | 10:41:58.400 LOG:  connection closed: user=qr database=qr_test
         broker-1  | 10:41:58.402 [info] connection from 172.19.0.4 closed
@@ -1721,8 +2214,8 @@ prompts:
 
         def test_decide_refuses_when_after_deadline():
             policy = RetryPolicy(base_seconds=2.0, factor=2.0, max_attempts=5, jitter=0.0)
-            # attempt 3 -> delay 8.0; now=6.0, deadline=7.8 -> scheduled 14.0 > 7.8
-            decision = policy.decide(attempt=3, now=6.0, deadline=7.8, rng=random.Random(0))
+            # attempt 3 -> delay 8.0; now=6.0, deadline=13.95 -> scheduled 14.0 > 13.95
+            decision = policy.decide(attempt=3, now=6.0, deadline=13.95, rng=random.Random(0))
             assert decision.allowed is False
             assert decision.reason == "deadline"
 
@@ -1733,12 +2226,37 @@ prompts:
             assert decision.allowed is True
             assert decision.next_attempt_at == 6.0
 
-        Note from the harness: the unit tests pass because in a unit test the whole decide()
-        call completes in microseconds, so `wall - tick_start` is effectively zero and the
-        wall-clock check agrees with the scheduler-clock check. In the integration test the
-        tick includes two database round trips, which took 318 ms and 244 ms on the loaded
-        runner (12 ms on the idle one), and mark_tick_start was called before the lease
-        query.
+        Note from the harness: the unit tests pass because in a unit test nothing calls
+        mark_tick_start, so tick_start is None, elapsed is 0.0 and the wall-clock check
+        reduces to the scheduler-clock check. In the integration test the tick includes a
+        lease query that took 351 ms on the loaded runner (10 ms on the idle one), and
+        mark_tick_start was called before that query, so elapsed was 0.355 s when the
+        decision was made, seven times the 50 ms margin the test sets up.
+
+        Tool result (read_log prod/scheduler-pool-b.log, filter "job 3e9f", 2026-10-29):
+
+        2026-10-29T23:58:40.112Z DEBUG quillrun.scheduler: run_once pool=b now=1761782320.112 picked=50
+        2026-10-29T23:59:02.471Z DEBUG quillrun.scheduler: job 3e9f attempt=2 failed: ExportUpstreamTimeout
+        2026-10-29T23:59:02.471Z DEBUG quillrun.retry: next_attempt attempt=2 delay=60.000 scheduled=1761782380.112 deadline=1761782340.000 ok=False
+        2026-10-29T23:59:02.472Z DEBUG quillrun.retry: deadline_check wall=1761782342.471 tick_start=1761782320.112 elapsed=22.359 remaining=19.888 credited=42.247 delay=60.000 ok=False
+        2026-10-29T23:59:02.473Z DEBUG quillrun.scheduler: job 3e9f marked DEAD reason=deadline
+
+        Tool result (read_log prod/scheduler-pool-b.log, filter "job 7c11", 2026-10-30):
+
+        2026-10-30T00:28:00.004Z DEBUG quillrun.scheduler: run_once pool=b now=1761784080.004 picked=50
+        2026-10-30T00:28:41.930Z DEBUG quillrun.scheduler: job 7c11 attempt=3 failed: ExportUpstreamTimeout
+        2026-10-30T00:28:41.930Z DEBUG quillrun.retry: next_attempt attempt=3 delay=120.000 scheduled=1761784200.004 deadline=1761784170.000 ok=False
+        2026-10-30T00:28:41.931Z DEBUG quillrun.retry: deadline_check wall=1761784121.930 tick_start=1761784080.004 elapsed=41.926 remaining=89.996 credited=131.922 delay=120.000 ok=True
+        2026-10-30T00:28:41.932Z DEBUG quillrun.scheduler: job 7c11 rescheduled attempt=3 next=1761784200.004
+        2026-10-30T00:30:00.118Z DEBUG quillrun.scheduler: run_once pool=b now=1761784200.118 picked=50
+        2026-10-30T00:30:03.402Z DEBUG quillrun.scheduler: job 7c11 attempt=4 succeeded duration=3.284
+        2026-10-30T00:30:03.402Z INFO  quillrun.scheduler: job 7c11 done attempt=4 finished_at=1761784200.118 deadline=1761784170.000 late_by=30.118
+
+        Note from the harness: job 7c11 is a finance export with a hard deadline at 00:29:30;
+        the downstream consolidation job had already run at 00:29:45 and recorded "no export
+        available", so the late success was never used. Of the 1,942 production jobs
+        retried past their deadline since 13 October, 1,710 are in the finance-export
+        handler family, and 388 of those eventually succeeded late.
 
         Decide the next step and explain it.
       - |
@@ -1793,14 +2311,15 @@ prompts:
         +    @staticmethod
         +    def _wall_clock_deadline_check(now: float, scheduled: float, deadline: float) -> bool:
         +        wall = time.time()
-        +        deadline_rel = deadline - now
-        +        scheduled_wall = wall + (scheduled - now)
         +        tick_start = _TICK_START.get()
-        +        elapsed_rel = (wall - tick_start) if tick_start is not None else 0.0
-        +        ok = scheduled_wall <= wall + deadline_rel + elapsed_rel
+        +        elapsed = (wall - tick_start) if tick_start is not None else 0.0
+        +        remaining = deadline - now
+        +        delay = scheduled - now
+        +        ok = delay <= remaining + elapsed
         +        log.debug(
-        +            "deadline_check wall=%.3f scheduled_wall=%.3f deadline_rel=%.3f elapsed_rel=%.3f ok=%s",
-        +            wall, scheduled_wall, deadline_rel, elapsed_rel, ok,
+        +            "deadline_check wall=%.3f tick_start=%s elapsed=%.3f remaining=%.3f credited=%.3f delay=%.3f ok=%s",
+        +            wall, f"{tick_start:.3f}" if tick_start is not None else "none",
+        +            elapsed, remaining, remaining + elapsed, delay, ok,
         +        )
         +        return ok
 
@@ -1809,9 +2328,9 @@ prompts:
         -def test_decision_independent_of_real_elapsed_time():
         -    """R5: the decision must not depend on how long the real clock took."""
         -    policy = RetryPolicy(base_seconds=2.0, factor=2.0, max_attempts=5, jitter=0.0)
-        -    fast = policy.decide(attempt=3, now=6.0, deadline=7.8, rng=random.Random(0))
+        -    fast = policy.decide(attempt=3, now=6.0, deadline=13.95, rng=random.Random(0))
         -    time.sleep(0.5)
-        -    slow = policy.decide(attempt=3, now=6.0, deadline=7.8, rng=random.Random(0))
+        -    slow = policy.decide(attempt=3, now=6.0, deadline=13.95, rng=random.Random(0))
         -    assert fast == slow
         -    assert fast.allowed is False
         -
@@ -1821,7 +2340,7 @@ prompts:
         -    policy = RetryPolicy(base_seconds=2.0, factor=2.0, max_attempts=5, jitter=0.0)
         -    mark_tick_start(time.time())
         -    time.sleep(sleep_before)
-        -    decision = policy.decide(attempt=3, now=6.0, deadline=7.8, rng=random.Random(0))
+        -    decision = policy.decide(attempt=3, now=6.0, deadline=13.95, rng=random.Random(0))
         -    assert decision.allowed is False
         -
 
@@ -1853,6 +2372,53 @@ prompts:
         Lines where next_attempt said ok=False but deadline_check said ok=True, 13 Oct to 6 Nov,
         pool b only: 1,942. Those jobs were rescheduled and attempted after their deadline.
         Lines where next_attempt said ok=True but deadline_check said ok=False: 0.
+
+        Tool result (read_file reviews/QR-2190-pr-412.md):
+
+        Pull request 412: QR-2190 make admin countdown and scheduler agree on deadline
+        Author: Soren Adeyemi. Reviewer: Mei Lindqvist. Merged 9 October.
+
+        Mei (comment on retry.py line 76): This reads time.time() inside the policy. The
+        design note says the policy must not consult a clock of its own (R5). Is there a
+        way to do this without it?
+
+        Soren: I thought about passing the wall clock in from the scheduler, but the policy
+        interface is public and three services construct RetryPolicy directly, so I cannot
+        add a parameter to decide() without breaking them. Reading it here keeps the
+        interface stable. It does not change the scheduled time, only whether we allow it,
+        and only in the direction of allowing more, so it cannot make a job dead early,
+        which is what R5 is really protecting against.
+
+        Mei: "Only in the direction of allowing more" is the bit I want to be sure about.
+        If it allows a retry that lands after the deadline, is that not also a violation of
+        R2?
+
+        Soren: Technically, but by at most the time spent in the tick, which is
+        milliseconds. The UI showed a job as dead that the scheduler then retried, and the
+        complaint was about that inconsistency. This makes them agree.
+
+        Mei: Okay. I am removing my objection but I want it noted that I asked. Can you at
+        least keep the property test?
+
+        Soren: The property test asserts the decision is the same with and without a real
+        sleep, and with this change that is no longer strictly true for the boundary case,
+        so it fails. I have removed it and said why in the commit message. If we want it
+        back we can add a tolerance.
+
+        Mei (comment on tests/unit/test_retry_policy.py): A tolerance on a property that is
+        supposed to be exact is the thing the design note warns about. But I take the point
+        that the interface constraint is real. Approving, with the note that if this ever
+        shows up as flakiness we revisit.
+
+        Priya (drive-by comment, 9 October): Did anyone check whether the negative countdown
+        was actually a scheduler problem? The two jobs in the original screenshot had
+        deadlines that look like they were parsed in the wrong timezone; they are exactly
+        two hours off. That would be an API parsing bug, not a scheduler one.
+
+        Soren: Good catch, I will file it separately (QR-2193). This change is still useful
+        for making the UI and scheduler agree in general.
+
+        Merged by Soren Adeyemi, 9 October, 16:30.
 
         You now have the full picture. Decide the next step and explain it. Name the exact
         change, say whether the design document or the code is wrong, state the test that
@@ -2249,6 +2815,36 @@ prompts:
         uv.lock:416-    { name = "certifi" },
         uv.lock:417-    { name = "h11" },
         uv.lock:418-]
+
+        Tool result (grep -n -B 1 -A 13 'name = "harbourmaster"' uv.lock):
+
+        uv.lock:530-[[package]]
+        uv.lock:531:name = "harbourmaster"
+        uv.lock:532-version = "2.11.0"
+        uv.lock:533-source = { editable = "." }
+        uv.lock:534-dependencies = [
+        uv.lock:535-    { name = "apscheduler" },
+        uv.lock:536-    { name = "fennelhttp" },
+        uv.lock:537-    { name = "psycopg", extra = ["binary"] },
+        uv.lock:538-    { name = "pydantic" },
+        uv.lock:539-    { name = "structlog" },
+        uv.lock:540-]
+        uv.lock:541-
+        uv.lock:542-[package.metadata]
+        uv.lock:543-requires-dist = [
+        uv.lock:544-    { name = "fennelhttp", specifier = ">=3.2,<4" },
+
+        Tool result (grep -rn "fennelhttp" src/ --include=*.py -h | sort | uniq -c):
+
+              1 import fennelhttp
+              1 from harbourmaster.http.client import GatewayClient, GatewayError  # noqa: F401 (pollers must not import fennelhttp directly)
+              1 self._client = fennelhttp.Client(
+              1 timeout=fennelhttp.Timeout(connect=5.0, read=timeout_seconds),
+              1 except (fennelhttp.TransportError, GatewayError) as exc:
+              1 def _get(self, path: str) -> fennelhttp.Response:
+
+        Note from the harness: the lock file shows a single fennelhttp version for the whole
+        tree and no other dependency pins it. Only http/client.py imports it directly.
 
         Tool result (grep -rn "fennelhttp" src/ tests/ --include=*.py -l):
 
