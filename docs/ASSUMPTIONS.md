@@ -80,6 +80,71 @@ Consequences:
 - Phase-2 Ampere+ GPUs with FlashAttention will have a flatter curve and far cheaper prefill; every
   replica class gets its own calibration file.
 
+## Milestone 2 measurements (pacing, load generator, report)
+
+**Prompt sizing (loadgen/content.py).** Through vLLM's `/tokenize` with the Qwen2.5 chat template on
+2026-11-06: every word of the vocabulary is one token with a leading space, sentence periods are one
+token, so 400 planned tokens measured 400–402 (ratio 1.000–1.005); the chat template adds a fixed
+**29 tokens** per request (Qwen's default system prompt plus role markers). The fake replica's
+estimator counts words and punctuation the same way (ratio 1.000). Prompt sizes in a plan are
+therefore content tokens; `prompt_tokens` in the meter is content + 29 (+ history for multi-turn).
+
+**KV budget when the desktop holds memory.** With LM Studio and the desktop holding 3.5 GiB, vLLM
+runs at `VLLM_GPU_MEM=0.64`: KV cache 4.27 GiB = **124,256 tokens** (7,766 blocks), 7.6× at 16k
+context, against 181,936 tokens at the usual 0.82. Step rates do not depend on the KV budget, so the
+calibration above still applies; the milestone-2 GPU runs below used the smaller budget and the
+report's KV-usage percentages are relative to it (`loadrun.json` records the budget of each run).
+
+**Pacing precision.** `tests/test_pacing.py` asserts the steady-state delivered rate of a 30 tps shape
+within ±5% of 30 tok/s while the fake engine runs at ~200 tok/s (measured client-side from per-token
+timestamps), and that a complete response of 60 tokens is released about one second after its first
+token. Fake-profile smoke runs (two seeds, 115 requests): every tenant's delivered rate at or above
+its shape's rate, zero floor violations, throttled time 72% of chat streaming time and 98% of batch
+(complete-mode) time, i.e. the fake engine is far faster than any shape sold.
+
+### GPU run of `config/scenarios/mixed.yaml` (2026-11-06, gateway run `20261106-224910`, seeds 1 and 2)
+
+18-minute timeline + 90 s drain per seed, no admission control (milestone 2), pacing on, KV budget
+124,256 tokens (see above). Per seed: 628 / 602 requests, 594 / 575 ok, 34 / 27 refused (all agent
+steps whose context outgrew the 8k shape, `429 context_exceeds_shape`), 0 errors, 0 vLLM
+preemptions (A9 holds). Requests in flight (admitted → last token delivered) mean 6.6, p95 14; the
+engine's own running count averaged 4.3 because delivery is paced after the engine finishes. KV
+usage mean 12%, p95 36%: on this card compute, not KV, is the constraint.
+
+| Tenant (shape) | ok / run | per-token USD | shape billed USD | CV per-token | CV shape | TTFT p50 / p95 | delivered tok/s (shape) | floor violations | throttled share |
+|---|---|---|---|---|---|---|---|---|---|
+| chat (8k.30tps, stream) | 282 / 293 | 0.142 / 0.149 | 0.033 / 0.033 | 3.5% | **0.8%** | 0.56 s / 3.2 s | 30.0 (30) | 52% | 31% |
+| agent (8k.60tps, stream) | 218 / 186 | 0.178 / 0.150 | 0.044 / 0.039 | 12.3% | **8.5%** | 1.3 s / 3.8 s | 38.3 (60) | **92%** | 2% |
+| notetaker (16k.30tps, complete) | 15 / 14 | 0.014 / 0.015 | 0.004 / 0.005 | 6.7% | 7.9% | 3.7–5.8 s / 6.7–8.3 s | 26.2 (30) | 63% | 36% |
+| batch (8k.15tps.lazy, complete) | 79 / 82 | 0.018 / 0.017 | 0.010 / 0.010 | 1.3% | **0.3%** | 0.55 s / 2.7 s | 15.3 (15) | 10% | 93% |
+
+CV = coefficient of variation of the tenant's bill across the two seeds (two "days"); more seeds
+are needed for a tight estimate, but the direction is consistent: shape bills vary less than
+per-token bills for every tenant except the note-taker's 15-request sample.
+
+What the run shows:
+
+- **Pacing holds where the engine keeps up**: chat delivered 30.0 tok/s on the 30 tps shape and
+  batch 15.3 on 15 tps, with 31% and 93% of their streaming time spent throttled (the engine was
+  ahead; complete responses are held until their virtual stream would end).
+- **The 60 tps shape is not honoured under this load**: with ~6.6 requests in flight the engine's
+  per-stream decode rate is ~40 tok/s (calibration: `n_max(60)` = 2 at 6k context), so 92% of agent
+  streams violated the floor. The seat rule of §5.2 would have refused or queued most of them; this
+  is the milestone-3 baseline.
+- **Prefill interference (A4) dominates floor violations of the 30 tps shapes**: chat streams ran at
+  68 tok/s engine rate with no long (≥3k) prefill in flight and 29 tok/s (p10 13.5) while one was;
+  floor-violation share 4% vs 58%. TTFT p50 grew from 0.44 s (≤2k prompts) to 1.7 s (6–9k) and p95
+  to 6.1 s, i.e. prefills queue behind each other.
+- **The billing cap did its job**: uncapped wall-clock would have billed $0.130 per run; the capped
+  shape bill was $0.090 (bound $0.094). Customers did not pay for the floor violations above, the
+  provider did.
+- **Prefill is unpriced under the placeholder shape prices.** The run processed 1.9M prompt tokens
+  against 140k output tokens; per-token revenue was $0.35 per run, shape revenue $0.09, GPU cost
+  $0.09 (at $0.30/h). The placeholder `price_per_second` was derived from the output-token
+  reference only, so a 6k-token summary pays for its ~4 s of prefill at the same rate as 4 s of
+  decode. Shape prices (or a per-prompt-token component) must cover prefill before the schemes are
+  compared on revenue; that is a pricing input to milestone 3/4, not a property of time-slicing.
+
 ## Environment the numbers depend on
 
 - Docker Desktop 4.2.0 with the WSL driver-store workaround (`scripts/vllm-entrypoint.sh`); WSL kernel

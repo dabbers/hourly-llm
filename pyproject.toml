@@ -23,6 +23,8 @@ dev = [
 [project.scripts]
 slotgw = "slotgw.main:main"
 slotgw-fake-replica = "slotgw.replicas.fake_server:main"
+slotgw-loadgen = "loadgen.main:main"
+slotgw-report = "report.build:main"
 
 [build-system]
 requires = ["hatchling"]

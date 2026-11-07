@@ -1,0 +1,26 @@
+# Two-minute smoke scenario: every profile and arrival process once, small sizes.
+#   uv run slotgw-loadgen --scenario config/scenarios/smoke.yaml --seed 1
+name: smoke
+hour_length_s: 60          # note-taker "hour marks" every 60 s
+drain_s: 30
+sample_interval_s: 2
+phases:
+  - {name: quiet, duration_s: 30, rate_scale: 0.5}
+  - {name: peak, duration_s: 60, rate_scale: 1.0}
+  - {name: quiet2, duration_s: 30, rate_scale: 0.5}
+tenants:
+  - name: chat
+    api_key: sk-local-chat
+    profile: {kind: chat, turns: [2, 4], first_user_tokens: [100, 300], user_tokens_per_turn: [100, 300], output_tokens: [40, 120], think_s: [2, 6]}
+    arrivals: {kind: diurnal, rate_per_min: 6}
+  - name: agent
+    api_key: sk-local-agent
+    profile: {kind: agent, steps: [2, 5], first_user_tokens: [500, 1000], growth_tokens: [300, 800], output_tokens: [60, 200], pause_s: [1, 3]}
+    arrivals: {kind: bursty, rate_on_per_min: 4, rate_off_per_min: 0.5, mean_on_s: 30, mean_off_s: 30}
+  - name: notetaker
+    api_key: sk-local-notetaker
+    profile: {kind: notetaker, prompt_tokens: [2000, 4000], output_tokens: [100, 250]}
+    arrivals: {kind: hourmark, per_mark: 3, sigma_s: 10, background_per_min: 0.5}
+  - name: batch
+    api_key: sk-local-batch
+    profile: {kind: batch, prompt_tokens: [400, 1200], output_tokens: [100, 300], concurrency: 1}

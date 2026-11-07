@@ -1,8 +1,10 @@
 # One command, two modes:
 #   GPU:   docker compose --profile gpu up --build            (vLLM on the local GPU + gateway)
 #   Fake:  docker compose --profile fake up --build           (in-process fake replica + gateway)
-# Load generator and report (milestone 2) run as one-off services:
+# Load generator and report run as one-off services against whichever gateway is up
+# (both gateways answer to the network alias "gateway"):
 #   docker compose run --rm loadgen --scenario config/scenarios/mixed.yaml --seed 1
+#   docker compose run --rm report runs/<run_id>
 
 x-gateway: &gateway
   image: slotgw-gateway:local
@@ -13,6 +15,17 @@ x-gateway: &gateway
     - ./calibration:/app/calibration:ro
   ports:
     - "${SLOTGW_PORT:-8080}:8080"
+  networks:
+    default:
+      aliases: [gateway]
+
+x-tool: &tool
+  profiles: ["tools"]
+  image: slotgw-gateway:local
+  build: .
+  volumes:
+    - ./config:/app/config:ro
+    - ./runs:/app/runs
 
 services:
   vllm:
@@ -73,8 +86,10 @@ services:
     build: .
     command: ["slotgw-fake-replica", "--port", "8001"]
     environment:
-      FAKE_RATE_CURVE: ${FAKE_RATE_CURVE:-1:60,8:40,16:30,32:20}
-      FAKE_KV_TOKENS: ${FAKE_KV_TOKENS:-160000}
+      # default curve approximates the 2080 Ti at ~4k context (calibration/local-2080ti.yaml)
+      FAKE_RATE_CURVE: ${FAKE_RATE_CURVE:-1:120,2:100,4:70,8:50,12:40,16:32,24:22,32:16}
+      FAKE_KV_TOKENS: ${FAKE_KV_TOKENS:-181936}
+      FAKE_PREFILL_TPS: ${FAKE_PREFILL_TPS:-2000}
     ports:
       - "8001:8001"
 
@@ -87,6 +102,16 @@ services:
       SLOTGW_RUN_ID: ${RUN_ID:-}
     depends_on:
       - fake-replica
+
+  loadgen:
+    <<: *tool
+    entrypoint: ["slotgw-loadgen"]
+    environment:
+      GATEWAY_URL: ${GATEWAY_URL:-http://gateway:8080}
+
+  report:
+    <<: *tool
+    entrypoint: ["slotgw-report"]
 
 volumes:
   hf-cache:

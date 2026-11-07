@@ -1,0 +1,4 @@
+# Gateway behaviour knobs (docs/DESIGN.md sections 5-7). Every key has a default in slotgw/config.py.
+pacing:
+  enabled: true          # false = milestone-1 passthrough (tokens leave as fast as the engine makes them)
+  bucket_depth_s: 1.0    # per-request token bucket depth, in seconds of the shape's rate

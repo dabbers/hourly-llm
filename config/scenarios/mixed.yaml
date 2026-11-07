@@ -1,0 +1,34 @@
+# The milestone-2 workload (docs/DESIGN.md section 9): four tenants on four shapes, 18 minutes,
+# phases quiet -> ramp -> peak (with a note-taker "hour mark" at 600 s) -> quiet.
+# "Days" are the same scenario with different seeds:
+#   uv run slotgw-loadgen --scenario config/scenarios/mixed.yaml --seed 1
+# Rates are sized for the local 2080 Ti (ASSUMPTIONS.md): roughly 6-10 concurrent streams at peak.
+name: mixed
+hour_length_s: 600
+drain_s: 90
+sample_interval_s: 2
+phases:
+  - {name: quiet, duration_s: 180, rate_scale: 0.25}
+  - {name: ramp, duration_s: 120, rate_scale: 0.6}
+  - {name: peak, duration_s: 480, rate_scale: 1.0}
+  - {name: quiet2, duration_s: 300, rate_scale: 0.25}
+tenants:
+  - name: chat                      # real-time chat bots: streamed, diurnal session arrivals
+    api_key: sk-local-chat
+    shape: small.8k.30tps
+    profile: {kind: chat, turns: [3, 10], first_user_tokens: [200, 800], user_tokens_per_turn: [200, 800], output_tokens: [50, 300], think_s: [5, 30]}
+    arrivals: {kind: diurnal, rate_per_min: 4.5}
+  - name: agent                     # agentic loops: streamed, context grows per step, bursty sessions
+    api_key: sk-local-agent
+    shape: small.8k.60tps
+    profile: {kind: agent, steps: [5, 15], first_user_tokens: [1000, 2000], growth_tokens: [500, 1500], output_tokens: [100, 400], pause_s: [1, 5]}
+    arrivals: {kind: bursty, rate_on_per_min: 3, rate_off_per_min: 0.5, mean_on_s: 120, mean_off_s: 180}
+  - name: notetaker                 # meeting summaries: complete responses clustered at hour marks
+    api_key: sk-local-notetaker
+    shape: small.16k.30tps
+    profile: {kind: notetaker, prompt_tokens: [3000, 8000], output_tokens: [150, 400]}
+    arrivals: {kind: hourmark, per_mark: 8, sigma_s: 120, background_per_min: 0.5}
+  - name: batch                     # closed-loop batch work on the lazy shape
+    api_key: sk-local-batch
+    shape: small.8k.15tps.lazy
+    profile: {kind: batch, prompt_tokens: [500, 2000], output_tokens: [200, 600], concurrency: 2}

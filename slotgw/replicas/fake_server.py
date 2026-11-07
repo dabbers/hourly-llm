@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -42,13 +43,18 @@ def step_rate(curve: list[tuple[int, float]], n: int) -> float:
     return curve[-1][1]
 
 
+_TOKEN_RE = re.compile(r"\w+|[^\w\s]")
+
+
 def estimate_tokens(messages: list[dict[str, Any]]) -> int:
+    """Roughly one token per word or punctuation mark, plus chat-template overhead. Matches how
+    the load generator sizes its prompts (loadgen/content.py) so fake runs see realistic counts."""
     total = 3
     for m in messages:
         content = m.get("content") or ""
         if isinstance(content, list):
             content = " ".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
-        total += len(str(content)) // 4 + 4
+        total += len(_TOKEN_RE.findall(str(content))) + 4
     return total
 
 

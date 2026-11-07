@@ -37,7 +37,10 @@ CREATE TABLE IF NOT EXISTS requests (
   e2e_ms REAL,
   revoked INTEGER NOT NULL,
   preempted_runs INTEGER NOT NULL,
-  abort_reason TEXT
+  abort_reason TEXT,
+  load_run TEXT,
+  scenario TEXT,
+  seed INTEGER
 );
 """
 
@@ -68,6 +71,9 @@ class RequestRecord:
     revoked: bool = False
     preempted_runs: int = 0
     abort_reason: str | None = None
+    load_run: str | None = None  # set from X-Slotgw-Run by the load generator
+    scenario: str | None = None
+    seed: int | None = None
 
     @property
     def ttft_ms(self) -> float | None:
@@ -97,6 +103,10 @@ class Meter:
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA)
+        have = {row[1] for row in self._conn.execute("PRAGMA table_info(requests)")}
+        for col, typ in (("load_run", "TEXT"), ("scenario", "TEXT"), ("seed", "INTEGER")):
+            if col not in have:  # meter files written before milestone 2
+                self._conn.execute(f"ALTER TABLE requests ADD COLUMN {col} {typ}")
         self._conn.commit()
 
     def record(self, rec: RequestRecord) -> None:

@@ -288,6 +288,18 @@ client at bucket pace. Consequences, stated plainly:
   steps of concurrent chat streams (A4). The report splits every metric by delivery mode and measures
   decode step rate while long prefills are in flight.
 
+Implementation (milestone 2, `slotgw/pacing.py`): the bucket is pure arithmetic over timestamps,
+`schedule(n, t_now) -> t_deliver`. The stream path runs a producer task that drains the engine into
+an unbounded buffer and a consumer that sleeps until each chunk's `t_deliver`; the complete path
+runs every chunk through the same arithmetic and releases the response at the virtual last-token
+time. **Throttled time** is the wall-clock time delivery was held by the bucket beyond
+`max(chunk arrival, previous delivery)`: zero when the engine is slower than the shape, the engine's
+lead otherwise. The bucket starts full, so the first `tps × bucket_depth_s` tokens leave as fast
+as the engine makes them (a "head start"); the report judges the delivered rate over the whole
+stream (head start included, so it can only help) against the shape's tps. Knobs: `config/gateway.yaml` `pacing.enabled` (false = milestone-1 passthrough) and
+`pacing.bucket_depth_s` (default 1.0). On client disconnect the producer is cancelled, which aborts
+the upstream request; buffered tokens are `wasted_tokens`.
+
 Alternative considered: **chunked generation** (request `max_tokens=k` repeatedly, relying on prefix
 caching) would make GPU time itself proportional to the shape's rate. It costs a re-prefill per chunk and
 breaks stop sequences/sampling continuity. Not proposed for the PoC; noted as a phase-2 experiment.
@@ -353,6 +365,11 @@ Placeholder shape prices are derived from the per-token reference so that `$/out
 guaranteed rate` (= `price_per_second ÷ tps`) matches the reference for interactive shapes and the
 discounted reference for lazy shapes; `pricing.yaml` can override every number.
 
+Every response carries the bill it would get under both schemes in its `slotgw.billing` object
+(`billed_s`, `bound_s`, `wall_s`, `shape_usd`, `bound_usd`, `per_token_usd`, `delivered_tokens`), and
+`slotgw.throttled_ms`, so a customer can audit a request without the meter (`slotgw/billing.py`).
+The report recomputes the same numbers from the meter rows with the config snapshot of the run.
+
 Token classification: each delivered token draws from the guaranteed bucket first; if that bucket is
 empty and burst rate is lent, the token is burst. Prompt tokens are guaranteed if the request is within
 shape, else burst.
@@ -382,16 +399,38 @@ built from phases (e.g. quiet 3 min → ramp 2 min → peak 8 min with an "hour 
 and `hour_length_s` (default 600) defines where note-taker spikes land. "Days" = the same scenario
 with different seeds.
 
-Content: prompts are synthetic text sized with the model tokenizer; outputs use `ignore_eos=true` and
-`max_tokens` so output lengths are exactly the sampled values (reproducible load, independent of
-what the model says).
+Content: prompts are synthetic text sized in tokens; outputs use `ignore_eos=true` and `max_tokens`
+so output lengths are exactly the sampled values (reproducible load, independent of what the model
+says). Prompt text comes from a vocabulary of common English words that are single tokens in
+GPT-style BPE tokenizers (one token per word, one per sentence period, `loadgen/content.py`); the
+load generator measures the real ratio and the chat-template overhead through the gateway's
+`/admin/tokenize` at the start of every run and records them in `loadrun.json` (measured values in
+ASSUMPTIONS.md). Multi-turn profiles send the real conversation history (previous user turns and
+the model's actual replies), so prefix caching sees realistic prefixes and the context grows as it
+would for a real client.
+
+Reproducibility is a **plan**: `loadgen/plan.py` turns scenario + seed into every session, arrival
+offset, step size, pause and content seed before the first request (written to `plan.json` with a
+digest). Execution follows the plan; only wall-clock send times of dependent steps vary with server
+latency. The gateway records the load run, scenario and seed from request headers
+(`X-Slotgw-Run/Scenario/Seed`), so one gateway run holds several seeded load runs under
+`runs/<gateway_run>/loads/<load_run>/` (plan, `client.csv` with client-observed timings, `samples.csv`
+with the engine's running count and KV usage sampled through the gateway, a config snapshot).
+
+A session ends at the first refusal or error, as a real client's would. With the agent profile as
+specified (context growing 0.5–1.5k per step over 5–15 steps) most agent sessions outgrow an 8k
+shape around step 5, so milestone 2 reports `429 context_exceeds_shape` refusals for that tenant;
+milestone 4's context bursts are the fix under test, and a scenario variant with smaller growth is
+one line in the YAML.
 
 ---
 
 ## 10. Report
 
-`report/build.py runs/<run_id>...` → `per_tenant.csv`, `per_replica.csv`, `summary.csv`, `report.html`
-(self-contained, Chart.js inline). `pricing.yaml` holds reference per-token prices (input/output per
+`report/build.py runs/<run_id>...` → `per_request.csv`, `per_tenant.csv`, `summary.csv`,
+`across_seeds.csv`, `interference.csv` (`per_replica.csv` from milestone 3) and `report.html`
+(self-contained: charts are inline SVG generated by `report/charts.py`, no JavaScript and no vendored
+library, light and dark themes). `pricing.yaml` holds reference per-token prices (input/output per
 1M, batch discount), `price_per_second` per shape, and `$/GPU-hour` per replica.
 
 Per tenant and run:
@@ -443,6 +482,9 @@ Each milestone ends with: tests green, `docker compose up` works from a clean ch
 | vLLM | v0.32.0, Triton attention accepted on this card; `v0.23.0` as escape hatch | §2.1. |
 | Overcommit | `tps_overcommit` knob, runs at 1.0 / 1.5 / 2.0; KV never overcommitted | The vCPU lever (§5.2). |
 | Git | Repository initialised at M1 start | Default, unobjected. |
+| Report charts (M2) | Inline SVG generated in Python instead of Chart.js | Self-contained offline HTML without vendoring a JS library; the CSVs carry the numbers, native `<title>` tooltips carry hover values. |
+| Bucket head start (M2) | `bucket_depth_s = 1.0`: the first second of tokens leaves unpaced | Per §6; a floor violation is a delivered rate below 95% of the promise over the whole stream, which the head start can only help, and the billing cap already bounds what the customer pays. |
+| Agent context overflow (M2) | Sent as specified; the gateway refuses with 429 and the session ends | Keeps the profile honest to the brief and gives milestone 4's context bursts a measured baseline instead of hiding the problem in the load generator. |
 
 ---
 
@@ -453,6 +495,7 @@ Each milestone ends with: tests green, `docker compose up` works from a clean ch
 - Desktop apps share the GPU (WDDM). Free memory varies run to run; the calibration script records it, and runs should close LM Studio.
 - Prefill interference (A4) is not noise on this card, it is a pause: one long prompt stalls every running stream for seconds. Without a mitigation in M3 the 30/60 tps shapes are honest only while no long prompt is prefilling.
 - Wall-clock billing needs honest timestamps: queue time must be excluded and the cap needs TTFT, so arrival, admission, first-token, engine-done and delivered are separate meter columns.
+- Prefill is GPU time that the placeholder shape prices do not cover: `price_per_second` was derived from the output-token reference, so a long prompt bills only its TTFT seconds at the decode rate. Measured in the milestone-2 GPU run (ASSUMPTIONS.md): 1.9M prompt tokens vs 140k output tokens, shape revenue a quarter of per-token revenue, roughly GPU cost. Milestone 3 must price prefill (a prompt-token component, or a price per second that includes the measured prefill share) before the schemes are compared on provider revenue.
 - Under wall-clock billing every tps burst is revenue given away; the report quantifies it so the provider can decide how much latency goodwill to buy.
 - Python gateway overhead at a few hundred tokens/s across tens of streams is fine; at phase-2 scale (3–4 replicas) still fine; beyond that a Go rewrite would be the answer.
 
@@ -463,18 +506,18 @@ Each milestone ends with: tests green, `docker compose up` works from a clean ch
 ```
 vLLM/
   compose.yaml                 # vllm (gpu profile), gateway, fake replicas (fake profile), loadgen/report as run-once services
-  config/{shapes,tenants,replicas,pricing}.yaml, config/scenarios/*.yaml
+  config/{shapes,tenants,replicas,pricing,gateway}.yaml, config/scenarios/*.yaml
   calibration/<replica>.yaml   # measured KV + step-rate curves + feasible shapes
-  slotgw/                      # gateway package: api/, auth/, shapes/, scheduler/, burst/, pacing/, meter/, replicas/
-  loadgen/                     # profiles/, arrivals/, runner.py
-  report/                      # metrics.py, pricing.py, html.py, build.py
+  slotgw/                      # gateway: api.py, config.py, pacing.py, billing.py, meter.py, clock.py, replicas/
+  loadgen/                     # scenario.py, arrivals.py, plan.py, content.py, runner.py, main.py
+  report/                      # metrics.py, charts.py (inline SVG), html.py, build.py
   scripts/calibrate.py
   tests/                       # unit + integration (gateway and fake replica as real uvicorn servers)
-  runs/<run_id>/               # meter.sqlite, config snapshot, CSVs, report.html
+  runs/<run_id>/               # meter.sqlite, loads/<load_run>/ (plan, client.csv, samples.csv, config), report/
   docs/DESIGN.md (design + decisions), ASSUMPTIONS.md (measured), RESULTS.md, VLLM_TURING_VERIFICATION.md
 ```
 
 Stack: Python 3.12, FastAPI/uvicorn, httpx, pydantic (config), numpy (RNG), pandas (report),
 tokenizers (shape check), pytest + pytest-asyncio, ruff. Everything runs with `docker compose up`
-(profiles `gpu` / `fake`), plus `docker compose run loadgen -- --scenario X --seed N` and
-`docker compose run report -- runs/...`.
+(profiles `gpu` / `fake`), plus `docker compose run --rm loadgen --scenario X --seed N` and
+`docker compose run --rm report runs/...` (both gateways answer to the network alias `gateway`).

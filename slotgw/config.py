@@ -60,12 +60,24 @@ class Pricing(BaseModel):
     provider: ProviderPricing
 
 
+class PacingSettings(BaseModel):
+    """Per-request delivery pacing (docs/DESIGN.md section 6)."""
+
+    enabled: bool = True
+    bucket_depth_s: float = Field(default=1.0, ge=0)
+
+
+class GatewaySettings(BaseModel):
+    pacing: PacingSettings = Field(default_factory=PacingSettings)
+
+
 class Config(BaseModel):
     shapes: list[Shape]
     tenants: list[Tenant]
     models: dict[str, str]
     replicas: list[ReplicaConfig]
     pricing: Pricing
+    gateway: GatewaySettings = Field(default_factory=GatewaySettings)
 
     @model_validator(mode="after")
     def _check_references(self) -> Config:
@@ -106,10 +118,12 @@ def load_config(config_dir: str | Path | None = None) -> Config:
     tenants = _read_yaml(base / "tenants.yaml")
     replicas = _read_yaml(base / "replicas.yaml")
     pricing = _read_yaml(base / "pricing.yaml")
+    gateway = _read_yaml(base / "gateway.yaml") if (base / "gateway.yaml").exists() else {}
     return Config(
         shapes=shapes.get("shapes", []),
         tenants=tenants.get("tenants", []),
         models=replicas.get("models", {}),
         replicas=replicas.get("replicas", []),
         pricing=pricing,
+        gateway=gateway,
     )
