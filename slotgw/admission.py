@@ -98,6 +98,7 @@ class ReplicaLedger:
         block_size: int,
         settings: AdmissionSettings,
         slot_plan: dict[str, int] | None = None,
+        exclude_shapes: Iterable[str] | None = None,
     ):
         self.replica = replica
         self.id = replica.id
@@ -107,6 +108,7 @@ class ReplicaLedger:
         self.block_size = max(1, block_size)
         self.settings = settings
         self.slot_plan = dict(slot_plan or {})
+        self.exclude_shapes = set(exclude_shapes or ())  # shapes this replica never runs (placement rule, phase 2)
         self.healthy = True
         self.holds: dict[str, Hold] = {}
         self.admitted_total = 0
@@ -322,6 +324,7 @@ class ReplicaLedger:
             "admitted_total": self.admitted_total,
             "profile": self.profile.source,
             "slot_plan": self.slot_plan,
+            "exclude_shapes": sorted(self.exclude_shapes),
         }
 
 
@@ -410,14 +413,20 @@ class Scheduler:
 
     # ---- placement ----------------------------------------------------------------------------
 
-    def candidates(self, shape: Shape) -> list[ReplicaLedger]:
-        return [ledg for ledg in self.ledgers if ledg.model_alias == shape.model]
+    def candidates(self, shape: Shape, replica_id: str | None = None) -> list[ReplicaLedger]:
+        """Replicas that serve the shape's model and do not exclude the shape; `replica_id` pins one."""
+        return [
+            ledg for ledg in self.ledgers
+            if ledg.model_alias == shape.model and shape.name not in ledg.exclude_shapes
+            and (replica_id is None or ledg.id == replica_id)
+        ]
 
     def place(
-        self, shape: Shape, prompt_tokens: int, record: Waiter | _Probe | None = None, kv_needed: int | None = None
+        self, shape: Shape, prompt_tokens: int, record: Waiter | _Probe | None = None, kv_needed: int | None = None,
+        replica_id: str | None = None,
     ) -> ReplicaLedger | None:
         best: tuple[tuple[int, float], ReplicaLedger] | None = None
-        for ledg in self.candidates(shape):
+        for ledg in self.candidates(shape, replica_id):
             reason = ledg.check(shape, ledg.kv_blocks(kv_needed) if kv_needed is not None else ledg.kv_for(shape), prompt_tokens)
             if reason is not None:
                 if record is not None:
@@ -538,18 +547,22 @@ class Scheduler:
         return next((r for r in self.reservations.values() if r.covers(tenant, shape)), None)
 
     def reserve(
-        self, tenant: str, shape: Shape, slots: int, reservation_id: str | None = None, tags: dict[str, Any] | None = None
+        self, tenant: str, shape: Shape, slots: int, reservation_id: str | None = None, tags: dict[str, Any] | None = None,
+        replica_id: str | None = None,
     ) -> Reservation:
-        """Place `slots` standing holds of `shape` (spread by the usual scoring); all or nothing."""
+        """Place `slots` standing holds of `shape` (spread by the usual scoring, or all on `replica_id`);
+        all or nothing."""
         if slots < 1:
             raise ValueError("slots must be at least 1")
+        if replica_id is not None and not any(ledg.id == replica_id for ledg in self.ledgers):
+            raise ValueError(f"unknown replica {replica_id!r}")
         if not self.sellable(shape):
             raise Unsellable(shape.name)
         rid = reservation_id or "res-" + uuid.uuid4().hex[:10]
         placed: list[Hold] = []
         probe = _Probe()
         for i in range(slots):
-            ledg = self.place(shape, 0, record=probe)
+            ledg = self.place(shape, 0, record=probe, replica_id=replica_id)
             if ledg is None:
                 for h in placed:
                     h.ledger.release(h)
@@ -630,6 +643,8 @@ class Scheduler:
         reservation covering the shape takes one of its slots (or waits for one); a context burst
         (`burst_ctx`, `kv_tokens` = its real need) is admitted only when nothing else waits."""
         timeout = shape.max_queue_s if max_wait_s is None else max_wait_s
+        if burst_ctx:  # a burst that cannot be placed now fails fast (DESIGN 12, post-M4)
+            timeout = min(timeout, self.burst.context_max_queue_s)
         if not burst_ctx:
             res = self.reservation_for(tenant, shape)
             if res is not None:

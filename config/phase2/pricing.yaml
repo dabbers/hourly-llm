@@ -1,0 +1,14 @@
+# Phase 2 prices (docs/PHASE2.md section 2). The per-token reference is the 7B-class basket from
+# config/phase2/price_references.yaml (Qwen 2.5 7B, Llama 3.1 8B, Ministral 8B, Granite 8B on
+# OpenRouter); shape prices derive from it at parity unless shapes.yaml sets price_per_second.
+reference: ${SLOTGW_PRICE_REFERENCE:-basket-7b}
+token:
+  batch_discount: 0.5
+  cache_read_ratio: 0.25       # used only when the active reference lists no cache-read price (basket-7b does)
+provider:
+  gpu_usd_per_hour: 0.89       # RunPod Secure Cloud on-demand RTX 4090, October 2026 snapshot; per pod
+  target_utilization: 0.70
+  margin_targets: [0.0, 0.25, 0.5]
+shape:
+  prompt_usd_per_million: ${SLOTGW_PROMPT_USD_PER_MILLION:-auto}
+  reservation_price_factor: ${SLOTGW_RESERVATION_FACTOR:-2.3}   # covers the slice's cost share on the 2080 Ti; the report also prints 1.0 and 3.2

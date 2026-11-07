@@ -1,0 +1,2447 @@
+profile: agent
+system: "You are a terse software agent. Reason step by step, then propose exactly one next action: a tool call or a specific code change. State why in one or two sentences. Do not speculate beyond the evidence you have been shown."
+prompts:
+  - id: agent-billing-rounding
+    max_tokens: 400
+    turns:
+      - |
+        You are working in the ledgerline repository, a Python service that turns metered
+        usage records into monthly invoices for about 300 tenants. A customer-facing bug has
+        been assigned to you and you own the fix end to end.
+
+        Ticket LL-4821, filed by the finance team on 3 November:
+
+        "The October 2026 invoice for Harrowgate Logistics (tenant t-00913) shows a total of
+        18,442.17 on the PDF, but if you add up the line items printed on the same PDF you get
+        18,442.21. The invoice does not foot by four cents. We checked September for the same
+        tenant and it was off by one cent. Two other tenants with tiered pricing, Pellworth
+        Insurance (t-00121) and Marrow and Finch (t-00457), show gaps of between one and five
+        cents. Every flat-rate tenant we spot-checked is fine. We cannot close the month until
+        invoices foot, and our auditors will ask. We believe this started with the deploy on
+        3 October, because the September invoices produced on 1 October were fine and the
+        re-run of September on 4 October (for the Pellworth correction) was not."
+
+        What a teammate established before handing this over:
+        - The invoice run is tools/run_invoices.py, which calls ledgerline.billing.build_invoice
+          once per tenant and hands the result to ledgerline.pdf.render.
+        - Tiered pricing was reworked in late September (ticket LL-4410) to support per-tier
+          minimum charges, requested by sales for two enterprise tenants.
+        - The full test suite passes on main. Coverage for billing.py is reported as 94 percent.
+        - Money is meant to be handled as Decimal with two-place quantization at the line level,
+          per docs/billing-rules.md. Nobody has re-read that document since the rework.
+        - The run log for 31 October is in logs/invoice-run-2026-10-31.log and is about 2,000
+          lines; the teammate noticed some WARN lines but did not investigate them.
+
+        Constraints:
+        - Do not change stored usage records or any database schema.
+        - Any fix must come with a test that fails before the change and passes after it.
+        - Finance needs a clear answer on whether past invoices have to be re-issued, and
+          docs/billing-rules.md has a section on re-issue policy that you should respect.
+        - Keep the change small; this will be deployed as a hotfix.
+
+        Repository layout (relevant parts):
+          src/ledgerline/billing.py   invoice assembly
+          src/ledgerline/rates.py     rate schedules and tier arithmetic
+          src/ledgerline/usage.py     usage record loading
+          src/ledgerline/models.py    dataclasses for Tenant, Invoice, InvoiceLine, UsageRecord
+          src/ledgerline/pdf.py       PDF rendering of an Invoice
+          tests/                      pytest suite
+          docs/billing-rules.md       the money rules finance signed off on
+          tools/run_invoices.py       the monthly entry point
+          logs/                       run logs, one file per run
+
+        Tools available to you: read_file(path), run_tests(path, flags), grep(pattern, path),
+        git_log(path, flags), read_log(path, filter). Each call returns its output as the
+        next message.
+
+        Decide which file to read first and explain why in two or three sentences. Then I will
+        return the tool result.
+      - |
+        Tool result (read_file src/ledgerline/billing.py):
+
+        """Invoice assembly for ledgerline.
+
+        This module turns a tenant's usage records for one billing period into an
+        Invoice: a list of InvoiceLine objects plus subtotal, tax and total. Rating
+        (turning a quantity into money) lives in rates.py. This module is responsible
+        for grouping usage by product, applying the tenant's rate schedule, and
+        assembling the totals that appear on the PDF.
+
+        Money rules (summarised from docs/billing-rules.md, section 3):
+          * all arithmetic is Decimal; a float reaching this module is a bug
+          * line amounts are quantized to cents with ROUND_HALF_UP
+          * the invoice total is the sum of the line amounts as displayed
+        """
+        from __future__ import annotations
+
+        import logging
+        from dataclasses import dataclass, field
+        from decimal import Decimal, ROUND_HALF_UP
+        from typing import Callable, Iterable
+
+        from ledgerline.models import Invoice, InvoiceLine, Period, Tenant, UsageRecord
+        from ledgerline.rates import RateSchedule, TierResult, split_into_tiers
+
+        log = logging.getLogger(__name__)
+
+        CENT = Decimal("0.01")
+        ZERO = Decimal("0")
+
+
+        def _cents(value: Decimal) -> Decimal:
+            """Quantize to two places, half up. Rejects floats loudly."""
+            if isinstance(value, float):
+                raise TypeError(f"float reached billing arithmetic: {value!r}")
+            return value.quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+        @dataclass
+        class _Bucket:
+            """All usage for one product code within the period."""
+
+            product_code: str
+            quantity: Decimal = ZERO
+            records: list[UsageRecord] = field(default_factory=list)
+
+            def add(self, record: UsageRecord) -> None:
+                if record.quantity < ZERO:
+                    # Negative usage is a correction record; allowed, see rules 2.4.
+                    log.info("correction record %s qty=%s", record.id, record.quantity)
+                self.quantity += record.quantity
+                self.records.append(record)
+
+
+        def _validate(records: Iterable[UsageRecord], period: Period, tenant: Tenant) -> list[UsageRecord]:
+            """Drop records outside the period and refuse mixed currencies.
+
+            Usage loading is supposed to filter by period already, but the loader has
+            been wrong before (LL-3902), so this is a cheap second line of defence.
+            """
+            kept: list[UsageRecord] = []
+            dropped = 0
+            for record in records:
+                if not (period.start <= record.occurred_at < period.end):
+                    dropped += 1
+                    continue
+                if record.currency != tenant.currency:
+                    raise ValueError(
+                        f"record {record.id} currency {record.currency} does not match "
+                        f"tenant {tenant.id} currency {tenant.currency}"
+                    )
+                kept.append(record)
+            if dropped:
+                log.warning("tenant %s: dropped %d records outside %s", tenant.id, dropped, period)
+            return kept
+
+
+        def _group(records: Iterable[UsageRecord]) -> dict[str, _Bucket]:
+            buckets: dict[str, _Bucket] = {}
+            for record in records:
+                bucket = buckets.get(record.product_code)
+                if bucket is None:
+                    bucket = buckets[record.product_code] = _Bucket(record.product_code)
+                bucket.add(record)
+            return buckets
+
+
+        def _flat_line(bucket: _Bucket, schedule: RateSchedule) -> InvoiceLine:
+            """Flat-rate product: one price for every unit."""
+            raw = bucket.quantity * schedule.flat_price
+            amount = _cents(raw)
+            return InvoiceLine(
+                product_code=bucket.product_code,
+                description=schedule.description,
+                quantity=bucket.quantity,
+                unit_price=schedule.flat_price,
+                amount=amount,
+                raw_amount=raw,
+                sub_lines=[],
+            )
+
+
+        def _tiered_line(bucket: _Bucket, schedule: RateSchedule) -> InvoiceLine:
+            """Tiered product: the quantity is split across tiers, each priced separately.
+
+            Since LL-4410 a tier may carry a minimum charge: if the tier's raw amount is
+            below the minimum, the minimum is charged instead. Each tier is shown on the
+            PDF as a sub-line with its own amount, so each is quantized individually.
+            The line amount is the sum of the displayed sub-line amounts.
+            """
+            tiers: list[TierResult] = split_into_tiers(schedule, bucket.quantity)
+            sub_lines: list[tuple[str, Decimal]] = []
+            raw_total = ZERO
+            for tier in tiers:
+                raw = tier.quantity * tier.price
+                if tier.minimum is not None and ZERO < raw < tier.minimum:
+                    log.debug("tier %s below minimum %s, charging minimum", tier.label, tier.minimum)
+                    raw = tier.minimum
+                raw_total += raw
+                sub_lines.append((tier.label, _cents(raw)))
+            amount = sum((a for _, a in sub_lines), ZERO)
+            return InvoiceLine(
+                product_code=bucket.product_code,
+                description=schedule.description,
+                quantity=bucket.quantity,
+                unit_price=None,
+                amount=amount,
+                raw_amount=raw_total,
+                sub_lines=sub_lines,
+            )
+
+
+        def build_invoice(tenant: Tenant, records: Iterable[UsageRecord], period: Period) -> Invoice:
+            """Assemble the invoice for one tenant and one period.
+
+            Lines are ordered by product code so that re-runs produce identical PDFs.
+            Tax is applied to the subtotal at the tenant's rate and quantized once.
+            """
+            records = _validate(records, period, tenant)
+            buckets = _group(records)
+            lines: list[InvoiceLine] = []
+            for code in sorted(buckets):
+                bucket = buckets[code]
+                schedule = tenant.schedule_for(code)
+                if schedule is None:
+                    log.warning("tenant %s has usage for unpriced product %s; skipping", tenant.id, code)
+                    continue
+                if schedule.is_tiered:
+                    lines.append(_tiered_line(bucket, schedule))
+                else:
+                    lines.append(_flat_line(bucket, schedule))
+
+            # Subtotal is computed from the unrounded line amounts and rounded once, so
+            # that rounding error does not accumulate across many small lines (LL-4410).
+            subtotal = _cents(sum((line.raw_amount for line in lines), ZERO))
+            tax = _cents(subtotal * tenant.tax_rate)
+            total = subtotal + tax
+
+            displayed = sum((line.amount for line in lines), ZERO)
+            if displayed != subtotal:
+                # Soft check only; finance asked for a warning rather than a failure so
+                # that a single odd tenant does not block the whole monthly run.
+                log.warning(
+                    "foot_check tenant=%s subtotal=%s display_sum=%s delta=%s",
+                    tenant.id, subtotal, displayed, subtotal - displayed,
+                )
+
+            return Invoice(
+                tenant_id=tenant.id,
+                period=period,
+                lines=lines,
+                subtotal=subtotal,
+                tax=tax,
+                total=total,
+                currency=tenant.currency,
+            )
+
+
+        def apply_credits(invoice: Invoice, credits: Iterable[Decimal]) -> Invoice:
+            """Subtract outstanding credit notes from the total.
+
+            Credits never make a total negative; any remainder is carried to the next
+            period by the caller. Credits are already quantized when stored.
+            """
+            remaining = invoice.total
+            applied = ZERO
+            for credit in credits:
+                take = min(credit, remaining)
+                applied += take
+                remaining -= take
+                if remaining == ZERO:
+                    break
+            return invoice.with_credit(applied)
+
+
+        def build_all(
+            tenants: Iterable[Tenant],
+            load_usage: Callable[[Tenant, Period], Iterable[UsageRecord]],
+            period: Period,
+        ) -> list[Invoice]:
+            """Convenience wrapper used by tools/run_invoices.py. Fails fast on the first
+            tenant that cannot be built; partial runs are worse than no run."""
+            invoices: list[Invoice] = []
+            for tenant in tenants:
+                try:
+                    invoices.append(build_invoice(tenant, load_usage(tenant, period), period))
+                except Exception:
+                    log.exception("invoice build failed for tenant %s", tenant.id)
+                    raise
+            log.info("built %d invoices for %s", len(invoices), period)
+            return invoices
+
+        Decide the next step and explain it.
+      - |
+        Tool result (read_file tests/test_billing.py):
+
+        from decimal import Decimal as D
+
+        import pytest
+
+        from ledgerline.billing import apply_credits, build_invoice
+        from ledgerline.models import Period, Tenant, UsageRecord
+        from ledgerline.rates import RateSchedule, Tier
+        from tests.factories import record, tenant_with
+
+        PERIOD = Period.month(2026, 10)
+
+
+        def flat(code, price, description="flat"):
+            return RateSchedule(product_code=code, description=description, flat_price=D(price))
+
+
+        def tiered(code, tiers, description="tiered"):
+            return RateSchedule(product_code=code, description=description, tiers=tiers)
+
+
+        def test_flat_rate_single_line():
+            t = tenant_with(flat("api-calls", "0.0040"))
+            inv = build_invoice(t, [record("api-calls", 125000)], PERIOD)
+            assert len(inv.lines) == 1
+            assert inv.lines[0].amount == D("500.00")
+            assert inv.subtotal == D("500.00")
+
+
+        def test_flat_rate_rounds_half_up():
+            t = tenant_with(flat("storage-gb", "0.0235"))
+            inv = build_invoice(t, [record("storage-gb", 1)], PERIOD)
+            # 0.0235 -> 0.02 with ROUND_HALF_EVEN, 0.02 with HALF_UP too; use 0.025
+            t2 = tenant_with(flat("storage-gb", "0.025"))
+            inv2 = build_invoice(t2, [record("storage-gb", 1)], PERIOD)
+            assert inv.lines[0].amount == D("0.02")
+            assert inv2.lines[0].amount == D("0.03")
+
+
+        def test_flat_rate_multiple_products_sorted():
+            t = tenant_with(flat("b-prod", "1.00"), flat("a-prod", "2.00"))
+            inv = build_invoice(t, [record("b-prod", 3), record("a-prod", 2)], PERIOD)
+            assert [l.product_code for l in inv.lines] == ["a-prod", "b-prod"]
+            assert inv.subtotal == D("7.00")
+
+
+        def test_subtotal_equals_sum_of_lines_flat():
+            t = tenant_with(flat("x", "0.33"), flat("y", "0.67"), flat("z", "1.01"))
+            inv = build_invoice(t, [record("x", 7), record("y", 11), record("z", 13)], PERIOD)
+            assert inv.subtotal == sum(l.amount for l in inv.lines)
+
+
+        def test_tiered_crosses_boundary():
+            sched = tiered("msgs", [Tier("first 1000", 1000, D("0.10")), Tier("over 1000", None, D("0.05"))])
+            t = tenant_with(sched)
+            inv = build_invoice(t, [record("msgs", 1500)], PERIOD)
+            line = inv.lines[0]
+            assert line.sub_lines == [("first 1000", D("100.00")), ("over 1000", D("25.00"))]
+            assert line.amount == D("125.00")
+
+
+        def test_tier_minimum_applied_when_below():
+            sched = tiered("seats", [Tier("base", 10, D("12.00"), minimum=D("60.00")), Tier("extra", None, D("9.00"))])
+            t = tenant_with(sched)
+            inv = build_invoice(t, [record("seats", 3)], PERIOD)
+            assert inv.lines[0].sub_lines[0] == ("base", D("60.00"))
+            assert inv.lines[0].amount == D("60.00")
+
+
+        def test_tier_minimum_not_applied_when_zero_usage():
+            sched = tiered("seats", [Tier("base", 10, D("12.00"), minimum=D("60.00"))])
+            t = tenant_with(sched)
+            inv = build_invoice(t, [record("seats", 0)], PERIOD)
+            assert inv.lines[0].amount == D("0.00")
+
+
+        def test_tax_applied_once_on_subtotal():
+            t = tenant_with(flat("x", "1.00"), tax_rate=D("0.20"))
+            inv = build_invoice(t, [record("x", 100)], PERIOD)
+            assert inv.tax == D("20.00")
+            assert inv.total == D("120.00")
+
+
+        def test_records_outside_period_dropped(caplog):
+            t = tenant_with(flat("x", "1.00"))
+            inside = record("x", 1)
+            outside = record("x", 1, occurred_at=PERIOD.end)
+            inv = build_invoice(t, [inside, outside], PERIOD)
+            assert inv.subtotal == D("1.00")
+            assert "dropped 1 records" in caplog.text
+
+
+        def test_mixed_currency_rejected():
+            t = tenant_with(flat("x", "1.00"))
+            with pytest.raises(ValueError):
+                build_invoice(t, [record("x", 1, currency="XXX")], PERIOD)
+
+
+        def test_unpriced_product_skipped_with_warning(caplog):
+            t = tenant_with(flat("x", "1.00"))
+            inv = build_invoice(t, [record("x", 1), record("mystery", 5)], PERIOD)
+            assert len(inv.lines) == 1
+            assert "unpriced product mystery" in caplog.text
+
+
+        def test_credits_never_go_negative():
+            t = tenant_with(flat("x", "1.00"))
+            inv = build_invoice(t, [record("x", 10)], PERIOD)
+            credited = apply_credits(inv, [D("4.00"), D("8.00")])
+            assert credited.total == D("0.00")
+            assert credited.credit_applied == D("10.00")
+
+
+        def test_float_rejected():
+            t = tenant_with(flat("x", "1.00"))
+            with pytest.raises(TypeError):
+                build_invoice(t, [record("x", 1.5)], PERIOD)
+
+
+        def test_empty_usage_yields_zero_invoice():
+            t = tenant_with(flat("x", "1.00"))
+            inv = build_invoice(t, [], PERIOD)
+            assert inv.lines == []
+            assert inv.total == D("0.00")
+
+        Tool result (run_tests tests/test_billing.py -v --cov=ledgerline.billing):
+
+        ============================= test session starts ==============================
+        platform linux -- Python 3.12.6, pytest-8.3.3
+        rootdir: /work/ledgerline
+        configfile: pyproject.toml
+        plugins: cov-5.0.0
+        collected 14 items
+
+        tests/test_billing.py::test_flat_rate_single_line PASSED                 [  7%]
+        tests/test_billing.py::test_flat_rate_rounds_half_up PASSED              [ 14%]
+        tests/test_billing.py::test_flat_rate_multiple_products_sorted PASSED    [ 21%]
+        tests/test_billing.py::test_subtotal_equals_sum_of_lines_flat PASSED     [ 28%]
+        tests/test_billing.py::test_tiered_crosses_boundary PASSED               [ 35%]
+        tests/test_billing.py::test_tier_minimum_applied_when_below PASSED       [ 42%]
+        tests/test_billing.py::test_tier_minimum_not_applied_when_zero_usage PASSED [ 50%]
+        tests/test_billing.py::test_tax_applied_once_on_subtotal PASSED          [ 57%]
+        tests/test_billing.py::test_records_outside_period_dropped PASSED        [ 64%]
+        tests/test_billing.py::test_mixed_currency_rejected PASSED               [ 71%]
+        tests/test_billing.py::test_unpriced_product_skipped_with_warning PASSED [ 78%]
+        tests/test_billing.py::test_credits_never_go_negative PASSED             [ 85%]
+        tests/test_billing.py::test_float_rejected PASSED                        [ 92%]
+        tests/test_billing.py::test_empty_usage_yields_zero_invoice PASSED       [100%]
+
+        ---------- coverage: platform linux, python 3.12.6 -----------
+        Name                          Stmts   Miss  Cover   Missing
+        -----------------------------------------------------------
+        src/ledgerline/billing.py       104      6    94%   96-97, 131-136
+        -----------------------------------------------------------
+        TOTAL                           104      6    94%
+
+        ============================== 14 passed in 0.41s ==============================
+
+        Note from the harness: lines 96-97 are the tier-minimum debug log and reassignment;
+        lines 131-136 are the foot_check warning block in build_invoice. Every tiered test
+        above uses quantities and prices whose products are exact to the cent.
+
+        Decide the next step and explain it.
+      - |
+        Tool result (grep -n -E "quantize|_cents|ROUND_|raw_amount|\.amount" src/ledgerline/):
+
+        src/ledgerline/billing.py:19:from decimal import Decimal, ROUND_HALF_UP
+        src/ledgerline/billing.py:31:def _cents(value: Decimal) -> Decimal:
+        src/ledgerline/billing.py:35:    return value.quantize(CENT, rounding=ROUND_HALF_UP)
+        src/ledgerline/billing.py:80:    amount = _cents(raw)
+        src/ledgerline/billing.py:86:        amount=amount,
+        src/ledgerline/billing.py:87:        raw_amount=raw,
+        src/ledgerline/billing.py:106:        sub_lines.append((tier.label, _cents(raw)))
+        src/ledgerline/billing.py:107:    amount = sum((a for _, a in sub_lines), ZERO)
+        src/ledgerline/billing.py:113:        amount=amount,
+        src/ledgerline/billing.py:114:        raw_amount=raw_total,
+        src/ledgerline/billing.py:125:    subtotal = _cents(sum((line.raw_amount for line in lines), ZERO))
+        src/ledgerline/billing.py:126:    tax = _cents(subtotal * tenant.tax_rate)
+        src/ledgerline/billing.py:129:    displayed = sum((line.amount for line in lines), ZERO)
+        src/ledgerline/models.py:44:class InvoiceLine:
+        src/ledgerline/models.py:52:    amount: Decimal            # displayed, quantized to cents
+        src/ledgerline/models.py:53:    raw_amount: Decimal        # unquantized, for audit only; never displayed
+        src/ledgerline/models.py:54:    sub_lines: list[tuple[str, Decimal]]
+        src/ledgerline/models.py:71:class Invoice:
+        src/ledgerline/models.py:78:    subtotal: Decimal
+        src/ledgerline/models.py:79:    tax: Decimal
+        src/ledgerline/models.py:80:    total: Decimal
+        src/ledgerline/models.py:88:    def with_credit(self, applied: Decimal) -> "Invoice":
+        src/ledgerline/models.py:91:        return replace(self, credit_applied=applied, total=self.total - applied)
+        src/ledgerline/pdf.py:14:from decimal import Decimal, ROUND_HALF_UP
+        src/ledgerline/pdf.py:61:def _money(value: Decimal, currency: str) -> str:
+        src/ledgerline/pdf.py:63:    # Defensive: values should already be quantized, but the formatter must
+        src/ledgerline/pdf.py:64:    # never print more than two places whatever it is handed.
+        src/ledgerline/pdf.py:65:    q = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        src/ledgerline/pdf.py:118:        for line in invoice.lines:
+        src/ledgerline/pdf.py:121:            row.cell(_money(line.amount, invoice.currency), align="right")
+        src/ledgerline/pdf.py:123:            for label, sub_amount in line.sub_lines:
+        src/ledgerline/pdf.py:126:                sub.cell(_money(sub_amount, invoice.currency), align="right", muted=True)
+        src/ledgerline/pdf.py:140:        totals.row("Subtotal", _money(invoice.subtotal, invoice.currency))
+        src/ledgerline/pdf.py:141:        totals.row(f"Tax ({tenant.tax_rate:.0%})", _money(invoice.tax, invoice.currency))
+        src/ledgerline/pdf.py:143:        totals.row("Total due", _money(invoice.total, invoice.currency), bold=True)
+        src/ledgerline/rates.py:12:from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
+        src/ledgerline/rates.py:97:            # Quantities are integers for every product we sell today, but the
+        src/ledgerline/rates.py:98:            # schema allows fractional usage, so round down into the tier.
+        src/ledgerline/rates.py:99:            take = min(remaining, tier.size).quantize(Decimal("1"), rounding=ROUND_DOWN)
+        src/ledgerline/usage.py:71:    quantity = Decimal(str(row["quantity"]))   # str() so floats do not leak precision
+
+        Tool result (grep -n -E "foot|display_sum|LL-4410|LL-4821" src/ tests/ tools/ docs/):
+
+        src/ledgerline/billing.py:94:    Since LL-4410 a tier may carry a minimum charge: if the tier's raw amount is
+        src/ledgerline/billing.py:124:    # that rounding error does not accumulate across many small lines (LL-4410).
+        src/ledgerline/billing.py:131:            "foot_check tenant=%s subtotal=%s display_sum=%s delta=%s",
+        tools/run_invoices.py:58:    # LL-4410: warnings are collected and emailed to finance after the run rather
+        tools/run_invoices.py:59:    # than failing the run. Finance confirmed they review the email.
+        tools/run_invoices.py:60:    warnings = [r for r in handler.records if r.levelno == logging.WARNING]
+        tools/run_invoices.py:61:    if warnings:
+        tools/run_invoices.py:62:        mailer.send(FINANCE_LIST, subject=f"invoice run {period}: {len(warnings)} warnings", body=_format(warnings))
+        docs/billing-rules.md:41:## 3.3 The invoice must foot
+        docs/billing-rules.md:43:The subtotal printed on an invoice is the arithmetic sum of the line amounts
+        docs/billing-rules.md:88:## 5 Re-issue policy
+        docs/billing-rules.md:102:(LL-4410) Tier minimums: see 4.2.
+        tests/test_rates.py:12:# LL-4410 regression tests for minimums
+        tests/test_pdf.py:77:def test_pdf_totals_block_matches_invoice_fields():
+
+        Tool result (grep -n "def " tests/test_pdf.py):
+
+        tests/test_pdf.py:18:def render_to_text(invoice):
+        tests/test_pdf.py:31:def test_pdf_has_one_row_per_line():
+        tests/test_pdf.py:44:def test_pdf_sub_lines_indented_under_parent():
+        tests/test_pdf.py:58:def test_pdf_money_format_two_places():
+        tests/test_pdf.py:66:def test_pdf_money_format_thousands_separator():
+        tests/test_pdf.py:77:def test_pdf_totals_block_matches_invoice_fields():
+        tests/test_pdf.py:93:def test_pdf_credit_row_only_when_credit_applied():
+
+        Note from the harness: test_pdf_totals_block_matches_invoice_fields asserts that the
+        rendered Subtotal, Tax and Total strings equal the formatted invoice.subtotal, .tax
+        and .total fields. It does not compare the subtotal against the rendered line rows.
+
+        Decide the next step and explain it.
+      - |
+        Tool result (read_file src/ledgerline/rates.py):
+
+        """Rate schedules and tier arithmetic.
+
+        A RateSchedule describes how one product is priced for one tenant. It is
+        either flat (one unit price) or tiered (an ordered list of Tier objects,
+        each covering a span of quantity at its own unit price). Tiers are
+        cumulative: the first `size` units go into tier one, the next `size` units
+        into tier two, and so on. A tier with size None is open-ended and must be
+        last.
+
+        LL-4410 added an optional minimum charge per tier. The minimum applies when
+        the tier has non-zero usage whose raw charge is below the minimum. A tier
+        with zero usage is never charged, even if it has a minimum; that was an
+        explicit decision by sales, recorded in docs/billing-rules.md 4.2.
+        """
+        from __future__ import annotations
+
+        from dataclasses import dataclass
+        from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
+        from typing import Optional
+
+        ZERO = Decimal("0")
+
+
+        @dataclass(frozen=True)
+        class Tier:
+            label: str
+            size: Optional[int]          # None means open-ended
+            price: Decimal               # unit price within this tier
+            minimum: Optional[Decimal] = None
+
+            def __post_init__(self) -> None:
+                if isinstance(self.price, float) or isinstance(self.minimum, float):
+                    raise TypeError(f"tier {self.label}: prices must be Decimal, not float")
+                if self.size is not None and self.size <= 0:
+                    raise ValueError(f"tier {self.label}: size must be positive or None")
+                if self.minimum is not None and self.minimum < ZERO:
+                    raise ValueError(f"tier {self.label}: minimum must not be negative")
+
+
+        @dataclass(frozen=True)
+        class TierResult:
+            """The portion of a quantity that landed in one tier, with that tier's price."""
+
+            label: str
+            quantity: Decimal
+            price: Decimal
+            minimum: Optional[Decimal]
+
+            @property
+            def raw_amount(self) -> Decimal:
+                return self.quantity * self.price
+
+
+        @dataclass(frozen=True)
+        class RateSchedule:
+            product_code: str
+            description: str
+            flat_price: Optional[Decimal] = None
+            tiers: Optional[list[Tier]] = None
+
+            def __post_init__(self) -> None:
+                if (self.flat_price is None) == (self.tiers is None):
+                    raise ValueError(f"{self.product_code}: exactly one of flat_price or tiers is required")
+                if self.tiers is not None:
+                    if not self.tiers:
+                        raise ValueError(f"{self.product_code}: tiers must not be empty")
+                    for tier in self.tiers[:-1]:
+                        if tier.size is None:
+                            raise ValueError(f"{self.product_code}: only the last tier may be open-ended")
+                    labels = [t.label for t in self.tiers]
+                    if len(labels) != len(set(labels)):
+                        raise ValueError(f"{self.product_code}: tier labels must be unique")
+
+            @property
+            def is_tiered(self) -> bool:
+                return self.tiers is not None
+
+            def describe(self) -> str:
+                """Human-readable summary used in the tenant admin UI and in logs."""
+                if not self.is_tiered:
+                    return f"{self.description}: {self.flat_price} per unit"
+                parts = []
+                for tier in self.tiers or []:
+                    span = f"up to {tier.size}" if tier.size is not None else "thereafter"
+                    extra = f", min {tier.minimum}" if tier.minimum is not None else ""
+                    parts.append(f"{tier.label} ({span}) at {tier.price}{extra}")
+                return f"{self.description}: " + "; ".join(parts)
+
+
+        def split_into_tiers(schedule: RateSchedule, quantity: Decimal) -> list[TierResult]:
+            """Split `quantity` across the schedule's tiers, in order.
+
+            Returns one TierResult per tier, including tiers that received zero
+            quantity, so that the PDF can show the full schedule the tenant is on.
+            Callers must not charge a minimum for a tier whose quantity is zero.
+            """
+            if not schedule.is_tiered:
+                raise ValueError(f"{schedule.product_code} is not tiered")
+            if quantity < ZERO:
+                # Net negative usage for a period (corrections exceeding usage) is
+                # billed as zero; the credit is handled by the corrections workflow.
+                quantity = ZERO
+            results: list[TierResult] = []
+            remaining = quantity
+            for tier in schedule.tiers or []:
+                if tier.size is None:
+                    take = remaining
+                else:
+                    # Quantities are integers for every product we sell today, but the
+                    # schema allows fractional usage, so round down into the tier.
+                    take = min(remaining, Decimal(tier.size)).quantize(Decimal("1"), rounding=ROUND_DOWN)
+                results.append(TierResult(label=tier.label, quantity=take, price=tier.price, minimum=tier.minimum))
+                remaining -= take
+                if remaining <= ZERO:
+                    remaining = ZERO
+            if remaining > ZERO:
+                # Only reachable if the last tier is not open-ended, which the schedule
+                # validator should prevent. Fail loudly rather than silently under-bill.
+                raise ValueError(f"{schedule.product_code}: {remaining} units exceed the top tier")
+            return results
+
+
+        def effective_unit_price(schedule: RateSchedule, quantity: Decimal) -> Decimal:
+            """Blended price per unit, for the usage explorer. Four-place precision."""
+            if quantity <= ZERO:
+                return ZERO
+            if not schedule.is_tiered:
+                return schedule.flat_price or ZERO
+            total = sum((r.raw_amount for r in split_into_tiers(schedule, quantity)), ZERO)
+            return (total / quantity).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+
+        def schedules_from_config(raw: dict) -> dict[str, RateSchedule]:
+            """Parse the tenant's pricing block from the tenant config file.
+
+            Prices in the config are strings precisely so that they never pass
+            through float. A bare number in the config is rejected by the loader.
+            """
+            out: dict[str, RateSchedule] = {}
+            for code, block in raw.items():
+                if "flat_price" in block:
+                    out[code] = RateSchedule(code, block.get("description", code), flat_price=Decimal(block["flat_price"]))
+                else:
+                    tiers = [
+                        Tier(
+                            label=t["label"],
+                            size=t.get("size"),
+                            price=Decimal(t["price"]),
+                            minimum=Decimal(t["minimum"]) if "minimum" in t else None,
+                        )
+                        for t in block["tiers"]
+                    ]
+                    out[code] = RateSchedule(code, block.get("description", code), tiers=tiers)
+            return out
+
+        Decide the next step and explain it.
+      - |
+        Tool result (read_file docs/billing-rules.md):
+
+        # Billing rules
+
+        This document is the agreement between engineering and finance about how
+        ledgerline turns usage into money. Finance signed off on version 1.3 on
+        12 September 2026. Any change to the behaviour described here requires a
+        new version and a new sign-off; a code change alone is not sufficient.
+
+        ## 1 Scope
+
+        These rules apply to every invoice produced by the monthly run and to any
+        ad hoc re-run. They do not apply to quotes, estimates or the usage explorer,
+        which may use approximate arithmetic as long as they are labelled as such.
+
+        ## 2 Periods and records
+
+        2.1 A billing period is a calendar month in the tenant's billing timezone.
+        2.2 A usage record belongs to the period containing its occurrence time,
+        half-open: the first instant of the month is included, the first instant of
+        the next month is not.
+        2.3 Records that arrive after the run for their period has been produced are
+        billed in the next period and flagged as late on the invoice.
+        2.4 Correction records carry negative quantities and reduce the quantity of
+        the product they correct within the same period. A net negative quantity for
+        a product is billed as zero; the balance is handled by a credit note.
+
+        ## 3 Money
+
+        3.1 All monetary arithmetic uses decimal types. Binary floating point is not
+        acceptable anywhere between the usage record and the PDF. Loaders must
+        convert any numeric input via its string representation.
+
+        3.2 Every amount that is printed on an invoice is quantized to the currency's
+        minor unit (two places for every currency we bill in today) using
+        round-half-up. Quantization happens once, at the point where the amount
+        becomes a displayed value. Intermediate values are not quantized.
+
+        ## 3.3 The invoice must foot
+
+        The subtotal printed on an invoice is the arithmetic sum of the line amounts
+        printed on that invoice. Where a line is broken down into sub-lines (tiers),
+        the line amount is the arithmetic sum of the printed sub-line amounts. Tax is
+        computed on the printed subtotal and quantized; the total is subtotal plus
+        tax. A reader with a calculator must be able to reproduce every printed
+        total from the printed figures above it. An invoice that does not satisfy
+        this property is defective regardless of whether the total is "more
+        accurate" in some other sense; auditors check that invoices foot, they do
+        not check our arithmetic.
+
+        3.4 Rounding differences introduced by 3.3 are accepted. Over a large tenant
+        with many tiers they may amount to a few cents per month in either
+        direction. This is the industry norm and finance does not require them to
+        be tracked.
+
+        3.5 Tax is applied once, to the subtotal, never per line. Tenants in
+        jurisdictions requiring per-line tax are out of scope for version 1.x.
+
+        ## 4 Tiered pricing
+
+        4.1 Tiers are cumulative by quantity and are applied in schedule order. Each
+        tier's quantity, unit price and amount are printed as a sub-line so that the
+        tenant can verify the calculation.
+
+        4.2 (Added in 1.3, LL-4410.) A tier may carry a minimum charge. If the tier
+        has non-zero usage and the usage multiplied by the unit price is below the
+        minimum, the minimum is charged for that tier and the sub-line shows the
+        minimum with the annotation "minimum". A tier with zero usage is not charged
+        a minimum. Minimums are configured per tenant and require sales approval.
+
+        4.3 Fractional quantities are permitted by the schema but no current product
+        meters fractionally. If one does, the fractional remainder is billed in the
+        tier where it falls, rounded down to the unit.
+
+        ## 5 Re-issue policy
+
+        5.1 An invoice that has been sent to the tenant is immutable. Corrections are
+        made by issuing a credit note for the full original amount and a new invoice,
+        both referencing the original invoice number.
+
+        5.2 An invoice that has been produced but not yet sent may be regenerated
+        without a credit note, provided the invoice number is reused and the
+        original PDF is destroyed.
+
+        5.3 A defect that affects the printed total of a sent invoice by any amount,
+        including one cent, requires re-issue under 5.1. Finance may batch re-issues
+        for the same tenant and defect into a single credit note and invoice per
+        affected period. A defect that affects only internal fields (for example
+        audit values that are never printed) does not require re-issue.
+
+        5.4 Re-issues must be communicated to the tenant with a plain-language note
+        explaining the cause. Engineering provides the note's technical sentence.
+
+        ## 6 Audit fields
+
+        6.1 Each invoice line retains its unquantized amount for audit. This value is
+        stored and may be exported to finance on request but is never printed and
+        never used in any printed calculation.
+
+        6.2 The run log records, for each tenant, the number of lines, the subtotal,
+        the tax and the total, and any warnings raised during assembly. The log is
+        retained for seven years.
+
+        ## 7 Change log
+
+        1.0 (March 2025) Initial version.
+        1.1 (June 2025) Added 2.3 late records.
+        1.2 (January 2026) Added 3.5 after the per-line tax question from Pellworth.
+        1.3 (September 2026) Added 4.2 tier minimums (LL-4410); clarified 3.2 that
+        intermediate values are not quantized and 6.1 that audit values are never
+        used in printed calculations.
+
+        Decide the next step and explain it.
+      - |
+        Tool result (read_log logs/invoice-run-2026-10-31.log, filter "WARN|t-00913|t-00121|t-00457|summary"):
+
+        2026-10-31T02:00:01Z INFO  run=inv-2026-10 starting period=2026-10 tenants=312 git=4f1c9a2
+        2026-10-31T02:00:01Z INFO  run=inv-2026-10 rules_version=1.3 pdf_template=v7
+        2026-10-31T02:00:09Z INFO  tenant=t-00121 name="Pellworth Insurance" records=48211 products=5
+        2026-10-31T02:00:09Z DEBUG tenant=t-00121 tier "first 10k" below minimum 450.00, charging minimum
+        2026-10-31T02:00:09Z INFO  tenant=t-00121 lines=5 subtotal=9311.42 tax=1862.28 total=11173.70
+        2026-10-31T02:00:09Z WARN  foot_check tenant=t-00121 subtotal=9311.42 display_sum=9311.44 delta=-0.02
+        2026-10-31T02:00:12Z WARN  tenant=t-00188: dropped 2 records outside 2026-10
+        2026-10-31T02:00:31Z INFO  tenant=t-00457 name="Marrow and Finch" records=1904 products=3
+        2026-10-31T02:00:31Z INFO  tenant=t-00457 lines=3 subtotal=612.07 tax=122.41 total=734.48
+        2026-10-31T02:00:31Z WARN  foot_check tenant=t-00457 subtotal=612.07 display_sum=612.08 delta=-0.01
+        2026-10-31T02:00:44Z WARN  tenant=t-00502 has usage for unpriced product "webhook-retries"; skipping
+        2026-10-31T02:00:58Z WARN  foot_check tenant=t-00611 subtotal=2210.90 display_sum=2210.93 delta=-0.03
+        2026-10-31T02:01:07Z WARN  foot_check tenant=t-00644 subtotal=15002.11 display_sum=15002.10 delta=0.01
+        2026-10-31T02:01:19Z INFO  tenant=t-00913 name="Harrowgate Logistics" records=211870 products=7
+        2026-10-31T02:01:19Z DEBUG tenant=t-00913 tier "first 50k" below minimum 1200.00, charging minimum
+        2026-10-31T02:01:19Z INFO  tenant=t-00913 lines=7 subtotal=17123.54 tax=1318.63 total=18442.17
+        2026-10-31T02:01:19Z WARN  foot_check tenant=t-00913 subtotal=17123.54 display_sum=17123.58 delta=-0.04
+        2026-10-31T02:01:33Z WARN  foot_check tenant=t-00977 subtotal=441.19 display_sum=441.20 delta=-0.01
+        2026-10-31T02:01:41Z WARN  tenant=t-01002: dropped 1 records outside 2026-10
+        2026-10-31T02:01:52Z WARN  foot_check tenant=t-01044 subtotal=3870.00 display_sum=3870.02 delta=-0.02
+        2026-10-31T02:02:03Z WARN  foot_check tenant=t-01090 subtotal=12.49 display_sum=12.50 delta=-0.01
+        2026-10-31T02:02:15Z WARN  foot_check tenant=t-01133 subtotal=7781.26 display_sum=7781.31 delta=-0.05
+        2026-10-31T02:02:28Z WARN  foot_check tenant=t-01160 subtotal=990.14 display_sum=990.13 delta=0.01
+        2026-10-31T02:02:40Z WARN  foot_check tenant=t-01201 subtotal=25640.77 display_sum=25640.79 delta=-0.02
+        2026-10-31T02:02:55Z WARN  tenant=t-01222 has usage for unpriced product "sandbox-calls"; skipping
+        2026-10-31T02:03:06Z WARN  foot_check tenant=t-01249 subtotal=130.05 display_sum=130.06 delta=-0.01
+        2026-10-31T02:03:18Z WARN  foot_check tenant=t-01277 subtotal=4410.38 display_sum=4410.40 delta=-0.02
+        2026-10-31T02:03:31Z WARN  foot_check tenant=t-01301 subtotal=866.92 display_sum=866.93 delta=-0.01
+        2026-10-31T02:03:44Z WARN  foot_check tenant=t-01340 subtotal=19.98 display_sum=19.99 delta=-0.01
+        2026-10-31T02:03:57Z WARN  foot_check tenant=t-01366 subtotal=5555.50 display_sum=5555.52 delta=-0.02
+        2026-10-31T02:04:09Z WARN  foot_check tenant=t-01389 subtotal=71.30 display_sum=71.31 delta=-0.01
+        2026-10-31T02:04:21Z WARN  foot_check tenant=t-01402 subtotal=3021.67 display_sum=3021.66 delta=0.01
+        2026-10-31T02:04:34Z WARN  foot_check tenant=t-01418 subtotal=2.98 display_sum=2.99 delta=-0.01
+        2026-10-31T02:04:47Z WARN  foot_check tenant=t-01450 subtotal=8080.03 display_sum=8080.06 delta=-0.03
+        2026-10-31T02:05:00Z WARN  foot_check tenant=t-01471 subtotal=640.21 display_sum=640.22 delta=-0.01
+        2026-10-31T02:05:12Z WARN  foot_check tenant=t-01499 subtotal=11290.84 display_sum=11290.86 delta=-0.02
+        2026-10-31T02:05:40Z INFO  run=inv-2026-10 built 312 invoices for 2026-10
+        2026-10-31T02:05:40Z INFO  run=inv-2026-10 rendering 312 PDFs
+        2026-10-31T02:07:12Z INFO  run=inv-2026-10 rendered 312 PDFs, 0 failures
+        2026-10-31T02:07:12Z INFO  run=inv-2026-10 summary tenants=312 tiered_tenants=61 flat_tenants=251
+        2026-10-31T02:07:12Z INFO  run=inv-2026-10 summary warnings=27 (foot_check=22, dropped_records=2, unpriced=2, other=1)
+        2026-10-31T02:07:12Z INFO  run=inv-2026-10 summary foot_check tenants with delta != 0: 22 of 61 tiered, 0 of 251 flat
+        2026-10-31T02:07:13Z INFO  run=inv-2026-10 mailing 27 warnings to finance-billing@ (subject "invoice run 2026-10: 27 warnings")
+        2026-10-31T02:07:13Z INFO  run=inv-2026-10 complete in 432s
+
+        Tool result (read_log logs/invoice-run-2026-10-01.log, filter "summary|foot_check"):
+
+        2026-10-01T02:06:48Z INFO  run=inv-2026-09 summary tenants=309 tiered_tenants=58 flat_tenants=251
+        2026-10-01T02:06:48Z INFO  run=inv-2026-09 summary warnings=4 (dropped_records=3, unpriced=1, other=0)
+        2026-10-01T02:06:48Z INFO  run=inv-2026-09 git=b77e03d rules_version=1.2
+
+        Tool result (read_log logs/invoice-run-2026-10-04-rerun.log, filter "summary|foot_check|t-00121"):
+
+        2026-10-04T10:12:03Z INFO  run=inv-2026-09-rerun starting period=2026-09 tenants=1 git=4f1c9a2 reason="LL-4790 Pellworth correction"
+        2026-10-04T10:12:04Z INFO  tenant=t-00121 lines=5 subtotal=8902.16 tax=1780.43 total=10682.59
+        2026-10-04T10:12:04Z WARN  foot_check tenant=t-00121 subtotal=8902.16 display_sum=8902.17 delta=-0.01
+        2026-10-04T10:12:05Z INFO  run=inv-2026-09-rerun summary warnings=1 (foot_check=1)
+        2026-10-04T10:12:05Z INFO  run=inv-2026-09-rerun sent=true recipient=ap@pellworth.example
+
+        Note from the harness: the 1 October run has no foot_check lines at all because the
+        check did not exist at git b77e03d. 22 of the 61 tiered tenants in the October run
+        have a non-zero delta. All 22 October invoices and the 4 October Pellworth re-run
+        were sent to tenants on 1 November.
+
+        Decide the next step and explain it.
+      - |
+        Tool result (git_log src/ledgerline/billing.py --since=2026-09-01 -p --stat):
+
+        commit 4f1c9a2e0d3b7c1f5a6e8d9b2c4f7a1e3d5b6c8a
+        Author: Rhiannon Oakes <rhiannon@ledgerline.example>
+        Date:   Thu Oct 2 17:41:08 2026 +0100
+
+            LL-4410: per-tier minimums; compute subtotal from raw amounts
+
+            Adds minimum handling in _tiered_line per the sales request. While here,
+            switch the subtotal to sum the unrounded line amounts and quantize once,
+            so that tenants with many small lines do not accumulate rounding error.
+            Added a soft foot_check warning so finance can see when the two differ;
+            they asked for a warning, not a failure, so a single tenant cannot block
+            the run.
+
+            Reviewed-by: Dmitri Vasquez
+
+         src/ledgerline/billing.py | 31 ++++++++++++++++++++++++-------
+         1 file changed, 24 insertions(+), 7 deletions(-)
+
+        diff --git a/src/ledgerline/billing.py b/src/ledgerline/billing.py
+        index 9c2e1f0..a81b3d4 100644
+        --- a/src/ledgerline/billing.py
+        +++ b/src/ledgerline/billing.py
+        @@ -89,13 +89,19 @@ def _tiered_line(bucket: _Bucket, schedule: RateSchedule) -> InvoiceLine:
+             """Tiered product: the quantity is split across tiers, each priced separately.
+
+        -    Each tier is shown on the PDF as a sub-line with its own amount, so each is
+        -    quantized individually. The line amount is the sum of the sub-line amounts.
+        +    Since LL-4410 a tier may carry a minimum charge: if the tier's raw amount is
+        +    below the minimum, the minimum is charged instead. Each tier is shown on the
+        +    PDF as a sub-line with its own amount, so each is quantized individually.
+        +    The line amount is the sum of the displayed sub-line amounts.
+             """
+             tiers: list[TierResult] = split_into_tiers(schedule, bucket.quantity)
+             sub_lines: list[tuple[str, Decimal]] = []
+        +    raw_total = ZERO
+             for tier in tiers:
+                 raw = tier.quantity * tier.price
+        +        if tier.minimum is not None and ZERO < raw < tier.minimum:
+        +            log.debug("tier %s below minimum %s, charging minimum", tier.label, tier.minimum)
+        +            raw = tier.minimum
+        +        raw_total += raw
+                 sub_lines.append((tier.label, _cents(raw)))
+             amount = sum((a for _, a in sub_lines), ZERO)
+             return InvoiceLine(
+        @@ -104,7 +110,7 @@ def _tiered_line(bucket: _Bucket, schedule: RateSchedule) -> InvoiceLine:
+                 quantity=bucket.quantity,
+                 unit_price=None,
+                 amount=amount,
+        -        raw_amount=amount,
+        +        raw_amount=raw_total,
+                 sub_lines=sub_lines,
+             )
+
+        @@ -121,9 +127,20 @@ def build_invoice(tenant: Tenant, records: Iterable[UsageRecord], period: Period
+                 else:
+                     lines.append(_flat_line(bucket, schedule))
+
+        -    subtotal = sum((line.amount for line in lines), ZERO)
+        +    # Subtotal is computed from the unrounded line amounts and rounded once, so
+        +    # that rounding error does not accumulate across many small lines (LL-4410).
+        +    subtotal = _cents(sum((line.raw_amount for line in lines), ZERO))
+             tax = _cents(subtotal * tenant.tax_rate)
+             total = subtotal + tax
+        +
+        +    displayed = sum((line.amount for line in lines), ZERO)
+        +    if displayed != subtotal:
+        +        # Soft check only; finance asked for a warning rather than a failure so
+        +        # that a single odd tenant does not block the whole monthly run.
+        +        log.warning(
+        +            "foot_check tenant=%s subtotal=%s display_sum=%s delta=%s",
+        +            tenant.id, subtotal, displayed, subtotal - displayed,
+        +        )
+
+             return Invoice(
+                 tenant_id=tenant.id,
+
+        commit b77e03d1a2c3e4f5061728394a5b6c7d8e9f0a1b
+        Author: Dmitri Vasquez <dmitri@ledgerline.example>
+        Date:   Mon Sep 15 11:02:55 2026 +0100
+
+            LL-4388: keep unquantized line amount for audit export
+
+            Finance wants the pre-rounding amount per line in the audit export (rules
+            6.1). Adds raw_amount to InvoiceLine; for flat lines it is the product,
+            for tiered lines it is set equal to the quantized amount for now because
+            tiers are summed from quantized sub-lines. Nothing printed changes.
+
+         src/ledgerline/billing.py | 6 ++++--
+         1 file changed, 4 insertions(+), 2 deletions(-)
+
+        diff --git a/src/ledgerline/billing.py b/src/ledgerline/billing.py
+        @@ -74,6 +74,7 @@ def _flat_line(bucket: _Bucket, schedule: RateSchedule) -> InvoiceLine:
+        -    amount = _cents(bucket.quantity * schedule.flat_price)
+        +    raw = bucket.quantity * schedule.flat_price
+        +    amount = _cents(raw)
+             return InvoiceLine(
+                 product_code=bucket.product_code,
+                 description=schedule.description,
+                 quantity=bucket.quantity,
+                 unit_price=schedule.flat_price,
+                 amount=amount,
+        +        raw_amount=raw,
+                 sub_lines=[],
+             )
+        @@ -103,6 +104,7 @@ def _tiered_line(bucket: _Bucket, schedule: RateSchedule) -> InvoiceLine:
+                 unit_price=None,
+                 amount=amount,
+        +        raw_amount=amount,
+                 sub_lines=sub_lines,
+             )
+
+        commit 2a9d4e6f8b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e
+        Author: Rhiannon Oakes <rhiannon@ledgerline.example>
+        Date:   Wed Sep 3 09:17:30 2026 +0100
+
+            LL-4302: validate records against period and currency before grouping
+
+            The usage loader returned records from the wrong month for one tenant
+            (LL-3902 recurrence). Adds _validate as a second line of defence.
+
+         src/ledgerline/billing.py | 28 ++++++++++++++++++++++++++++
+         1 file changed, 28 insertions(+)
+
+        Tool result (git_log docs/billing-rules.md --since=2026-09-01 --format="%h %ad %s"):
+
+        c0ffee1 2026-09-12 billing-rules 1.3: tier minimums (4.2), clarify 3.2 and 6.1; signed off by finance
+
+        Note from the harness: the rules change (12 September) predates the code change
+        (2 October). The 1.3 text of 3.2 and 6.1 was written by finance after reviewing the
+        LL-4388 audit field, before LL-4410 was implemented.
+
+        You now have the full picture. Decide the next step and explain it. If it is a code
+        change, name the exact function and line to change and the test that will prove it,
+        and state in one sentence what finance should be told about re-issuing invoices.
+
+  - id: agent-flaky-retry
+    max_tokens: 400
+    turns:
+      - |
+        You are working in the quillrun repository, a Python job scheduler used internally
+        to run about 40,000 background jobs a day across three worker pools. You have been
+        asked to find the root cause of a flaky integration test and fix it properly. The
+        team has agreed that "add a retry to the test" or "widen the tolerance" are not
+        acceptable answers unless you can show the underlying behaviour is correct.
+
+        Issue QR-2217, opened by the on-call engineer:
+
+        "tests/integration/test_retry.py::test_backoff_respects_deadline fails roughly one
+        run in eight on the CI runners and has never been seen failing on a laptop. The
+        failure message is always a variant of 'attempt 3 scheduled at 1730893021.84,
+        deadline was 1730893021.80' with the scheduled time between 20 and 90 milliseconds
+        past the deadline. Reruns pass. It started failing in the week of 13 October. The
+        retry code was last touched on 9 October (QR-2190, a timezone fix for the admin UI
+        countdown). The test itself has not changed since July. We have disabled the test
+        on main as of this morning with a skip marker referencing this issue, so the build
+        is green, but the retry deadline logic is the thing that stops a job from being
+        retried forever, so we want to be confident it is right before we re-enable it."
+
+        What the team knows:
+        - The scheduler is deliberately written against an injectable clock
+          (quillrun.clock.Clock) so that tests can control time. The integration tests use
+          FakeClock, which only moves when the test tells it to.
+        - CI runners are shared virtual machines and are noticeably slower than laptops;
+          test wall time on CI is about three times laptop wall time.
+        - The broker used in integration tests is a real instance started by compose; the
+          database is also real. Both run in the same compose network as the test process.
+        - The retry policy (quillrun.retry.RetryPolicy) computes the next attempt time and
+          checks it against the job's deadline; if the next attempt would be past the
+          deadline the job is marked dead instead of rescheduled.
+        - There is a design note at docs/design/retry-semantics.md that describes the
+          intended behaviour. Nobody is sure it matches the code.
+
+        Constraints:
+        - The fix must make the test deterministic, not merely less likely to fail.
+        - Do not change the public RetryPolicy interface; three other services construct it.
+        - If the root cause is a real bug in production behaviour, say so explicitly,
+          because it would mean some jobs were marked dead too early or too late in
+          production and the team will need to decide whether to re-queue them.
+
+        Repository layout (relevant parts):
+          src/quillrun/scheduler.py          the loop that picks and dispatches jobs
+          src/quillrun/retry.py              RetryPolicy and backoff computation
+          src/quillrun/clock.py              Clock protocol, SystemClock, FakeClock
+          src/quillrun/broker.py             thin wrapper over the message broker
+          tests/integration/test_retry.py    the flaky test and its neighbours
+          tests/integration/conftest.py      fixtures: compose services, FakeClock
+          docs/design/retry-semantics.md     the intended behaviour
+          ci/                                CI logs are archived here per run
+
+        Tools available to you: read_file(path), run_tests(path, flags), grep(pattern, path),
+        git_log(path, flags), read_log(path, filter). Each call returns its output as the
+        next message.
+
+        Decide which file to read first and explain why in two or three sentences. Then I will
+        return the tool result.
+      - |
+        Tool result (read_file tests/integration/test_retry.py):
+
+        """Integration tests for retry and backoff behaviour.
+
+        These run against a real broker and database (see conftest.py) but with a
+        FakeClock injected into the scheduler, so that backoff intervals of minutes
+        can be tested in milliseconds. The FakeClock starts at a fixed epoch and only
+        advances when a test calls clock.advance().
+        """
+        import pytest
+
+        from quillrun.clock import FakeClock
+        from quillrun.models import Job, JobState
+        from quillrun.retry import RetryPolicy
+        from quillrun.scheduler import Scheduler
+
+        EPOCH = 1_730_000_000.0  # fixed start so that assertions can use literal times
+
+
+        @pytest.fixture
+        def clock():
+            return FakeClock(start=EPOCH)
+
+
+        @pytest.fixture
+        def scheduler(broker, db, clock):
+            policy = RetryPolicy(base_seconds=2.0, factor=2.0, max_attempts=5, jitter=0.0)
+            s = Scheduler(broker=broker, db=db, clock=clock, retry_policy=policy, pool="test")
+            yield s
+            s.close()
+
+
+        def _failing_job(deadline_offset: float) -> Job:
+            """A job whose handler always raises, with a deadline relative to EPOCH."""
+            return Job.new(
+                handler="tests.handlers.always_fail",
+                payload={},
+                deadline=EPOCH + deadline_offset,
+                pool="test",
+            )
+
+
+        def test_first_failure_schedules_retry_after_base(scheduler, clock, db):
+            job = _failing_job(deadline_offset=600)
+            scheduler.submit(job)
+            scheduler.run_once()  # attempt 1 fails
+            stored = db.get_job(job.id)
+            assert stored.state == JobState.WAITING
+            assert stored.attempt == 1
+            assert stored.next_attempt_at == pytest.approx(EPOCH + 2.0, abs=0.001)
+
+
+        def test_backoff_doubles_each_attempt(scheduler, clock, db):
+            job = _failing_job(deadline_offset=600)
+            scheduler.submit(job)
+            expected_gaps = [2.0, 4.0, 8.0, 16.0]
+            last = EPOCH
+            for gap in expected_gaps:
+                scheduler.run_once()
+                stored = db.get_job(job.id)
+                assert stored.next_attempt_at == pytest.approx(last + gap, abs=0.001)
+                clock.advance(gap)
+                last = stored.next_attempt_at
+            scheduler.run_once()  # fifth and final attempt
+            assert db.get_job(job.id).state == JobState.DEAD
+
+
+        @pytest.mark.skip(reason="QR-2217 flaky on CI; re-enable when root cause is fixed")
+        def test_backoff_respects_deadline(scheduler, clock, db):
+            """A retry that would land after the deadline marks the job dead instead.
+
+            Deadline is 7.8 seconds after EPOCH. Attempts: t=0 fails, retry at 2.0;
+            t=2.0 fails, retry at 6.0; t=6.0 fails, retry would be at 14.0 which is
+            past the deadline, so the job must be DEAD after the third attempt and
+            never scheduled at 14.0.
+            """
+            job = _failing_job(deadline_offset=7.8)
+            scheduler.submit(job)
+
+            scheduler.run_once()  # attempt 1 at t=0
+            assert db.get_job(job.id).next_attempt_at == pytest.approx(EPOCH + 2.0, abs=0.05)
+            clock.advance(2.0)
+
+            scheduler.run_once()  # attempt 2 at t=2
+            assert db.get_job(job.id).next_attempt_at == pytest.approx(EPOCH + 6.0, abs=0.05)
+            clock.advance(4.0)
+
+            scheduler.run_once()  # attempt 3 at t=6; next would be t=14 > deadline 7.8
+            stored = db.get_job(job.id)
+            assert stored.state == JobState.DEAD, (
+                f"attempt {stored.attempt} scheduled at {stored.next_attempt_at}, "
+                f"deadline was {stored.deadline}"
+            )
+            assert stored.next_attempt_at is None
+
+
+        def test_deadline_exactly_on_retry_time_is_allowed(scheduler, clock, db):
+            """Boundary: a retry landing exactly on the deadline is still attempted."""
+            job = _failing_job(deadline_offset=6.0)
+            scheduler.submit(job)
+            scheduler.run_once()
+            clock.advance(2.0)
+            scheduler.run_once()
+            stored = db.get_job(job.id)
+            assert stored.state == JobState.WAITING
+            assert stored.next_attempt_at == pytest.approx(EPOCH + 6.0, abs=0.001)
+
+
+        def test_dead_job_emits_event(scheduler, clock, db, broker):
+            job = _failing_job(deadline_offset=1.0)
+            scheduler.submit(job)
+            scheduler.run_once()
+            events = broker.drain("quillrun.events")
+            assert any(e["type"] == "job.dead" and e["job_id"] == job.id for e in events)
+
+
+        def test_jitter_stays_within_bounds(broker, db, clock):
+            policy = RetryPolicy(base_seconds=10.0, factor=1.0, max_attempts=3, jitter=0.25)
+            s = Scheduler(broker=broker, db=db, clock=clock, retry_policy=policy, pool="test")
+            try:
+                job = _failing_job(deadline_offset=600)
+                s.submit(job)
+                s.run_once()
+                stored = db.get_job(job.id)
+                assert EPOCH + 7.5 <= stored.next_attempt_at <= EPOCH + 12.5
+            finally:
+                s.close()
+
+        Tool result (read_file tests/integration/conftest.py, lines 1-60):
+
+        import os
+        import time
+
+        import pytest
+
+        from quillrun.broker import Broker
+        from quillrun.db import Database
+
+
+        @pytest.fixture(scope="session")
+        def compose_services():
+            """compose is started by the CI job (or by `make integration` locally) before
+            pytest runs; this fixture only waits for the ports to accept connections."""
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                if _port_open("broker", 5672) and _port_open("db", 5432):
+                    return
+                time.sleep(0.5)
+            raise RuntimeError("compose services did not come up within 60s")
+
+
+        @pytest.fixture
+        def broker(compose_services):
+            b = Broker(url=os.environ.get("QR_BROKER_URL", "amqp://broker:5672/"), prefetch=1)
+            b.purge("quillrun.test")
+            b.purge("quillrun.events")
+            yield b
+            b.close()
+
+
+        @pytest.fixture
+        def db(compose_services):
+            d = Database(url=os.environ.get("QR_DB_URL", "postgresql://qr:qr@db:5432/qr_test"))
+            d.truncate_all()
+            yield d
+            d.close()
+
+        Decide the next step and explain it.
+      - |
+        Tool result (read_log ci/run-7731/integration.log, filter "test_retry|FAIL|Error|assert|QR_|clock|time"):
+
+        [10:41:02.118] runner=ci-shared-vm-07 load_avg=5.81 cpus=2 mem_free=1.2G
+        [10:41:02.119] env QR_BROKER_URL=amqp://broker:5672/ QR_DB_URL=postgresql://qr:qr@db:5432/qr_test QR_LOG_LEVEL=DEBUG
+        [10:41:02.120] waiting for compose services
+        [10:41:09.447] compose services ready after 7.3s
+        [10:41:09.901] collected 61 items
+        [10:41:11.230] tests/integration/test_retry.py::test_first_failure_schedules_retry_after_base PASSED
+        [10:41:11.231]   DEBUG quillrun.scheduler: run_once pool=test now=1730000000.000 picked=1
+        [10:41:11.232]   DEBUG quillrun.scheduler: job 7f3a attempt=1 failed: AlwaysFail
+        [10:41:11.233]   DEBUG quillrun.retry: next_attempt attempt=1 delay=2.000 scheduled=1730000002.000 deadline=1730000600.000 ok=True
+        [10:41:12.904] tests/integration/test_retry.py::test_backoff_doubles_each_attempt PASSED
+        [10:41:14.112] tests/integration/test_retry.py::test_backoff_respects_deadline FAILED
+        [10:41:14.113]   DEBUG quillrun.scheduler: run_once pool=test now=1730000000.000 picked=1
+        [10:41:14.113]   DEBUG quillrun.scheduler: job 91c2 attempt=1 failed: AlwaysFail
+        [10:41:14.114]   DEBUG quillrun.retry: next_attempt attempt=1 delay=2.000 scheduled=1730000002.000 deadline=1730000007.800 ok=True
+        [10:41:14.561]   DEBUG quillrun.scheduler: run_once pool=test now=1730000002.000 picked=1
+        [10:41:14.562]   DEBUG quillrun.scheduler: job 91c2 attempt=2 failed: AlwaysFail
+        [10:41:14.562]   DEBUG quillrun.retry: next_attempt attempt=2 delay=4.000 scheduled=1730000006.000 deadline=1730000007.800 ok=True
+        [10:41:15.039]   DEBUG quillrun.scheduler: run_once pool=test now=1730000006.000 picked=1
+        [10:41:15.040]   DEBUG quillrun.scheduler: job 91c2 attempt=3 failed: AlwaysFail
+        [10:41:15.041]   DEBUG quillrun.retry: next_attempt attempt=3 delay=8.000 scheduled=1730000014.000 deadline=1730000007.800 ok=True
+        [10:41:15.041]   DEBUG quillrun.retry: deadline_check wall=1730893021.846 scheduled_wall=1730893029.846 deadline_rel=7.800 elapsed_rel=... ok=True
+        [10:41:15.042]   DEBUG quillrun.scheduler: job 91c2 rescheduled attempt=3 next=1730000014.000
+        [10:41:15.044]   FAILED tests/integration/test_retry.py::test_backoff_respects_deadline
+        [10:41:15.044]   AssertionError: attempt 3 scheduled at 1730000014.0, deadline was 1730000007.8
+        [10:41:15.044]   assert <JobState.WAITING: 'waiting'> == <JobState.DEAD: 'dead'>
+        [10:41:16.317] tests/integration/test_retry.py::test_deadline_exactly_on_retry_time_is_allowed PASSED
+        [10:41:17.002] tests/integration/test_retry.py::test_dead_job_emits_event PASSED
+        [10:41:17.003]   DEBUG quillrun.retry: next_attempt attempt=1 delay=2.000 scheduled=1730000002.000 deadline=1730000001.000 ok=False
+        [10:41:17.003]   DEBUG quillrun.scheduler: job 2be0 marked DEAD reason=deadline
+        [10:41:17.990] tests/integration/test_retry.py::test_jitter_stays_within_bounds PASSED
+        [10:41:58.411] ====== 1 failed, 60 passed in 48.5s ======
+
+        Tool result (read_log ci/run-7729/integration.log, filter "test_backoff_respects_deadline|deadline_check|load_avg"):
+
+        [09:12:40.004] runner=ci-shared-vm-02 load_avg=0.92 cpus=4 mem_free=3.8G
+        [09:12:51.876] tests/integration/test_retry.py::test_backoff_respects_deadline PASSED
+        [09:12:51.875]   DEBUG quillrun.retry: next_attempt attempt=3 delay=8.000 scheduled=1730000014.000 deadline=1730000007.800 ok=False
+        [09:12:51.875]   DEBUG quillrun.retry: deadline_check wall=1730887971.802 scheduled_wall=1730887979.802 deadline_rel=7.800 elapsed_rel=... ok=False
+        [09:12:51.876]   DEBUG quillrun.scheduler: job 4a17 marked DEAD reason=deadline
+
+        Tool result (read_log ci/run-7731/integration.log, filter "ntp|chrony|clock step|time jump"):
+
+        [10:40:58.001] host: chronyd[412]: System clock wrong by 0.312 seconds, adjustment started
+        [10:41:14.900] host: chronyd[412]: System clock was stepped by -0.312 seconds
+
+        Tool result (grep -c "test_backoff_respects_deadline FAILED" ci/run-77*/integration.log):
+
+        ci/run-7702/integration.log:0
+        ci/run-7705/integration.log:1
+        ci/run-7709/integration.log:0
+        ci/run-7711/integration.log:0
+        ci/run-7714/integration.log:0
+        ci/run-7718/integration.log:1
+        ci/run-7720/integration.log:0
+        ci/run-7722/integration.log:0
+        ci/run-7725/integration.log:0
+        ci/run-7727/integration.log:0
+        ci/run-7729/integration.log:0
+        ci/run-7731/integration.log:1
+        ci/run-7733/integration.log:0
+        ci/run-7736/integration.log:1
+        ci/run-7738/integration.log:0
+        ci/run-7740/integration.log:0
+
+        Note from the harness: in every failing run the "deadline_check" line reports
+        ok=True while the "next_attempt" line immediately above it reports scheduled past
+        deadline. In every passing run the two lines agree. The deadline_check line prints
+        wall-clock timestamps (1730893021.846) while next_attempt prints FakeClock
+        timestamps (1730000014.000). Failing runs: 7705 (load_avg 4.2), 7718 (load_avg 6.0),
+        7731 (load_avg 5.8), 7736 (load_avg 3.9). Passing runs all had load_avg below 2.
+
+        Decide the next step and explain it.
+      - |
+        Tool result (read_file src/quillrun/retry.py):
+
+        """Retry policy and backoff computation.
+
+        RetryPolicy is constructed once per scheduler and is shared across jobs. It
+        is pure: given an attempt number it returns a delay, and given a scheduled
+        time and a deadline it says whether the attempt is allowed. The scheduler
+        owns the clock; RetryPolicy must never read the system time itself, because
+        tests inject a FakeClock into the scheduler and expect retry decisions to be
+        reproducible.
+        """
+        from __future__ import annotations
+
+        import logging
+        import random
+        import time
+        from dataclasses import dataclass
+        from typing import Optional
+
+        log = logging.getLogger(__name__)
+
+
+        @dataclass(frozen=True)
+        class RetryDecision:
+            allowed: bool
+            next_attempt_at: Optional[float]
+            reason: str
+
+
+        @dataclass(frozen=True)
+        class RetryPolicy:
+            base_seconds: float = 30.0
+            factor: float = 2.0
+            max_attempts: int = 8
+            jitter: float = 0.1          # fraction of the delay, applied symmetrically
+            max_delay_seconds: float = 3600.0
+
+            def delay_for(self, attempt: int, rng: random.Random) -> float:
+                """Delay before attempt number `attempt + 1`, given `attempt` failures so far."""
+                if attempt < 1:
+                    raise ValueError("attempt must be >= 1")
+                raw = self.base_seconds * (self.factor ** (attempt - 1))
+                raw = min(raw, self.max_delay_seconds)
+                if self.jitter:
+                    spread = raw * self.jitter
+                    raw += rng.uniform(-spread, spread)
+                return max(raw, 0.0)
+
+            def decide(self, attempt: int, now: float, deadline: Optional[float], rng: random.Random) -> RetryDecision:
+                """Decide whether to schedule another attempt.
+
+                `now` is the scheduler's clock reading at the moment of failure.
+                `deadline` is an absolute time on the same clock, or None for no deadline.
+                """
+                if attempt >= self.max_attempts:
+                    return RetryDecision(False, None, "max_attempts")
+                delay = self.delay_for(attempt, rng)
+                scheduled = now + delay
+                ok = deadline is None or scheduled <= deadline
+                log.debug(
+                    "next_attempt attempt=%d delay=%.3f scheduled=%.3f deadline=%s ok=%s",
+                    attempt, delay, scheduled, f"{deadline:.3f}" if deadline is not None else "none", ok,
+                )
+                if deadline is not None:
+                    # QR-2190: the admin UI countdown showed negative times for jobs whose
+                    # deadline was stored in a different timezone than the scheduler's
+                    # clock. Re-check the deadline relative to the real wall clock so the
+                    # countdown and the scheduler agree on whether the job is still alive.
+                    ok = self._wall_clock_deadline_check(now, scheduled, deadline)
+                if not ok:
+                    return RetryDecision(False, None, "deadline")
+                return RetryDecision(True, scheduled, "scheduled")
+
+            @staticmethod
+            def _wall_clock_deadline_check(now: float, scheduled: float, deadline: float) -> bool:
+                """Compare the time remaining until the deadline against the delay, using
+                the system wall clock as the reference frame.
+
+                The relative deadline is deadline - now on the scheduler's clock; the
+                relative delay is scheduled - now. We then ask whether, starting from the
+                wall clock reading taken here, the delay would land before the relative
+                deadline measured from the same wall clock reading.
+                """
+                wall = time.time()
+                deadline_rel = deadline - now
+                scheduled_wall = wall + (scheduled - now)
+                # Allow for the time already spent in this scheduler tick, otherwise a
+                # slow tick makes the deadline look closer than it is.
+                tick_start = _TICK_START.get()
+                elapsed_rel = (wall - tick_start) if tick_start is not None else 0.0
+                ok = scheduled_wall <= wall + deadline_rel + elapsed_rel
+                log.debug(
+                    "deadline_check wall=%.3f scheduled_wall=%.3f deadline_rel=%.3f elapsed_rel=%.3f ok=%s",
+                    wall, scheduled_wall, deadline_rel, elapsed_rel, ok,
+                )
+                return ok
+
+
+        # The scheduler records the wall-clock time at the start of each tick so that
+        # the deadline check can discount time spent inside the tick. See scheduler.py.
+        import contextvars
+
+        _TICK_START: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar("qr_tick_start", default=None)
+
+
+        def mark_tick_start(wall_time: float) -> None:
+            _TICK_START.set(wall_time)
+
+
+        def seconds_until(deadline: Optional[float], now: float) -> Optional[float]:
+            """Used by the admin UI countdown. Clamped at zero."""
+            if deadline is None:
+                return None
+            return max(deadline - now, 0.0)
+
+        Tool result (grep -n -E "time\.time|monotonic|datetime\.now|utcnow" src/quillrun/):
+
+        src/quillrun/retry.py:14:import time
+        src/quillrun/retry.py:76:        wall = time.time()
+        src/quillrun/clock.py:22:        return time.time()
+        src/quillrun/clock.py:26:        return time.monotonic()
+        src/quillrun/scheduler.py:19:import time
+        src/quillrun/scheduler.py:141:        mark_tick_start(time.time())
+        src/quillrun/admin/views.py:88:    now = datetime.now(tz=settings.ADMIN_TZ)
+        src/quillrun/admin/views.py:89:    remaining = seconds_until(job.deadline, now.timestamp())
+
+        Decide the next step and explain it.
+      - |
+        Tool result (read_file src/quillrun/scheduler.py, lines 1-40 and 110-200):
+
+        """The scheduler loop.
+
+        One Scheduler instance serves one pool. Each call to run_once() performs a
+        single tick: lease up to `batch` due jobs from the database, dispatch each to
+        its handler, record the outcome, and either acknowledge, reschedule or mark
+        dead. run_forever() calls run_once() in a loop with a sleep derived from the
+        clock, so that FakeClock-driven tests can also drive run_forever() if needed.
+
+        All time inside the scheduler comes from self.clock. The only exception is
+        the wall-clock tick marker used by the retry deadline check (QR-2190), which
+        is explicitly about real elapsed time inside a tick and is not part of job
+        scheduling arithmetic.
+        """
+        from __future__ import annotations
+
+        import logging
+        import random
+        import time
+        from typing import Optional
+
+        from quillrun.broker import Broker
+        from quillrun.clock import Clock
+        from quillrun.db import Database
+        from quillrun.models import Job, JobState, Outcome
+        from quillrun.retry import RetryPolicy, mark_tick_start
+
+        log = logging.getLogger(__name__)
+
+
+        class Scheduler:
+            def __init__(self, broker: Broker, db: Database, clock: Clock, retry_policy: RetryPolicy,
+                         pool: str, batch: int = 50, rng: Optional[random.Random] = None) -> None:
+                self.broker = broker
+                self.db = db
+                self.clock = clock
+                self.retry_policy = retry_policy
+                self.pool = pool
+                self.batch = batch
+                self.rng = rng or random.Random(0)
+                self._closed = False
+
+        ...
+
+            def run_once(self) -> int:
+                """Perform one tick. Returns the number of jobs processed."""
+                if self._closed:
+                    raise RuntimeError("scheduler is closed")
+                now = self.clock.now()
+                mark_tick_start(time.time())
+                jobs = self.db.lease_due(pool=self.pool, now=now, limit=self.batch, lease_seconds=30)
+                log.debug("run_once pool=%s now=%.3f picked=%d", self.pool, now, len(jobs))
+                processed = 0
+                for job in jobs:
+                    outcome = self._dispatch(job)
+                    self._record(job, outcome, now)
+                    processed += 1
+                return processed
+
+            def _dispatch(self, job: Job) -> Outcome:
+                handler = self._resolve(job.handler)
+                started = self.clock.monotonic()
+                try:
+                    handler(job.payload)
+                except Exception as exc:  # noqa: BLE001 - handlers may raise anything
+                    log.debug("job %s attempt=%d failed: %s", job.short_id, job.attempt + 1, type(exc).__name__)
+                    return Outcome.failed(exc, duration=self.clock.monotonic() - started)
+                return Outcome.succeeded(duration=self.clock.monotonic() - started)
+
+            def _record(self, job: Job, outcome: Outcome, now: float) -> None:
+                attempt = job.attempt + 1
+                if outcome.ok:
+                    self.db.complete(job.id, attempt=attempt, finished_at=now)
+                    self.broker.publish("quillrun.events", {"type": "job.done", "job_id": job.id, "attempt": attempt})
+                    return
+                decision = self.retry_policy.decide(attempt=attempt, now=now, deadline=job.deadline, rng=self.rng)
+                if decision.allowed:
+                    self.db.reschedule(job.id, attempt=attempt, next_attempt_at=decision.next_attempt_at, error=outcome.error_text)
+                    log.debug("job %s rescheduled attempt=%d next=%.3f", job.short_id, attempt, decision.next_attempt_at)
+                else:
+                    self.db.mark_dead(job.id, attempt=attempt, reason=decision.reason, finished_at=now, error=outcome.error_text)
+                    log.debug("job %s marked DEAD reason=%s", job.short_id, decision.reason)
+                    self.broker.publish("quillrun.events", {"type": "job.dead", "job_id": job.id, "attempt": attempt, "reason": decision.reason})
+
+            def run_forever(self, idle_sleep: float = 1.0) -> None:
+                while not self._closed:
+                    processed = self.run_once()
+                    if processed == 0:
+                        self.clock.sleep(idle_sleep)
+
+            def submit(self, job: Job) -> None:
+                self.db.insert(job, next_attempt_at=self.clock.now())
+
+            def close(self) -> None:
+                self._closed = True
+                self.broker.close()
+
+        Tool result (read_file src/quillrun/clock.py):
+
+        """Clock abstraction so that scheduling logic can be tested without sleeping."""
+        from __future__ import annotations
+
+        import time
+        from typing import Protocol
+
+
+        class Clock(Protocol):
+            def now(self) -> float: ...          # seconds since the epoch, like time.time()
+            def monotonic(self) -> float: ...    # for durations
+            def sleep(self, seconds: float) -> None: ...
+
+
+        class SystemClock:
+            def now(self) -> float:
+                return time.time()
+
+            def monotonic(self) -> float:
+                return time.monotonic()
+
+            def sleep(self, seconds: float) -> None:
+                time.sleep(seconds)
+
+
+        class FakeClock:
+            """A clock that only moves when told to. now() and monotonic() advance together."""
+
+            def __init__(self, start: float = 0.0) -> None:
+                self._now = start
+                self._mono = 0.0
+                self.sleeps: list[float] = []
+
+            def now(self) -> float:
+                return self._now
+
+            def monotonic(self) -> float:
+                return self._mono
+
+            def sleep(self, seconds: float) -> None:
+                self.sleeps.append(seconds)
+                self.advance(seconds)
+
+            def advance(self, seconds: float) -> None:
+                if seconds < 0:
+                    raise ValueError("FakeClock cannot go backwards")
+                self._now += seconds
+                self._mono += seconds
+
+        Decide the next step and explain it.
+      - |
+        Tool result (read_file docs/design/retry-semantics.md):
+
+        # Retry semantics
+
+        Status: accepted, March 2026. Owner: scheduler team. Last reviewed: July 2026.
+
+        ## Summary
+
+        A job that fails is retried with exponential backoff until one of three things
+        happens: it succeeds, it exhausts its attempt budget, or its next attempt would
+        land after its deadline. In the last two cases it is marked dead and a
+        `job.dead` event is published. Nothing else may mark a job dead.
+
+        ## Definitions
+
+        - Attempt: one invocation of the handler. Attempts are numbered from 1.
+        - Delay: the interval between a failure and the next attempt, computed by the
+          retry policy from the attempt number only (plus optional jitter).
+        - Deadline: an absolute point in time, on the scheduler's clock, after which the
+          job must not be attempted. Set by the submitter. Optional.
+        - Scheduler clock: the single source of time for all scheduling decisions. In
+          production this is the system clock; in tests it is a controllable fake.
+
+        ## Rules
+
+        R1. The next attempt time is `now + delay`, where `now` is the scheduler clock
+        reading at the start of the tick in which the failure was recorded. Using the
+        tick start rather than the moment of failure makes a tick's decisions
+        independent of how long the handlers inside it took to run.
+
+        R2. A retry is allowed if and only if `next_attempt_time <= deadline`. The
+        comparison is on the scheduler clock. Equality is allowed: a retry landing
+        exactly on the deadline is attempted.
+
+        R3. When a retry is not allowed because of R2, the job is marked dead with
+        reason `deadline`. Its `next_attempt_at` is cleared.
+
+        R4. Attempt budget: if `attempt >= max_attempts` after a failure, the job is
+        marked dead with reason `max_attempts`, regardless of deadline.
+
+        R5. The retry policy is a pure function of (attempt, now, deadline, rng). It
+        must not consult any clock of its own. This is what makes the integration
+        tests deterministic and what lets us reason about production behaviour from
+        logs: given the logged `now` and `deadline`, the decision must be
+        reproducible.
+
+        ## Non-goals
+
+        - Wall-clock accuracy of the admin UI countdown is a display concern. The UI
+          may compute "time remaining" however it likes, but it must not influence
+          scheduling decisions. If the UI and the scheduler disagree about whether a
+          job is alive, the scheduler is right by definition.
+        - Timezones. Deadlines are stored as epoch seconds and have no timezone. Any
+          timezone handling belongs at the API boundary where deadlines are parsed.
+
+        ## Rationale for R5
+
+        We had an earlier version of the scheduler (2024) where the backoff code read
+        the system clock directly. Tests had to sleep for real, took eleven minutes,
+        and were still flaky on slow runners because the comparison between a time
+        computed in one place and a time read in another could straddle a tick
+        boundary. Injecting the clock removed an entire class of bugs. Any change that
+        reintroduces a direct clock read into a scheduling decision should be treated
+        as a regression of this design, however well-intentioned.
+
+        ## Consequences for production
+
+        Because decisions depend only on the scheduler clock, a system clock step (for
+        example an NTP correction) affects when ticks happen but not the arithmetic
+        inside a tick. A job can be retried slightly early or late after a step, but it
+        cannot be marked dead by a step, since `now` and `deadline` are read from the
+        same clock in the same tick.
+
+        ## Testing
+
+        - Unit tests cover delay_for with and without jitter and the max_attempts rule.
+        - Integration tests in tests/integration/test_retry.py drive the scheduler
+          with a FakeClock against a real broker and database. They assert exact
+          scheduled times to within a millisecond, which is only possible because of
+          R5.
+        - A property test asserts that for any attempt sequence, the decision is
+          identical whether the test runs instantly or with a 500 ms sleep inserted
+          between the failure and the decision. This test was removed in QR-2190
+          because "it tested an implementation detail". It should be restored if
+          R5 is to be relied upon.
+
+        ## Open questions
+
+        - Should the deadline comparison use `<` instead of `<=`? Finance-adjacent
+          jobs have asked for "strictly before". Not decided; current behaviour is `<=`.
+
+        Tool result (git_log docs/design/retry-semantics.md --format="%h %ad %s"):
+
+        8d2f0a1 2026-07-14 retry-semantics: note the property test and the <= boundary
+        3c9b7e5 2026-03-02 retry-semantics: accepted
+
+        Decide the next step and explain it.
+      - |
+        Tool result (read_log ci/run-7731/compose.log, filter "broker|db|ERROR|WARN|slow|ready"):
+
+        broker-1  | 10:41:03.011 [info] starting broker 3.13.2 on node broker@broker
+        broker-1  | 10:41:05.902 [info] listening on 0.0.0.0:5672
+        broker-1  | 10:41:06.004 [info] management plugin listening on 0.0.0.0:15672
+        db-1      | 10:41:03.204 LOG:  starting database system 16.4 on x86_64-linux
+        db-1      | 10:41:03.205 LOG:  listening on IPv4 address "0.0.0.0", port 5432
+        db-1      | 10:41:04.871 LOG:  database system is ready to accept connections
+        broker-1  | 10:41:09.447 [info] connection from 172.19.0.4 accepted (test runner)
+        db-1      | 10:41:09.450 LOG:  connection authorized: user=qr database=qr_test
+        broker-1  | 10:41:11.100 [info] queue quillrun.test purged
+        broker-1  | 10:41:11.101 [info] queue quillrun.events purged
+        db-1      | 10:41:11.104 LOG:  statement: TRUNCATE jobs, attempts, events RESTART IDENTITY
+        db-1      | 10:41:14.330 LOG:  duration: 318.442 ms  statement: UPDATE jobs SET state='waiting', attempt=$1, next_attempt_at=$2, error=$3 WHERE id=$4
+        db-1      | 10:41:14.331 WARNING:  checkpoint occurring too frequently (2 seconds apart)
+        db-1      | 10:41:14.331 HINT:  Consider increasing the configuration parameter "max_wal_size".
+        db-1      | 10:41:14.790 LOG:  duration: 221.903 ms  statement: SELECT ... FROM jobs WHERE pool=$1 AND state='waiting' AND next_attempt_at <= $2 ORDER BY next_attempt_at LIMIT $3 FOR UPDATE SKIP LOCKED
+        db-1      | 10:41:15.038 LOG:  duration: 244.117 ms  statement: UPDATE jobs SET state='waiting', attempt=$1, next_attempt_at=$2, error=$3 WHERE id=$4
+        broker-1  | 10:41:15.043 [info] publish to quillrun.events (0 consumers, message retained in queue)
+        db-1      | 10:41:16.300 LOG:  duration: 102.871 ms  statement: TRUNCATE jobs, attempts, events RESTART IDENTITY
+        db-1      | 10:41:58.400 LOG:  connection closed: user=qr database=qr_test
+        broker-1  | 10:41:58.402 [info] connection from 172.19.0.4 closed
+
+        Tool result (read_log ci/run-7729/compose.log, filter "duration"):
+
+        db-1      | 09:12:50.102 LOG:  duration: 12.004 ms  statement: UPDATE jobs SET state='waiting', attempt=$1, next_attempt_at=$2, error=$3 WHERE id=$4
+        db-1      | 09:12:50.611 LOG:  duration: 9.871 ms  statement: SELECT ... FROM jobs WHERE pool=$1 AND state='waiting' AND next_attempt_at <= $2 ORDER BY next_attempt_at LIMIT $3 FOR UPDATE SKIP LOCKED
+        db-1      | 09:12:51.870 LOG:  duration: 11.440 ms  statement: UPDATE jobs SET state='waiting', attempt=$1, next_attempt_at=$2, error=$3 WHERE id=$4
+
+        Tool result (run_tests tests/unit/test_retry_policy.py -v):
+
+        ============================= test session starts ==============================
+        collected 9 items
+
+        tests/unit/test_retry_policy.py::test_delay_first_attempt_is_base PASSED
+        tests/unit/test_retry_policy.py::test_delay_grows_by_factor PASSED
+        tests/unit/test_retry_policy.py::test_delay_capped_at_max PASSED
+        tests/unit/test_retry_policy.py::test_jitter_symmetric PASSED
+        tests/unit/test_retry_policy.py::test_jitter_zero_is_exact PASSED
+        tests/unit/test_retry_policy.py::test_max_attempts_marks_dead PASSED
+        tests/unit/test_retry_policy.py::test_decide_allows_when_before_deadline PASSED
+        tests/unit/test_retry_policy.py::test_decide_allows_when_exactly_on_deadline PASSED
+        tests/unit/test_retry_policy.py::test_decide_refuses_when_after_deadline PASSED
+
+        ============================== 9 passed in 0.06s ==============================
+
+        Tool result (read_file tests/unit/test_retry_policy.py, lines 40-62):
+
+        def test_decide_refuses_when_after_deadline():
+            policy = RetryPolicy(base_seconds=2.0, factor=2.0, max_attempts=5, jitter=0.0)
+            # attempt 3 -> delay 8.0; now=6.0, deadline=7.8 -> scheduled 14.0 > 7.8
+            decision = policy.decide(attempt=3, now=6.0, deadline=7.8, rng=random.Random(0))
+            assert decision.allowed is False
+            assert decision.reason == "deadline"
+
+
+        def test_decide_allows_when_exactly_on_deadline():
+            policy = RetryPolicy(base_seconds=2.0, factor=2.0, max_attempts=5, jitter=0.0)
+            decision = policy.decide(attempt=2, now=2.0, deadline=6.0, rng=random.Random(0))
+            assert decision.allowed is True
+            assert decision.next_attempt_at == 6.0
+
+        Note from the harness: the unit tests pass because in a unit test the whole decide()
+        call completes in microseconds, so `wall - tick_start` is effectively zero and the
+        wall-clock check agrees with the scheduler-clock check. In the integration test the
+        tick includes two database round trips, which took 318 ms and 244 ms on the loaded
+        runner (12 ms on the idle one), and mark_tick_start was called before the lease
+        query.
+
+        Decide the next step and explain it.
+      - |
+        Tool result (git_log src/quillrun/retry.py --since=2026-09-01 -p):
+
+        commit e5a7c3d9b1f2e4a6c8d0b2f4a6c8e0d2f4a6b8c0
+        Author: Soren Adeyemi <soren@quillrun.example>
+        Date:   Thu Oct 9 16:22:41 2026 +0200
+
+            QR-2190: make admin countdown and scheduler agree on deadline
+
+            The admin UI showed "-00:00:03" for jobs that the scheduler then went on to
+            retry, because the UI computed remaining time from datetime.now() in the
+            admin timezone while the scheduler used the injected clock. Rather than fix
+            the UI to use the scheduler clock (which is not accessible from the web
+            process), re-check the deadline in the retry policy against the wall clock,
+            discounting time spent in the current tick. Also exposes seconds_until for
+            the UI so both sides share the clamp-at-zero logic.
+
+            Removed test_decision_independent_of_real_elapsed_time, which asserted that
+            inserting a real sleep between failure and decision does not change the
+            outcome; with the wall-clock re-check that is no longer strictly true and the
+            test was asserting an implementation detail.
+
+            Reviewed-by: Mei Lindqvist
+
+         src/quillrun/retry.py                 | 41 ++++++++++++++++++++++++++---
+         src/quillrun/scheduler.py             |  3 ++-
+         tests/unit/test_retry_policy.py       | 19 -------------
+         3 files changed, 39 insertions(+), 25 deletions(-)
+
+        diff --git a/src/quillrun/retry.py b/src/quillrun/retry.py
+        @@ -11,6 +11,7 @@ reproducible.
+         import logging
+         import random
+        +import time
+         from dataclasses import dataclass
+         from typing import Optional
+        @@ -58,8 +59,42 @@ class RetryPolicy:
+                     attempt, delay, scheduled, f"{deadline:.3f}" if deadline is not None else "none", ok,
+                 )
+        +        if deadline is not None:
+        +            # QR-2190: the admin UI countdown showed negative times for jobs whose
+        +            # deadline was stored in a different timezone than the scheduler's
+        +            # clock. Re-check the deadline relative to the real wall clock so the
+        +            # countdown and the scheduler agree on whether the job is still alive.
+        +            ok = self._wall_clock_deadline_check(now, scheduled, deadline)
+                 if not ok:
+                     return RetryDecision(False, None, "deadline")
+                 return RetryDecision(True, scheduled, "scheduled")
+        +
+        +    @staticmethod
+        +    def _wall_clock_deadline_check(now: float, scheduled: float, deadline: float) -> bool:
+        +        wall = time.time()
+        +        deadline_rel = deadline - now
+        +        scheduled_wall = wall + (scheduled - now)
+        +        tick_start = _TICK_START.get()
+        +        elapsed_rel = (wall - tick_start) if tick_start is not None else 0.0
+        +        ok = scheduled_wall <= wall + deadline_rel + elapsed_rel
+        +        log.debug(
+        +            "deadline_check wall=%.3f scheduled_wall=%.3f deadline_rel=%.3f elapsed_rel=%.3f ok=%s",
+        +            wall, scheduled_wall, deadline_rel, elapsed_rel, ok,
+        +        )
+        +        return ok
+
+        diff --git a/tests/unit/test_retry_policy.py b/tests/unit/test_retry_policy.py
+        @@ -70,19 +70,0 @@ def test_decide_refuses_when_after_deadline():
+        -def test_decision_independent_of_real_elapsed_time():
+        -    """R5: the decision must not depend on how long the real clock took."""
+        -    policy = RetryPolicy(base_seconds=2.0, factor=2.0, max_attempts=5, jitter=0.0)
+        -    fast = policy.decide(attempt=3, now=6.0, deadline=7.8, rng=random.Random(0))
+        -    time.sleep(0.5)
+        -    slow = policy.decide(attempt=3, now=6.0, deadline=7.8, rng=random.Random(0))
+        -    assert fast == slow
+        -    assert fast.allowed is False
+        -
+        -
+        -@pytest.mark.parametrize("sleep_before", [0.0, 0.2, 0.6])
+        -def test_decision_independent_of_tick_duration(sleep_before):
+        -    policy = RetryPolicy(base_seconds=2.0, factor=2.0, max_attempts=5, jitter=0.0)
+        -    mark_tick_start(time.time())
+        -    time.sleep(sleep_before)
+        -    decision = policy.decide(attempt=3, now=6.0, deadline=7.8, rng=random.Random(0))
+        -    assert decision.allowed is False
+        -
+
+        commit 1b4d6f8a0c2e4a6c8e0b2d4f6a8c0e2b4d6f8a0c
+        Author: Mei Lindqvist <mei@quillrun.example>
+        Date:   Tue Sep 2 10:05:12 2026 +0200
+
+            QR-2144: log the retry decision at debug level
+
+            Adds the next_attempt debug line so that production incidents can be
+            reconstructed from logs per retry-semantics R5.
+
+         src/quillrun/retry.py | 4 ++++
+         1 file changed, 4 insertions(+)
+
+        Tool result (grep -rn "QR-2190\|wall_clock_deadline_check\|mark_tick_start" src/ tests/ docs/):
+
+        src/quillrun/retry.py:63:            # QR-2190: the admin UI countdown showed negative times for jobs whose
+        src/quillrun/retry.py:67:            ok = self._wall_clock_deadline_check(now, scheduled, deadline)
+        src/quillrun/retry.py:71:    def _wall_clock_deadline_check(now: float, scheduled: float, deadline: float) -> bool:
+        src/quillrun/retry.py:97:def mark_tick_start(wall_time: float) -> None:
+        src/quillrun/scheduler.py:10:the wall-clock tick marker used by the retry deadline check (QR-2190), which
+        src/quillrun/scheduler.py:24:from quillrun.retry import RetryPolicy, mark_tick_start
+        src/quillrun/scheduler.py:141:        mark_tick_start(time.time())
+        tests/integration/test_retry.py:60:@pytest.mark.skip(reason="QR-2217 flaky on CI; re-enable when root cause is fixed")
+
+        Tool result (read_log prod/scheduler-pool-b.log, filter "deadline_check.*ok=True" | grep -B1 "scheduled=.*deadline=.*ok=False" | count):
+
+        Lines where next_attempt said ok=False but deadline_check said ok=True, 13 Oct to 6 Nov,
+        pool b only: 1,942. Those jobs were rescheduled and attempted after their deadline.
+        Lines where next_attempt said ok=True but deadline_check said ok=False: 0.
+
+        You now have the full picture. Decide the next step and explain it. Name the exact
+        change, say whether the design document or the code is wrong, state the test that
+        will prove the fix, and say in one sentence what the team should do about the 1,942
+        production jobs.
+
+  - id: agent-csv-import
+    max_tokens: 300
+    turns:
+      - |
+        You are working in the rosterly repository, a small Python web application that
+        manages staff rotas for a chain of nine veterinary clinics. Clinic managers upload
+        a CSV of shifts each month. Ticket RS-318 asks you to add validation so that the
+        import rejects any file in which the same staff member has two shifts that overlap
+        in time, and reports every such conflict back to the manager with row numbers,
+        instead of silently importing both shifts as it does today.
+
+        The acceptance criteria from the ticket:
+        - Overlaps are detected per staff member, per clinic, across the whole file.
+        - A shift that ends exactly when the next one starts is not an overlap.
+        - Shifts crossing midnight must be handled (the existing format supports them).
+        - The error report lists both row numbers and the overlapping interval.
+        - Existing valid files must still import unchanged; the current test suite must
+          keep passing.
+
+        Repository layout: src/rosterly/importer.py (CSV parsing and import), src/rosterly/
+        validators.py (existing row-level checks), fixtures/shifts_sample.csv (a valid
+        sample), docs/import-schema.md (the CSV format), tests/test_importer.py.
+
+        Tools: read_file(path), run_tests(path, flags), grep(pattern, path). Decide which
+        file to read first and explain why briefly.
+      - |
+        Tool result (read_file src/rosterly/importer.py):
+
+        """CSV shift import.
+
+        A shift row has: clinic_code, staff_id, date (YYYY-MM-DD), start (HH:MM),
+        end (HH:MM), role. If end <= start the shift is assumed to cross midnight and
+        ends on the following day. Validation is in two stages: row-level checks in
+        validators.py (format, known clinic, known staff, known role), then file-level
+        checks here (currently only duplicate rows). Any error aborts the import; the
+        caller shows the ImportReport to the manager.
+        """
+        from __future__ import annotations
+
+        import csv
+        import io
+        from dataclasses import dataclass, field
+        from datetime import date, datetime, time, timedelta
+
+        from rosterly.validators import RowError, validate_row
+        from rosterly.models import Shift
+        from rosterly import db
+
+
+        @dataclass
+        class ImportReport:
+            rows_read: int = 0
+            rows_imported: int = 0
+            errors: list[RowError] = field(default_factory=list)
+
+            @property
+            def ok(self) -> bool:
+                return not self.errors
+
+
+        def _shift_interval(row: dict) -> tuple[datetime, datetime]:
+            """Absolute start and end for a parsed row; end rolls to the next day if needed."""
+            d = date.fromisoformat(row["date"])
+            start = datetime.combine(d, time.fromisoformat(row["start"]))
+            end = datetime.combine(d, time.fromisoformat(row["end"]))
+            if end <= start:
+                end += timedelta(days=1)
+            return start, end
+
+
+        def parse(text: str) -> tuple[list[dict], list[RowError]]:
+            """Parse CSV text into row dicts; collect row-level errors with 1-based row numbers
+            (row 1 is the header, so the first data row is 2)."""
+            reader = csv.DictReader(io.StringIO(text))
+            rows: list[dict] = []
+            errors: list[RowError] = []
+            for number, raw in enumerate(reader, start=2):
+                row_errors = validate_row(raw, number)
+                if row_errors:
+                    errors.extend(row_errors)
+                    continue
+                raw["_row"] = number
+                rows.append(raw)
+            return rows, errors
+
+
+        def _file_level_checks(rows: list[dict]) -> list[RowError]:
+            """Checks that need the whole file. Currently: exact duplicate rows."""
+            errors: list[RowError] = []
+            seen: dict[tuple, int] = {}
+            for row in rows:
+                key = (row["clinic_code"], row["staff_id"], row["date"], row["start"], row["end"])
+                if key in seen:
+                    errors.append(RowError(row["_row"], "duplicate", f"identical to row {seen[key]}"))
+                else:
+                    seen[key] = row["_row"]
+            # TODO RS-318: overlapping shifts for the same staff member
+            return errors
+
+
+        def import_shifts(text: str, clinic_scope: set[str] | None = None) -> ImportReport:
+            report = ImportReport()
+            rows, errors = parse(text)
+            report.rows_read = len(rows) + len(errors)
+            report.errors.extend(errors)
+            if clinic_scope is not None:
+                for row in rows:
+                    if row["clinic_code"] not in clinic_scope:
+                        report.errors.append(RowError(row["_row"], "scope", f"clinic {row['clinic_code']} not in your scope"))
+            report.errors.extend(_file_level_checks(rows))
+            if not report.ok:
+                return report
+            with db.transaction():
+                for row in rows:
+                    start, end = _shift_interval(row)
+                    db.upsert_shift(Shift(
+                        clinic_code=row["clinic_code"],
+                        staff_id=row["staff_id"],
+                        start=start,
+                        end=end,
+                        role=row["role"],
+                    ))
+                    report.rows_imported += 1
+            return report
+
+        Decide the next step and explain it.
+      - |
+        Tool result (run_tests tests/test_importer.py -v):
+
+        ============================= test session starts ==============================
+        collected 11 items
+
+        tests/test_importer.py::test_sample_file_imports_cleanly PASSED
+        tests/test_importer.py::test_header_only_file_imports_zero_rows PASSED
+        tests/test_importer.py::test_bad_date_reported_with_row_number PASSED
+        tests/test_importer.py::test_unknown_clinic_reported PASSED
+        tests/test_importer.py::test_unknown_staff_reported PASSED
+        tests/test_importer.py::test_unknown_role_reported PASSED
+        tests/test_importer.py::test_duplicate_rows_reported_once PASSED
+        tests/test_importer.py::test_shift_crossing_midnight_ends_next_day PASSED
+        tests/test_importer.py::test_out_of_scope_clinic_rejected PASSED
+        tests/test_importer.py::test_any_error_aborts_whole_import PASSED
+        tests/test_importer.py::test_overlapping_shifts_rejected SKIPPED (RS-318 not implemented)
+
+        ============================ 10 passed, 1 skipped in 0.22s =====================
+
+        Tool result (read_file tests/test_importer.py, lines 88-130):
+
+        @pytest.mark.skip(reason="RS-318 not implemented")
+        def test_overlapping_shifts_rejected():
+            text = HEADER + "\n".join([
+                "HAV,s-104,2026-11-03,08:00,16:00,vet",
+                "HAV,s-104,2026-11-03,15:00,22:00,vet",        # overlaps row 2 by one hour
+                "HAV,s-221,2026-11-03,08:00,16:00,nurse",
+                "HAV,s-221,2026-11-03,16:00,20:00,nurse",      # touches, not an overlap
+                "HAV,s-104,2026-11-03,22:00,06:00,vet",        # crosses midnight; overlaps row 3? no, touches
+                "HAV,s-104,2026-11-04,05:00,09:00,vet",        # overlaps row 6 (which ends 06:00 on the 4th)
+                "KEL,s-104,2026-11-03,15:00,22:00,vet",        # same staff, different clinic: still an overlap
+            ])
+            report = import_shifts(text)
+            assert not report.ok
+            codes = [(e.row, e.code) for e in report.errors]
+            assert (3, "overlap") in codes
+            assert (7, "overlap") in codes
+            assert (8, "overlap") in codes
+            assert (5, "overlap") not in codes
+            assert report.rows_imported == 0
+            # each conflict reported on the later row, naming the earlier one
+            messages = {e.row: e.message for e in report.errors}
+            assert "row 2" in messages[3]
+            assert "15:00" in messages[3] and "16:00" in messages[3]
+
+
+        def test_any_error_aborts_whole_import():
+            text = HEADER + "\n".join([
+                "HAV,s-104,2026-11-03,08:00,16:00,vet",
+                "HAV,s-104,not-a-date,08:00,16:00,vet",
+            ])
+            report = import_shifts(text)
+            assert not report.ok
+            assert report.rows_imported == 0
+
+        Note from the harness: the skipped test's comment on row 6 says "overlaps row 3? no,
+        touches", and the assertion on row 8 (clinic KEL) expects an overlap across clinics,
+        which contradicts the ticket's phrase "per staff member, per clinic". The ticket
+        author has been asked which is intended and has not yet replied.
+
+        Decide the next step and explain it.
+      - |
+        Tool result (read_file fixtures/shifts_sample.csv):
+
+        clinic_code,staff_id,date,start,end,role
+        HAV,s-104,2026-11-03,08:00,16:00,vet
+        HAV,s-221,2026-11-03,08:00,16:00,nurse
+        HAV,s-310,2026-11-03,09:00,17:00,reception
+        HAV,s-104,2026-11-04,08:00,16:00,vet
+        HAV,s-221,2026-11-04,12:00,20:00,nurse
+        HAV,s-118,2026-11-04,20:00,08:00,vet
+        KEL,s-402,2026-11-03,08:30,17:30,vet
+        KEL,s-415,2026-11-03,08:30,17:30,nurse
+        KEL,s-402,2026-11-04,08:30,17:30,vet
+        KEL,s-118,2026-11-05,09:00,13:00,vet
+        BRM,s-507,2026-11-03,07:00,15:00,nurse
+        BRM,s-507,2026-11-03,15:00,19:00,nurse
+        BRM,s-520,2026-11-03,10:00,18:00,reception
+
+        Tool result (read_file docs/import-schema.md):
+
+        # Shift import CSV format
+
+        One row per shift. Header row required. Encoding UTF-8. Fields:
+
+        | Field       | Format      | Notes                                                   |
+        |-------------|-------------|---------------------------------------------------------|
+        | clinic_code | 3 letters   | Must be one of the clinics the uploading manager runs   |
+        | staff_id    | s-NNN       | Must exist and be active                                |
+        | date        | YYYY-MM-DD  | The calendar date the shift starts on                   |
+        | start       | HH:MM       | 24-hour, local clinic time                              |
+        | end         | HH:MM       | 24-hour; if not after start, the shift ends next day    |
+        | role        | text        | vet, nurse, reception, or locum                         |
+
+        Rules:
+        1. Rows are validated individually first; any invalid row is reported with its
+           row number (header is row 1) and the whole file is rejected.
+        2. Exact duplicate rows are rejected; the later row is reported.
+        3. A shift may be up to 16 hours long. Longer shifts are rejected (RS-290).
+        4. Staff may work at more than one clinic. A staff member who is a locum at one
+           clinic may also hold a regular role at another. Rotas are managed per clinic
+           but staff availability is global: a person cannot be in two clinics at once.
+        5. Importing a file replaces nothing; shifts are upserted by (staff_id, start).
+           Re-importing the same file is therefore safe.
+
+        Example of a shift crossing midnight: `HAV,s-118,2026-11-04,20:00,08:00,vet` runs
+        from 20:00 on the 4th to 08:00 on the 5th. For overlap purposes it occupies that
+        whole interval, including the early hours of the 5th.
+
+        Note from the harness: in the sample file, s-118 works at HAV from 20:00 on the 4th
+        until 08:00 on the 5th and then at KEL from 09:00 on the 5th. Rule 4 says staff
+        availability is global. The sample file is expected to import cleanly.
+
+        Decide the next step and explain it.
+      - |
+        Tool result (read_file src/rosterly/validators.py):
+
+        """Row-level validation for the shift CSV import.
+
+        Each check receives the raw row dict and the 1-based row number and returns a
+        list of RowError (possibly empty). validate_row runs all checks and returns
+        every error for the row, not just the first, so a manager can fix a file in
+        one pass.
+        """
+        from __future__ import annotations
+
+        import re
+        from dataclasses import dataclass
+        from datetime import date, datetime, time, timedelta
+
+        from rosterly import db
+
+        STAFF_ID = re.compile(r"^s-\d{3}$")
+        CLINIC = re.compile(r"^[A-Z]{3}$")
+        ROLES = {"vet", "nurse", "reception", "locum"}
+        MAX_SHIFT = timedelta(hours=16)
+
+
+        @dataclass(frozen=True)
+        class RowError:
+            row: int
+            code: str          # short machine-readable code: format, clinic, staff, role, length, duplicate, scope
+            message: str       # shown to the manager
+
+            def __str__(self) -> str:
+                return f"row {self.row}: {self.code}: {self.message}"
+
+
+        def _check_format(row: dict, n: int) -> list[RowError]:
+            errors = []
+            if not CLINIC.match(row.get("clinic_code", "")):
+                errors.append(RowError(n, "format", "clinic_code must be three capital letters"))
+            if not STAFF_ID.match(row.get("staff_id", "")):
+                errors.append(RowError(n, "format", "staff_id must look like s-123"))
+            try:
+                date.fromisoformat(row.get("date", ""))
+            except ValueError:
+                errors.append(RowError(n, "format", f"date {row.get('date')!r} is not YYYY-MM-DD"))
+            for field in ("start", "end"):
+                try:
+                    time.fromisoformat(row.get(field, ""))
+                except ValueError:
+                    errors.append(RowError(n, "format", f"{field} {row.get(field)!r} is not HH:MM"))
+            return errors
+
+
+        def _check_known(row: dict, n: int) -> list[RowError]:
+            errors = []
+            if not db.clinic_exists(row["clinic_code"]):
+                errors.append(RowError(n, "clinic", f"unknown clinic {row['clinic_code']}"))
+            if not db.staff_active(row["staff_id"]):
+                errors.append(RowError(n, "staff", f"unknown or inactive staff {row['staff_id']}"))
+            if row["role"] not in ROLES:
+                errors.append(RowError(n, "role", f"role must be one of {sorted(ROLES)}"))
+            return errors
+
+
+        def _check_length(row: dict, n: int) -> list[RowError]:
+            d = date.fromisoformat(row["date"])
+            start = datetime.combine(d, time.fromisoformat(row["start"]))
+            end = datetime.combine(d, time.fromisoformat(row["end"]))
+            if end <= start:
+                end += timedelta(days=1)
+            if end - start > MAX_SHIFT:
+                return [RowError(n, "length", f"shift is {end - start}, maximum is 16 hours (RS-290)")]
+            return []
+
+
+        def validate_row(row: dict, n: int) -> list[RowError]:
+            errors = _check_format(row, n)
+            if errors:
+                return errors          # later checks assume well-formed fields
+            errors.extend(_check_known(row, n))
+            if any(e.code in ("clinic", "staff") for e in errors):
+                return errors
+            errors.extend(_check_length(row, n))
+            return errors
+
+        Note from the harness: _shift_interval in importer.py and _check_length here contain
+        the same midnight-rollover logic, duplicated.
+
+        You have now seen every file the ticket names. Decide the next step and explain it:
+        name the function you will change or add, how you will resolve the per-clinic
+        question given the schema's rule 4 and the skipped test, and which test you will
+        un-skip or add first.
+
+  - id: agent-advisory-check
+    max_tokens: 300
+    turns:
+      - |
+        You are working in the harbourmaster repository, a Python service that polls
+        about 200 harbour sensor gateways over HTTP and stores their readings. A security
+        advisory has been published for fennelhttp, the HTTP client library the service
+        uses. Advisory FH-2026-07 says that fennelhttp versions before 3.4.2 mishandle
+        chunked transfer encoding when the client is constructed with
+        trust_proxy_headers=True, allowing a malicious upstream to smuggle a second
+        response that the client attributes to the next request on the same connection.
+
+        Your task: determine whether harbourmaster is affected, and if it is, upgrade
+        safely. The team wants a yes or no with evidence, not a precautionary bump that
+        might break the pollers.
+
+        Repository layout: pyproject.toml and uv.lock (dependencies), src/harbourmaster/
+        http/client.py (the wrapper around fennelhttp), src/harbourmaster/pollers/ (users
+        of the wrapper), vendor/advisories/FH-2026-07.md (the advisory text, vendored by
+        the security bot), tests/.
+
+        Tools: read_file(path), run_tests(path, flags), grep(pattern, path). Decide which
+        file to read first and explain why briefly.
+      - |
+        Tool result (read_file pyproject.toml):
+
+        [project]
+        name = "harbourmaster"
+        version = "2.11.0"
+        requires-python = ">=3.11"
+        dependencies = [
+            "fennelhttp>=3.2,<4",
+            "pydantic>=2.7,<3",
+            "structlog>=24.1",
+            "psycopg[binary]>=3.1",
+            "apscheduler>=3.10,<4",
+        ]
+
+        [project.optional-dependencies]
+        dev = ["pytest>=8", "pytest-asyncio>=0.23", "respx-like>=0.9", "ruff>=0.5"]
+
+        [tool.pytest.ini_options]
+        asyncio_mode = "auto"
+        testpaths = ["tests"]
+
+        [tool.ruff]
+        line-length = 110
+
+        Tool result (grep -n -A 6 'name = "fennelhttp"' uv.lock):
+
+        uv.lock:412:name = "fennelhttp"
+        uv.lock:413-version = "3.3.1"
+        uv.lock:414-source = { registry = "https://pypi.org/simple" }
+        uv.lock:415-dependencies = [
+        uv.lock:416-    { name = "certifi" },
+        uv.lock:417-    { name = "h11" },
+        uv.lock:418-]
+
+        Tool result (grep -rn "fennelhttp" src/ tests/ --include=*.py -l):
+
+        src/harbourmaster/http/client.py
+        src/harbourmaster/http/__init__.py
+        tests/http/test_client.py
+        tests/http/conftest.py
+
+        Tool result (grep -rn "trust_proxy_headers\|proxy" src/ tests/):
+
+        src/harbourmaster/http/client.py:31:        trust_proxy_headers: bool = False,
+        src/harbourmaster/http/client.py:44:            trust_proxy_headers=trust_proxy_headers,
+        src/harbourmaster/http/client.py:58:    # Gateways behind the Northcove marina proxy need proxy headers trusted so
+        src/harbourmaster/http/client.py:59:    # that the real gateway address is logged rather than the proxy's.
+        src/harbourmaster/pollers/northcove.py:18:    client = GatewayClient(base_url=settings.NORTHCOVE_PROXY, trust_proxy_headers=True, pool_size=4)
+        src/harbourmaster/pollers/base.py:27:    client = GatewayClient(base_url=gateway.url, pool_size=2)
+        tests/http/test_client.py:40:def test_trust_proxy_headers_passed_through():
+
+        Decide the next step and explain it.
+      - |
+        Tool result (read_file vendor/advisories/FH-2026-07.md):
+
+        # FH-2026-07: response smuggling via chunked encoding with trusted proxy headers
+
+        Published: 2026-11-02. Severity: high. Affected: fennelhttp >= 3.0.0, < 3.4.2.
+        Fixed in: 3.4.2. Also fixed in 3.3.4 (backport, maintenance branch).
+
+        ## Description
+
+        When a Client is constructed with `trust_proxy_headers=True`, fennelhttp accepts a
+        `Transfer-Encoding` header supplied by the proxy in preference to the one from the
+        origin. A malicious or compromised proxy can declare a chunked body while the
+        origin sends a fixed-length one, causing the client to read past the end of the
+        first response and treat the start of the next response as the tail of the
+        current one. On a pooled connection the following request then receives a body
+        that belongs to a different request.
+
+        Clients constructed with the default `trust_proxy_headers=False` are not affected.
+        Clients that disable connection pooling (`pool_size=1` with `keep_alive=False`)
+        are not affected, because there is no following request on the same connection.
+
+        ## Mitigation
+
+        Upgrade to 3.4.2 or 3.3.4. If you cannot upgrade, set `trust_proxy_headers=False`,
+        or set `keep_alive=False`.
+
+        ## Changes in 3.4.x that may affect callers
+
+        - `Client(pool_size=...)` is renamed to `Client(max_connections=...)`. The old
+          keyword is accepted with a DeprecationWarning in 3.4.0 and 3.4.1 and removed in
+          3.4.2.
+        - `Response.json()` now raises `fennelhttp.DecodeError` instead of `ValueError`
+          on malformed bodies.
+        - Default read timeout changed from 30 seconds to 10 seconds.
+
+        The 3.3.4 backport contains only the security fix and none of the above changes.
+
+        ## Credits
+
+        Reported by the Saltmarsh Bay harbour authority's IT team during a penetration
+        test of their marina network.
+
+        Decide the next step and explain it.
+      - |
+        Tool result (read_file src/harbourmaster/http/client.py):
+
+        """Thin wrapper around fennelhttp for talking to sensor gateways.
+
+        All pollers go through GatewayClient so that timeouts, retries, logging and
+        the user agent are consistent. The wrapper exposes a small surface: get_json
+        and get_bytes. Anything else should be added here, not by importing
+        fennelhttp in a poller.
+        """
+        from __future__ import annotations
+
+        import logging
+        from typing import Any
+
+        import fennelhttp
+
+        log = logging.getLogger(__name__)
+
+        USER_AGENT = "harbourmaster/2.11"
+
+
+        class GatewayError(Exception):
+            pass
+
+
+        class GatewayClient:
+            def __init__(
+                self,
+                base_url: str,
+                *,
+                pool_size: int = 2,
+                timeout_seconds: float = 20.0,
+                trust_proxy_headers: bool = False,
+                retries: int = 2,
+            ) -> None:
+                self.base_url = base_url.rstrip("/")
+                self.retries = retries
+                self._client = fennelhttp.Client(
+                    base_url=self.base_url,
+                    pool_size=pool_size,
+                    timeout=fennelhttp.Timeout(connect=5.0, read=timeout_seconds),
+                    headers={"User-Agent": USER_AGENT},
+                    trust_proxy_headers=trust_proxy_headers,
+                    keep_alive=True,
+                )
+
+            def get_json(self, path: str) -> Any:
+                response = self._get(path)
+                try:
+                    return response.json()
+                except ValueError as exc:
+                    raise GatewayError(f"malformed JSON from {self.base_url}{path}") from exc
+
+            def get_bytes(self, path: str) -> bytes:
+                return self._get(path).content
+
+            # Gateways behind the Northcove marina proxy need proxy headers trusted so
+            # that the real gateway address is logged rather than the proxy's.
+
+            def _get(self, path: str) -> fennelhttp.Response:
+                last_exc: Exception | None = None
+                for attempt in range(self.retries + 1):
+                    try:
+                        response = self._client.get(path)
+                        if response.status >= 500:
+                            raise GatewayError(f"{response.status} from {self.base_url}{path}")
+                        return response
+                    except (fennelhttp.TransportError, GatewayError) as exc:
+                        last_exc = exc
+                        log.warning("gateway %s attempt %d failed: %s", self.base_url, attempt + 1, exc)
+                assert last_exc is not None
+                raise GatewayError(str(last_exc)) from last_exc
+
+            def close(self) -> None:
+                self._client.close()
+
+        Tool result (read_file src/harbourmaster/pollers/northcove.py, lines 1-30):
+
+        """Poller for the 14 gateways behind the Northcove marina proxy.
+
+        The marina's IT department fronts all its sensor gateways with a single reverse
+        proxy; we poll the proxy and it routes by path. The proxy adds Forwarded headers
+        with the gateway's internal address, which we log for diagnostics.
+        """
+        from harbourmaster.http.client import GatewayClient
+        from harbourmaster.pollers.base import BasePoller
+        from harbourmaster import settings
+
+
+        class NorthcovePoller(BasePoller):
+            def __init__(self) -> None:
+                client = GatewayClient(base_url=settings.NORTHCOVE_PROXY, trust_proxy_headers=True, pool_size=4)
+                super().__init__(client=client, gateway_ids=settings.NORTHCOVE_GATEWAYS)
+
+            def poll_once(self) -> None:
+                for gateway_id in self.gateway_ids:
+                    reading = self.client.get_json(f"/gw/{gateway_id}/reading")
+                    self.store(gateway_id, reading)
+
+        Decide the next step and explain it.
+      - |
+        Tool result (run_tests tests/ -q, after editing pyproject.toml to "fennelhttp>=3.4.2,<4" and running the lock update; uv.lock now pins fennelhttp 3.4.2):
+
+        ........................................F..F.......................          [100%]
+        =================================== FAILURES ===================================
+        ______________________ test_client_constructs_with_pool_size ______________________
+        tests/http/test_client.py:22: in test_client_constructs_with_pool_size
+            client = GatewayClient(base_url="http://gw.test", pool_size=3)
+        src/harbourmaster/http/client.py:38: in __init__
+            self._client = fennelhttp.Client(
+        E   TypeError: Client.__init__() got an unexpected keyword argument 'pool_size'
+        ______________________ test_malformed_json_raises_gateway_error ___________________
+        tests/http/test_client.py:67: in test_malformed_json_raises_gateway_error
+            with pytest.raises(GatewayError):
+        E   fennelhttp.DecodeError: Expecting value: line 1 column 1 (char 0)
+        =========================== short test summary info ============================
+        FAILED tests/http/test_client.py::test_client_constructs_with_pool_size - TypeError
+        FAILED tests/http/test_client.py::test_malformed_json_raises_gateway_error - fennelhttp.DecodeError
+        2 failed, 66 passed, 3 warnings in 3.91s
+
+        Warnings summary:
+        tests/pollers/test_northcove.py: 3 warnings
+          fennelhttp/_client.py:88: UserWarning: read timeout not set explicitly on Timeout(); default changed to 10s in 3.4.0
+
+        Note from the harness: the Northcove gateways are known to take 12 to 15 seconds to
+        respond when their batteries are low, which is why the wrapper's default read
+        timeout is 20 seconds; the warning above is emitted by a code path in the tests that
+        constructs a Timeout without a read value, not by GatewayClient itself.
+
+        You have the evidence. Decide the next step and explain it: state whether
+        harbourmaster was affected and which poller, choose between 3.4.2 and the 3.3.4
+        backport with a reason, and name the exact code changes needed for your choice.

@@ -38,7 +38,7 @@ async def build_ledgers(config: Config, replicas: list[Replica], config_dir: Pat
                 kv_total = cc.kv_tokens_total
         if kv_total is None:
             raise RuntimeError(f"replica {rep.id}: KV budget unknown (replica unreachable and no kv_tokens override)")
-        ledg = ReplicaLedger(rep, profile, kv_total, block_size, config.gateway.admission, cfg.slot_plan)
+        ledg = ReplicaLedger(rep, profile, kv_total, block_size, config.gateway.admission, cfg.slot_plan, cfg.exclude_shapes)
         log.info(
             "ledger %s: KV %d tokens (usable %d), profile %s, seats at 15/30/60 tps = %d/%d/%d",
             rep.id, kv_total, ledg.kv_usable, profile.source, ledg.seats(15), ledg.seats(30), ledg.seats(60),

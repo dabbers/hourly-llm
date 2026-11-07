@@ -43,6 +43,7 @@ class RunData:
     config: Config  # the run's own config snapshot when it has one
     fallback_config: Config | None = None  # the --config-dir config, for settings the snapshot lacks
     reservations: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=RESERVATION_COLUMNS))
+    texts: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=TEXT_COLUMNS))
 
 
 def read_meter(path: Path) -> pd.DataFrame:
@@ -53,7 +54,25 @@ def read_meter(path: Path) -> pd.DataFrame:
         conn.close()
     if "reservation_id" not in df:  # meter files written before milestone 4
         df["reservation_id"] = None
+    for col, default in (("cached_tokens", 0), ("billed_shape", None), ("showcase", None)):  # before phase 2
+        if col not in df:
+            df[col] = default
     return df
+
+
+TEXT_COLUMNS = ["run_id", "request_id", "prompt_json", "output_text"]
+
+
+def read_texts(path: Path) -> pd.DataFrame:
+    """The completions (and showcase prompts) the gateway kept when store_text was on."""
+    conn = sqlite3.connect(str(path))
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "texts" not in tables:
+            return pd.DataFrame(columns=TEXT_COLUMNS)
+        return pd.read_sql_query("SELECT run_id, request_id, prompt_json, output_text FROM texts", conn)
+    finally:
+        conn.close()
 
 
 def read_reservations(path: Path) -> pd.DataFrame:
@@ -100,7 +119,7 @@ def load_run_dir(run_dir: str | Path, config_dir: str | Path | None = None) -> R
     run_id = str(df["run_id"].iloc[0]) if not df.empty else run_dir.name
     return RunData(
         run_dir=run_dir, run_id=run_id, requests=df, loads=loads, config=config, fallback_config=fallback,
-        reservations=read_reservations(meter),
+        reservations=read_reservations(meter), texts=read_texts(meter),
     )
 
 
@@ -113,9 +132,13 @@ def enrich(df: pd.DataFrame, config: Config) -> pd.DataFrame:
     df["scenario"] = df["scenario"].fillna("adhoc")
     df["seed"] = df["seed"].fillna(0).astype(int)
     df["lazy"] = df["lazy"].astype(bool)
-    df["tps"] = df["shape"].map(lambda n: shapes[n].tps if n in shapes else np.nan)
-    df["price_per_second"] = df["shape"].map(lambda n: shapes[n].price_per_second if n in shapes else np.nan)
+    # the shape whose tps and price applied: the request's own, or a context burst's burst class (post-M4)
+    df["billed_shape"] = df["billed_shape"].where(df["billed_shape"].notna(), df["shape"])
+    df["tps"] = df["billed_shape"].map(lambda n: shapes[n].tps if n in shapes else np.nan)
+    df["price_per_second"] = df["billed_shape"].map(lambda n: shapes[n].price_per_second if n in shapes else np.nan)
     df["max_context"] = df["shape"].map(lambda n: shapes[n].max_context if n in shapes else np.nan)
+    df["cached_tokens"] = pd.to_numeric(df["cached_tokens"], errors="coerce").fillna(0).astype(int).clip(lower=0)
+    df["cached_tokens"] = np.minimum(df["cached_tokens"], df["prompt_tokens"])
     df["delivered_tokens"] = (df["output_tokens"] - df["wasted_tokens"]).clip(lower=0).astype(int)
     ok = df["status"] == "ok"
     df["ok"] = ok
@@ -124,6 +147,7 @@ def enrich(df: pd.DataFrame, config: Config) -> pd.DataFrame:
     df["error"] = ~ok & ~df["refused"] & ~df["revoked_run"]
     df["context_burst"] = df["class_ctx"] == "burst"
     df["reserved"] = df["reservation_id"].notna()
+    df["showcase"] = df["showcase"].where(df["showcase"].notna(), None)
 
     secs = [
         shape_seconds(r.t_admitted, r.t_first_token, r.t_last_token, int(r.delivered_tokens), float(r.tps))
@@ -132,14 +156,17 @@ def enrich(df: pd.DataFrame, config: Config) -> pd.DataFrame:
         for r in df.itertuples(index=False)
     ]
     df["wall_s"], df["bound_s"], df["billed_s"] = (np.array([s[i] for s in secs]) for i in range(3))
+    # prefill charge: uncached prompt tokens in full, prefix-cache hits at the cache-read share (DESIGN 8)
     prompt_price = config.pricing.shape.prompt_usd_per_million / 1e6
-    df["prompt_usd"] = np.where(ok & (df["delivered_tokens"] > 0), df["prompt_tokens"] * prompt_price, 0.0)
+    cache_ratio = config.pricing.cache_read_ratio
+    charged_prompt = (df["prompt_tokens"] - df["cached_tokens"]) + df["cached_tokens"] * cache_ratio
+    df["prompt_usd"] = np.where(ok & (df["delivered_tokens"] > 0), charged_prompt * prompt_price, 0.0)
     df["shape_usd"] = df["billed_s"] * df["price_per_second"].fillna(0) + df["prompt_usd"]
     df["bound_usd"] = df["bound_s"] * df["price_per_second"].fillna(0) + df["prompt_usd"]
     df["wall_usd"] = df["wall_s"] * df["price_per_second"].fillna(0) + df["prompt_usd"]
     df["burst_discount_usd"] = df["bound_usd"] - df["shape_usd"]
     df["per_token_usd"] = [
-        per_token_usd(int(r.prompt_tokens), int(r.output_tokens), bool(r.lazy), pricing) if r.ok else 0.0
+        per_token_usd(int(r.prompt_tokens), int(r.output_tokens), bool(r.lazy), pricing, int(r.cached_tokens)) if r.ok else 0.0
         for r in df.itertuples(index=False)
     ]
 
@@ -186,6 +213,7 @@ def per_tenant(df: pd.DataFrame) -> pd.DataFrame:
         reserved_requests=("reserved", "sum"),
         burst_tokens=("output_tokens_burst", "sum"),
         prompt_tokens=("prompt_tokens", "sum"),
+        cached_tokens=("cached_tokens", "sum"),
         output_tokens=("output_tokens", "sum"),
         delivered_tokens=("delivered_tokens", "sum"),
         per_token_usd=("per_token_usd", "sum"),
@@ -211,7 +239,7 @@ def per_tenant(df: pd.DataFrame) -> pd.DataFrame:
         violation_stream_s=("violation_stream_s", "sum"),
     )
     out = all_rows.join(ok_rows, how="left")
-    counts = ["ok", "reserved_requests", "burst_tokens", "prompt_tokens", "output_tokens", "delivered_tokens",
+    counts = ["ok", "reserved_requests", "burst_tokens", "prompt_tokens", "cached_tokens", "output_tokens", "delivered_tokens",
               "floor_judged", "floor_violations"]
     sums = ["per_token_usd", "prompt_usd", "shape_usd", "bound_usd", "wall_usd", "billed_s", "bound_s", "wall_s",
             "stream_s", "throttled_s", "violation_stream_s"]
@@ -225,6 +253,7 @@ def per_tenant(df: pd.DataFrame) -> pd.DataFrame:
         out["throttled_share"] = np.where(out["stream_s"] > 0, out["throttled_s"] / out["stream_s"], np.nan)
         out["floor_violation_share"] = np.where(out["stream_s"] > 0, out["violation_stream_s"] / out["stream_s"], np.nan)
         out["burst_share"] = np.where(out["output_tokens"] > 0, out["burst_tokens"] / out["output_tokens"], np.nan)
+        out["cached_share"] = np.where(out["prompt_tokens"] > 0, out["cached_tokens"] / out["prompt_tokens"], np.nan)
     return out.reset_index()
 
 
@@ -275,6 +304,8 @@ def per_run(df: pd.DataFrame, loads: list[LoadRun], config: Config, reservations
             "tenant_usd": float(ok.loc[~ok["reserved"], "shape_usd"].sum())
             + (float(rb.loc[rb["load_run"] == load_run, "reservation_usd"].sum()) if len(rb) else 0.0),
             "prompt_tokens": int(ok["prompt_tokens"].sum()),
+            "cached_tokens": int(ok["cached_tokens"].sum()),
+            "cached_share": float(ok["cached_tokens"].sum() / ok["prompt_tokens"].sum()) if ok["prompt_tokens"].sum() else np.nan,
             "output_tokens": int(ok["output_tokens"].sum()),
             "delivered_tokens": int(ok["delivered_tokens"].sum()),
             "per_token_usd": float(ok["per_token_usd"].sum()),
@@ -483,8 +514,10 @@ def _run_traffic(df: pd.DataFrame, config: Config, fallback: Config | None) -> p
             "load_run": load_run,
             "duration_s": duration,
             "prompt_tokens_interactive": int(ok.loc[~lazy, "prompt_tokens"].sum()),
+            "cached_tokens_interactive": int(ok.loc[~lazy, "cached_tokens"].sum()),
             "output_tokens_interactive": int(ok.loc[~lazy, "output_tokens"].sum()),
             "prompt_tokens_lazy": int(ok.loc[lazy, "prompt_tokens"].sum()),
+            "cached_tokens_lazy": int(ok.loc[lazy, "cached_tokens"].sum()),
             "output_tokens_lazy": int(ok.loc[lazy, "output_tokens"].sum()),
             "gpu_cost_usd": gpu_h * duration / 3600.0,
             "shape_usd": float(ok["shape_usd"].sum()),
@@ -511,21 +544,27 @@ def market(df: pd.DataFrame, config: Config, fallback: Config | None = None) -> 
     prices (lazy requests at the batch discount) against GPU cost and the run's own shape revenue,
     the gross margin, and the GPU price per hour at which that reference breaks even, at the
     measured utilisation and as if the slot plan ran at the target utilisation (cost per token
-    scales with measured ÷ target). Prompt tokens served from the prefix cache are charged in full,
-    so the revenue is an upper bound for multi-turn traffic."""
+    scales with measured ÷ target). Prompt tokens served from the prefix cache are priced at the
+    reference's cache-read price (its listed one, else cache_read_ratio × input); `revenue_usd_uncached`
+    is what charging them in full would earn (the pre-phase-2 upper bound)."""
     traffic = _run_traffic(df, config, fallback)
     pr = config.pricing
     d = pr.token.batch_discount
+    ratio = pr.token.cache_read_ratio
     target = pr.provider.target_utilization
     rows = []
     for t in traffic.itertuples(index=False):
         hours = t.duration_s / 3600.0
         scale = (target / t.utilization) if t.utilization and not np.isnan(t.utilization) else np.nan
+        prompt_all = t.prompt_tokens_interactive + d * t.prompt_tokens_lazy
+        cached_all = t.cached_tokens_interactive + d * t.cached_tokens_lazy
         for ref in _references(config, fallback):
-            rev = (
+            cache_price = ref.cache_read_price(ratio)
+            rev_uncached = (
                 t.prompt_tokens_interactive * ref.input_usd_per_million + t.output_tokens_interactive * ref.output_usd_per_million
                 + d * (t.prompt_tokens_lazy * ref.input_usd_per_million + t.output_tokens_lazy * ref.output_usd_per_million)
             ) / 1e6
+            rev = rev_uncached - cached_all * (ref.input_usd_per_million - cache_price) / 1e6
             rows.append({
                 "scenario": t.scenario,
                 "load_run": t.load_run,
@@ -534,6 +573,9 @@ def market(df: pd.DataFrame, config: Config, fallback: Config | None = None) -> 
                 "active": ref.name == pr.token.reference,
                 "input_usd_per_million": ref.input_usd_per_million,
                 "output_usd_per_million": ref.output_usd_per_million,
+                "cache_read_usd_per_million": cache_price,
+                "cached_share": cached_all / prompt_all if prompt_all else np.nan,
+                "revenue_usd_uncached": rev_uncached,
                 "revenue_usd": rev,
                 "revenue_usd_per_hour": rev / hours if hours else np.nan,
                 "gpu_cost_usd": t.gpu_cost_usd,
@@ -561,14 +603,14 @@ def list_prices(df: pd.DataFrame, config: Config, fallback: Config | None = None
     pr = config.pricing
     tok = pr.token if pr.references or not (fallback and fallback.pricing.references) else fallback.pricing.token
     ratio = tok.input_usd_per_million / tok.output_usd_per_million if tok.output_usd_per_million else 0.0
+    cache_ratio = pr.cache_read_ratio  # a cached prompt token weighs cache_read_ratio x an uncached one
     d = tok.batch_discount
     target = pr.provider.target_utilization
     rows = []
     for t in traffic.itertuples(index=False):
-        weighted = (
-            t.output_tokens_interactive + ratio * t.prompt_tokens_interactive
-            + d * (t.output_tokens_lazy + ratio * t.prompt_tokens_lazy)
-        )
+        prompt_i = t.prompt_tokens_interactive - t.cached_tokens_interactive * (1.0 - cache_ratio)
+        prompt_l = t.prompt_tokens_lazy - t.cached_tokens_lazy * (1.0 - cache_ratio)
+        weighted = t.output_tokens_interactive + ratio * prompt_i + d * (t.output_tokens_lazy + ratio * prompt_l)
         scale = (t.utilization / target) if t.utilization and not np.isnan(t.utilization) else np.nan
         for m in pr.provider.margin_targets:
             out = t.gpu_cost_usd / (1.0 - m) / weighted * 1e6 if weighted else np.nan
@@ -700,6 +742,35 @@ def reservations(df: pd.DataFrame, config: Config, fallback: Config | None = Non
                     "revenue_parity_slot_usd_per_hour": per_token / (reserved_s / 3600.0) if reserved_s else np.nan,
                 })
     return pd.DataFrame(rows)
+
+
+SAMPLE_COLUMNS = [
+    "scenario", "load_run", "tenant", "showcase", "prompt_id", "turn", "shape", "billed_shape", "class_ctx", "delivery",
+    "status", "abort_reason", "t_rel", "prompt_tokens", "cached_tokens", "output_tokens", "delivered_tokens",
+    "queued_ms", "ttft_ms", "stream_s", "throttled_s", "delivered_tps", "tps", "burst_share", "floor_violation",
+    "shape_usd", "per_token_usd", "prompt_json", "output_text",
+]
+
+
+def samples(df: pd.DataFrame, texts: pd.DataFrame | None) -> pd.DataFrame:
+    """The showcase requests (docs/PHASE2.md section 6): real prompts and the completions the gateway
+    kept, with the constraints each ran under. One row per request, in arrival order; a multi-turn
+    prompt is several rows (`turn`). Requests without stored text keep their metrics and empty text."""
+    show = df[df["showcase"].notna()].copy()
+    if show.empty:
+        return pd.DataFrame(columns=SAMPLE_COLUMNS)
+    if texts is not None and len(texts):
+        show = show.merge(texts[["request_id", "prompt_json", "output_text"]], on="request_id", how="left")
+    else:
+        show["prompt_json"] = None
+        show["output_text"] = None
+    parts = show["showcase"].astype(str).str.split("#", n=1, expand=True)
+    show["prompt_id"] = parts[0]
+    show["turn"] = pd.to_numeric(parts[1], errors="coerce").fillna(0).astype(int) if parts.shape[1] > 1 else 0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        show["burst_share"] = np.where(show["output_tokens"] > 0, show["output_tokens_burst"] / show["output_tokens"], np.nan)
+    show = show.sort_values(["load_run", "t_arrival"])
+    return show[SAMPLE_COLUMNS].reset_index(drop=True)
 
 
 def refusals(df: pd.DataFrame) -> pd.DataFrame:

@@ -69,9 +69,11 @@ class VllmReplica:
                         cum = int(usage_obj["completion_tokens"])
                         n_tokens = max(0, cum - prev_completion)
                         prev_completion = cum
+                        details = usage_obj.get("prompt_tokens_details") or {}
                         usage = Usage(
                             prompt_tokens=int(usage_obj.get("prompt_tokens") or 0),
                             completion_tokens=cum,
+                            cached_tokens=int(details.get("cached_tokens") or 0),
                         )
                     elif text:
                         n_tokens = 1

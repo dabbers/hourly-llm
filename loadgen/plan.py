@@ -10,6 +10,7 @@ import json
 import math
 import zlib
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -19,9 +20,14 @@ from .scenario import (
     BatchProfile,
     ChatProfile,
     NotetakerProfile,
+    PromptFile,
     Scenario,
     TenantSpec,
+    load_prompts,
+    resolve_prompts_path,
 )
+
+WORDS_TO_TOKENS = 1.3  # rough token estimate for the showcase prompts' real text (sizing only)
 
 
 @dataclass
@@ -32,6 +38,7 @@ class Step:
     stream: bool
     pause_before_s: float  # think time or tool pause before this step (0 for the first)
     content_seed: int
+    showcase: str | None = None  # prompt id from the tenant's prompt file: the text comes from there, not from the seed
 
 
 @dataclass
@@ -143,7 +150,35 @@ def _session_steps(rng: np.random.Generator, profile) -> list[Step]:
     raise ValueError(f"unknown profile {profile!r}")
 
 
-def _plan_tenant(scenario: Scenario, seed: int, spec: TenantSpec) -> TenantPlan:
+def _showcase_sessions(scenario: Scenario, spec: TenantSpec, prompts: PromptFile) -> list[Session]:
+    """One open-loop session per showcase slot, cycling through the prompt file; every turn is a
+    step whose text the runner takes from the file (docs/PHASE2.md section 6)."""
+    assert spec.showcase is not None
+    sc = spec.showcase
+    out: list[Session] = []
+    k = 0
+    t = sc.offset_s
+    while t < scenario.duration_s:
+        prompt = prompts.prompts[k % len(prompts.prompts)]
+        steps = [
+            Step(
+                i=i,
+                user_tokens=max(1, int(len(turn.split()) * WORDS_TO_TOKENS)),
+                max_tokens=sc.max_tokens or prompt.max_tokens,
+                stream=spec.profile.stream,
+                pause_before_s=0.0 if i == 0 else sc.think_s,
+                content_seed=0,
+                showcase=prompt.id,
+            )
+            for i, turn in enumerate(prompt.turns)
+        ]
+        out.append(Session(id=f"{spec.name}-show-{k}", t_start=round(float(t), 3), worker=None, steps=steps))
+        k += 1
+        t += sc.every_s
+    return out
+
+
+def _plan_tenant(scenario: Scenario, seed: int, spec: TenantSpec, scenario_path: str | Path | None = None) -> TenantPlan:
     rng = tenant_rng(seed, spec.name)
     plan = TenantPlan(name=spec.name, api_key=spec.api_key, shape=spec.shape, profile_kind=spec.profile.kind)
     if isinstance(spec.profile, BatchProfile):
@@ -154,21 +189,24 @@ def _plan_tenant(scenario: Scenario, seed: int, spec: TenantSpec) -> TenantPlan:
                 plan.sessions.append(
                     Session(id=f"{spec.name}-w{w}-{j}", t_start=None, worker=w, steps=_session_steps(rng, spec.profile))
                 )
-        return plan
-    assert spec.arrivals is not None
-    times = arrival_times(rng, spec.arrivals, scenario)
-    for j, t in enumerate(times):
-        plan.sessions.append(
-            Session(id=f"{spec.name}-{j}", t_start=round(float(t), 3), worker=None, steps=_session_steps(rng, spec.profile))
-        )
+    else:
+        assert spec.arrivals is not None
+        times = arrival_times(rng, spec.arrivals, scenario)
+        for j, t in enumerate(times):
+            plan.sessions.append(
+                Session(id=f"{spec.name}-{j}", t_start=round(float(t), 3), worker=None, steps=_session_steps(rng, spec.profile))
+            )
+    if spec.showcase is not None:
+        prompts = load_prompts(resolve_prompts_path(spec.showcase.prompts, scenario_path))
+        plan.sessions.extend(_showcase_sessions(scenario, spec, prompts))
     return plan
 
 
-def build_plan(scenario: Scenario, seed: int) -> Plan:
+def build_plan(scenario: Scenario, seed: int, scenario_path: str | Path | None = None) -> Plan:
     return Plan(
         scenario=scenario.name,
         seed=seed,
         duration_s=scenario.duration_s,
         hour_length_s=scenario.hour_length_s,
-        tenants=[_plan_tenant(scenario, seed, t) for t in scenario.tenants],
+        tenants=[_plan_tenant(scenario, seed, t, scenario_path) for t in scenario.tenants],
     )

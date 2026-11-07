@@ -22,7 +22,7 @@ from slotgw.clock import now
 
 from .content import words
 from .plan import Plan, Session, Step, TenantPlan
-from .scenario import Scenario
+from .scenario import PromptFile, Scenario, load_prompts, resolve_prompts_path
 
 log = logging.getLogger("loadgen")
 
@@ -54,6 +54,7 @@ class ClientRecord:
     per_token_usd: float | None = None
     throttled_ms: float | None = None
     error: str | None = None
+    showcase: str | None = None  # prompt id of a showcase request (real text, kept by the gateway)
 
     @property
     def ttft_ms(self) -> float | None:
@@ -120,10 +121,12 @@ class LoadRunner:
         progress_every_s: float = 10.0,
         label: str | None = None,
         reservations: bool = True,
+        reservation_replica: str | None = None,
     ):
         self.scenario = scenario
         self.plan = plan
         self.reservations_enabled = reservations
+        self.reservation_replica = reservation_replica  # None: the scenario's `replica:`; "none": unpinned; else this replica
         self.reservation_log: list[dict[str, Any]] = []
         self.gateway_url = gateway_url.rstrip("/")
         self.runs_dir = Path(runs_dir)
@@ -141,6 +144,11 @@ class LoadRunner:
         self._t_end = 0.0
         self._client_sink: CsvSink | None = None
         self._sample_sink: CsvSink | None = None
+        self._prompts: dict[str, PromptFile] = {
+            spec.name: load_prompts(resolve_prompts_path(spec.showcase.prompts, scenario_path))
+            for spec in scenario.tenants
+            if spec.showcase is not None
+        }
 
     # ---- timeline helpers -------------------------------------------------------------------
 
@@ -291,6 +299,9 @@ class LoadRunner:
             "scenario": self.scenario_label,
             "seed": self.plan.seed,
         }
+        replica = spec.reservation.replica if self.reservation_replica is None else self.reservation_replica
+        if replica and replica.lower() != "none":
+            body["replica"] = replica
         entry: dict[str, Any] = {**body, "t_start_offset": w0, "t_end_offset": w1, "id": None, "status": None}
         self.reservation_log.append(entry)
         try:
@@ -331,21 +342,23 @@ class LoadRunner:
     # ---- drivers ----------------------------------------------------------------------------
 
     async def _drive_tenant(self, client: httpx.AsyncClient, tp: TenantPlan) -> None:
+        """Closed-loop sessions (worker set) chain on their worker; open-loop ones (t_start set,
+        including a batch tenant's showcase sessions) start at their offsets."""
         tasks: set[asyncio.Task] = set()
-        if tp.profile_kind == "batch":
-            workers: dict[int, list[Session]] = {}
-            for s in tp.sessions:
+        workers: dict[int, list[Session]] = {}
+        for s in tp.sessions:
+            if s.t_start is None:
                 workers.setdefault(s.worker or 0, []).append(s)
-            for w, sessions in sorted(workers.items()):
-                tasks.add(asyncio.create_task(self._worker_loop(client, tp, w, sessions)))
-        else:
-            for s in sorted(tp.sessions, key=lambda s: s.t_start or 0.0):
-                await self.sleep_until(s.t_start or 0.0)
-                if self.past_end():
-                    break
-                t = asyncio.create_task(self._run_session(client, tp, s))
-                tasks.add(t)
-                t.add_done_callback(tasks.discard)
+        for w, sessions in sorted(workers.items()):
+            tasks.add(asyncio.create_task(self._worker_loop(client, tp, w, sessions)))
+        open_loop = sorted((s for s in tp.sessions if s.t_start is not None), key=lambda s: s.t_start or 0.0)
+        for s in open_loop:
+            await self.sleep_until(s.t_start or 0.0)
+            if self.past_end():
+                break
+            t = asyncio.create_task(self._run_session(client, tp, s))
+            tasks.add(t)
+            t.add_done_callback(tasks.discard)
         pending = [t for t in tasks if not t.done()]
         if pending:
             deadline = self._t_end + self.scenario.drain_s - time.perf_counter()
@@ -379,12 +392,22 @@ class LoadRunner:
     async def _run_step(
         self, client: httpx.AsyncClient, tp: TenantPlan, session: Session, step: Step, history: list[dict[str, str]]
     ) -> tuple[bool, str, str]:
-        content = words(step.content_seed, step.user_tokens)
-        messages = [*history, {"role": "user", "content": content}]
+        showcase: str | None = None
+        if step.showcase is not None:
+            # a real prompt: the file's text, the file's system message, a natural stop (no ignore_eos)
+            pf = self._prompts[tp.name]
+            prompt = next(p for p in pf.prompts if p.id == step.showcase)
+            content = prompt.turns[step.i]
+            system = [{"role": "system", "content": pf.system}] if pf.system else []
+            messages = [*system, *history, {"role": "user", "content": content}]
+            showcase = f"{prompt.id}#{step.i}"
+        else:
+            content = words(step.content_seed, step.user_tokens)
+            messages = [*history, {"role": "user", "content": content}]
         body: dict[str, Any] = {
             "messages": messages,
             "max_tokens": step.max_tokens,
-            "ignore_eos": True,
+            "ignore_eos": showcase is None,
             "stream": step.stream,
         }
         if tp.shape:
@@ -395,6 +418,8 @@ class LoadRunner:
             "X-Slotgw-Scenario": self.scenario_label,
             "X-Slotgw-Seed": str(self.plan.seed),
         }
+        if showcase:
+            headers["X-Slotgw-Showcase"] = showcase
         rec = ClientRecord(
             load_run=self.load_run_id,
             scenario=self.scenario_label,
@@ -407,6 +432,7 @@ class LoadRunner:
             t_send=now(),
             user_tokens=step.user_tokens,
             max_tokens=step.max_tokens,
+            showcase=showcase,
         )
         self.counters.sent += 1
         self.counters.inflight += 1

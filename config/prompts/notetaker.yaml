@@ -1,0 +1,1117 @@
+profile: notetaker
+system: "You are a meeting note-taker. You read a transcript and produce accurate, structured notes. Only record what was actually said; never invent names, dates, or decisions."
+prompts:
+  - id: notetaker-eng-planning
+    max_tokens: 450
+    turns:
+      - |
+        Transcript: Kestrelworks platform team, Q1 planning meeting, Tuesday 6 January.
+        Attendees: Priya (engineering manager), Tomasz (backend), Lena (site reliability),
+        Dev (product manager), Marcus (frontend). Recorded with consent, auto-transcribed.
+
+        PRIYA: Okay, I think we're all here. Marcus, can you hear us? You were frozen for a
+        second.
+
+        MARCUS: I'm here. The cat walked across the keyboard and muted me. Sorry.
+
+        PRIYA: No problem. So this is the Q1 planning session. I want to get through four
+        things today: the queue migration, the on-call rotation, the staging environment
+        request, and the contractor question for the dashboard. If we have time at the end,
+        Tomasz wants to talk about flaky tests, and I think we should, because it keeps coming
+        up. Dev, you said you had one thing to add?
+
+        DEV: Just a date. The Orbit customer launch is now firm for February the twentieth.
+        That's a Friday. They've put it in their own press materials, so it's not moving
+        again. Everything we talk about today needs to fit around that.
+
+        PRIYA: Right. So February twentieth is the fixed point. Let's start with the queue
+        migration since that's the thing most likely to collide with it. Tomasz, where are we?
+
+        TOMASZ: So, quick recap for Marcus who wasn't in the last one. We're moving off
+        Pigeonhole, which is the in-house queue we've been running since 2021, onto Conveyr,
+        the managed service. The reasons haven't changed: Pigeonhole has no dead-letter
+        handling worth the name, it falls over above about four thousand messages a second,
+        and Lena is the only person who understands its failure modes.
+
+        LENA: Which I would like to stop being true.
+
+        TOMASZ: Which we would all like to stop being true. Current state: the producer side is
+        done and behind a flag. All five services can publish to either queue or both. The
+        consumer side is done for three of the five services. The remaining two are the
+        notification worker and the billing reconciler, and the billing one is the hard one
+        because it relies on ordering guarantees that Pigeonhole gives us by accident and
+        Conveyr doesn't give us at all.
+
+        PRIYA: How much work is left on the billing consumer?
+
+        TOMASZ: Honestly, two weeks if the approach I have in mind works, four if it doesn't.
+        The approach is to partition by tenant so ordering within a tenant is preserved, and
+        accept that cross-tenant ordering doesn't matter, which I've checked with finance and
+        it doesn't.
+
+        DEV: Can we get that in writing from finance? Last time someone told us something
+        didn't matter to finance it turned out to be very much mattering to finance.
+
+        TOMASZ: Fair. I'll get it in writing.
+
+        PRIYA: Okay, action for Tomasz, get written confirmation from finance that cross-tenant
+        ordering is not required for the billing reconciler. Lena, what's the cutover look
+        like from your side?
+
+        LENA: So I've drafted a runbook. The short version is dual-write for two weeks, then a
+        dry run of the cutover on a Thursday night, then the real cutover the following
+        Thursday night. Each cutover needs a maintenance window, and I'm estimating two hours,
+        of which about forty minutes is actual downtime for the consumers. Producers never go
+        down because of the dual-write.
+
+        MARCUS: Does the dashboard need to show anything during that window? Like a banner?
+
+        LENA: Yes, actually, that's a good point. We'll want a maintenance banner and the
+        real-time panels should show a "delayed" state rather than empty graphs, because empty
+        graphs make people file incidents.
+
+        MARCUS: I can do the banner in a day. The delayed state on the panels is maybe three
+        days because the panels don't currently know the difference between "no data" and
+        "data is late".
+
+        PRIYA: Let's put that in. Marcus owns the maintenance banner and the delayed-state
+        indicator on the real-time panels. Lena, dates?
+
+        LENA: If Tomasz's two weeks holds, the billing consumer is done by about the
+        twenty-third of January. Dual-write starts the twenty-sixth. Dry run Thursday the
+        fifth of February. Real cutover Thursday the twelfth. That leaves us a week and a day
+        before the Orbit launch, which is tight.
+
+        DEV: Too tight. If the cutover goes wrong on the twelfth and we need to roll back and
+        try again the following Thursday, that's the nineteenth, the day before launch. I'm
+        not comfortable with that.
+
+        PRIYA: What are the alternatives?
+
+        DEV: Either we cut over before Orbit with more buffer, which means pulling the
+        schedule in, or we cut over after Orbit, which means launching a big customer on
+        Pigeonhole.
+
+        LENA: Launching Orbit on Pigeonhole is a real risk. Their expected volume on day one is
+        about two thousand messages a second, and Pigeonhole starts to struggle at four. We'd
+        be at fifty percent capacity on a system with no headroom and one person who knows
+        how to fix it.
+
+        TOMASZ: Can we pull the schedule in? If I had help on the billing consumer, maybe. If
+        Marcus or someone paired with me on the partitioning code, two weeks becomes maybe nine
+        days.
+
+        MARCUS: I can pair on it, but then the delayed-state indicator slips.
+
+        PRIYA: Which matters less?
+
+        LENA: The indicator matters less. If the panels show empty graphs for forty minutes
+        during a planned window with a banner on top of it, that's survivable. Cutting over on
+        the twelfth is not.
+
+        PRIYA: Okay. Decision: Marcus pairs with Tomasz on the billing consumer partitioning,
+        starting Monday the twelfth of January, and the delayed-state indicator moves to after
+        the cutover. Lena, can you re-plan the dates with the billing consumer done by, say, the
+        twentieth?
+
+        LENA: If it's done the twentieth, dual-write starts the twenty-first, dry run Thursday
+        the twenty-ninth, real cutover Thursday the fifth of February. That gives us two full
+        weeks before Orbit and one spare Thursday for a retry.
+
+        DEV: That I can live with. I need to tell the Orbit account manager that there's a
+        planned maintenance window on the fifth, and I'll need the exact times.
+
+        LENA: Nine pm to eleven pm, our time. I'll confirm in the runbook.
+
+        PRIYA: Good. Dev, you'll communicate the maintenance window to Orbit. And one more
+        thing on this: who owns the backfill? If there are messages in Pigeonhole's retry
+        queue at cutover, somebody has to replay them into Conveyr.
+
+        TOMASZ: I assumed Lena.
+
+        LENA: I assumed Tomasz.
+
+        PRIYA: That's exactly why I asked. Let's leave that one as an open question and come
+        back to it on Thursday. It needs an owner before dual-write starts.
+
+        TOMASZ: Noted. Oh, and the Conveyr vendor terms. Legal had them for three weeks. Has
+        anyone heard back?
+
+        DEV: I chased on Friday. They said this week. I have no more information than that.
+
+        PRIYA: Open question then: whether legal has signed off on the Conveyr terms. Dev,
+        keep chasing. Okay, on-call. Lena.
+
+        LENA: So the problem is simple. We have a rotation of three people: me, Tomasz, and
+        Priya as the escalation. Over the last quarter I was primary for seven of thirteen
+        weeks because of holidays and the two weeks Tomasz was on the other project. That's
+        not sustainable and it's also not safe, because when I'm tired I make mistakes.
+
+        PRIYA: Agreed. What do you want?
+
+        LENA: A five-person rotation. Me, Tomasz, Marcus, and the two people from the data
+        team who already get paged for half our incidents anyway because the incidents are
+        usually about data pipelines. Primary one week in five. Secondary the following week.
+        And no one is primary for more than two weeks in any six.
+
+        MARCUS: I've never been on call for backend stuff. I'd need some ramp-up.
+
+        LENA: Two shadow weeks before your first primary. I've written a shadowing checklist.
+
+        MARCUS: Okay. I'm not thrilled but I understand why.
+
+        PRIYA: Have you talked to the data team?
+
+        LENA: Informally. Their lead is open to it but wants it to be a proper agreement, with
+        their manager's sign-off, and wants the compensation to be the same as ours. I don't
+        know what their compensation is currently.
+
+        PRIYA: I'll take that. I'll talk to their manager this week and sort out the
+        compensation question. Can we aim to have the new rotation live from the second of
+        February?
+
+        LENA: Yes, if the agreement is done by the twenty-third of January so I can schedule
+        the shadow weeks.
+
+        PRIYA: Okay. Decision in principle: move to a five-person rotation including two data
+        team members, primary one week in five, two shadow weeks for anyone new, target live
+        date the second of February, subject to the data team's manager agreeing. Action for
+        me. Marcus, your shadow weeks would be the weeks of the nineteenth and twenty-sixth of
+        January.
+
+        MARCUS: That overlaps with pairing with Tomasz.
+
+        PRIYA: Shadowing is mostly reading and watching, so I think it's compatible. If it
+        isn't, tell me by the end of next week.
+
+        TOMASZ: Can I just say, while we're on this, the coffee machine on the fourth floor
+        has been broken for eleven days and I've been counting.
+
+        LENA: It's not broken, someone put oat milk through the steam wand.
+
+        TOMASZ: That is broken by any reasonable definition.
+
+        PRIYA: Moving on. Staging environment. Lena, you put in a request for a second one.
+
+        LENA: Yes. The problem is that we have one staging environment and it's booked solid.
+        The queue migration dry run needs it for two full days. The Orbit team needs it for
+        their integration testing for most of the first two weeks of February. Marcus needs
+        it for the dashboard work. Right now people are overwriting each other's deployments
+        and then filing bugs against each other's code.
+
+        DEV: How much?
+
+        LENA: About eighteen hundred a month. That's the compute and the managed database,
+        at the same size as the current staging. I could do a smaller one for about eleven
+        hundred but then it wouldn't be representative for the migration dry run, which is
+        the main reason I want it.
+
+        DEV: Is this permanent or just for the migration?
+
+        LENA: I'd argue permanent, but I'd accept three months and a review.
+
+        PRIYA: I have discretion up to two thousand a month without going to the director, so
+        this is within my authority. Let's do three months with a review on the first of April.
+        If we still need it then, I'll make the case for permanent.
+
+        DEV: One condition from me. The second environment should be the one dedicated to the
+        Orbit integration testing from the first of February through launch. I don't want the
+        Orbit team's testing disrupted by the migration dry run.
+
+        LENA: Fine. Staging two is Orbit from the first of February. Dry run happens on staging
+        one on the twenty-ninth of January, before Orbit moves in.
+
+        PRIYA: Decision: approve a second staging environment at approximately eighteen hundred
+        a month for three months, review on the first of April, Lena to provision it, ready by
+        the twenty-sixth of January. Dedicated to Orbit integration testing from the first of
+        February to the launch. Lena, you also had the alerting item, let's take that now since
+        it's related to the on-call change.
+
+        LENA: Yes, quickly. Alert noise. Last month the on-call phone received 212 pages. I
+        went through all of them. Sixty-one were actionable, meaning someone had to do
+        something. The other 151 were either auto-resolved within five minutes, duplicates of
+        an alert already firing, or the disk-space alert on the analytics replica that fires
+        every night at two when the export job runs and then clears at two fifteen.
+
+        TOMASZ: That one has woken me up four times.
+
+        LENA: It has woken everyone up. So the proposal is: I delete or re-threshold every
+        alert that fired more than three times last month without anyone doing anything about
+        it. That's about thirty rules. Anything deleted gets listed in the runbook so we know
+        what we stopped watching. And the disk-space alert on the replica gets a maintenance
+        window from one forty-five to two thirty so it simply doesn't page during the export.
+
+        DEV: Is there a risk we stop watching something that matters?
+
+        LENA: Some. That's why I want to do it as a list that Tomasz reviews rather than me
+        doing it alone at eleven at night. The alternative is that we keep training people to
+        ignore the phone, and the one time it's real, they ignore it.
+
+        PRIYA: I'm fine with that. Can you also add a weekly count of pages to the Thursday
+        report, split into actionable and not? If we're going to bring Marcus and the data team
+        onto the rotation, I want them to see the number going down before they start.
+
+        LENA: Yes. I'll have the pruning list to Tomasz by the sixteenth, changes live by the
+        twenty-third, and the count in the Thursday report from the twenty-second.
+
+        TOMASZ: I'll review the list within two days of getting it.
+
+        MARCUS: Can I ask something slightly off topic? The analytics replica export, is that
+        the one that feeds the usage explorer we haven't built yet?
+
+        DEV: It is, in theory. In practice it feeds a spreadsheet that one person in finance
+        opens on Mondays.
+
+        MARCUS: So the alert that wakes everyone up protects a spreadsheet.
+
+        LENA: Welcome to platform engineering.
+
+        PRIYA: Decision: Lena prunes or re-thresholds the non-actionable alert rules, with
+        Tomasz reviewing the list, changes live by the twenty-third of January, and the replica
+        disk alert gets a maintenance window during the export. Page counts, actionable and
+        not, go into the Thursday report. Dev, one more thing while we're on Orbit. Their
+        integration testing in staging two: do they have test data, or are they expecting us
+        to provide it?
+
+        DEV: They're expecting us. They asked for a dataset that looks like their first month,
+        about two thousand tenants' worth of events, anonymised. I said yes without checking.
+
+        TOMASZ: We have a generator for that. It was written for the load tests last spring.
+        It would need the new event fields added, which is maybe two days, but I can't do that
+        and the billing consumer at the same time.
+
+        LENA: I can do the generator changes. I know that code, I wrote half of it.
+
+        PRIYA: Then Lena owns the Orbit test dataset, ready in staging two by the thirtieth of
+        January so they have it the day they start. Dev, please confirm with Orbit that
+        anonymised synthetic data is acceptable and that two thousand tenants is the right
+        size. I'd rather know now than on the first of February.
+
+        DEV: Will do, I'll ask them this week. While I think of it, what does a successful dry
+        run on the twenty-ninth actually look like? I want to be able to tell Orbit "the
+        rehearsal passed" and have it mean something.
+
+        LENA: Three things. All five consumers process from Conveyr for at least thirty
+        minutes with no messages lost, measured by comparing counts on both sides. The billing
+        reconciler produces identical output for the test day from both queues. And the
+        rollback step, switching the flag back to Pigeonhole, completes in under five minutes.
+        If any of the three fails, we don't cut over on the fifth; we fix, re-run the dry run
+        on the fifth, and push the cutover to the twelfth, which eats our spare Thursday.
+
+        DEV: That's clear. Put it in the runbook and I'll quote it.
+
+        LENA: It's already in the runbook. Nobody reads the runbook.
+
+        PRIYA: Minuted: the dry run success criteria are the three Lena listed. Okay.
+        Contractor question. Dev, this is yours.
+
+        DEV: So the dashboard roadmap has three things on it for the first half of the year:
+        the new tenant admin pages, the usage explorer, and the alerting UI. Marcus is one
+        person. With the migration pairing and the on-call changes, Marcus is maybe sixty
+        percent of a person on the dashboard for the next two months. I'd like to bring in a
+        contractor for twelve weeks to do the tenant admin pages, which are the most
+        self-contained. I've got a quote from someone Marcus has worked with before, Ines, at
+        forty thousand for twelve weeks, starting the second of February.
+
+        MARCUS: Ines is good. She did the original admin pages at my last place. She'd need
+        about a week of onboarding and she'd want a clear spec, which we don't have yet.
+
+        PRIYA: Do we have budget?
+
+        DEV: Not in my budget. It would have to come from the platform budget or be a special
+        request.
+
+        PRIYA: The platform budget has about twenty-five thousand unallocated for the quarter,
+        so forty is outside it. I can't approve that alone.
+
+        DEV: Could we do eight weeks instead? That's about twenty-seven.
+
+        PRIYA: Still over, but close enough that I can go to the director with a good story.
+        But I need the spec first. I'm not going to ask for money for work we can't describe.
+
+        DEV: Fair. I'll have the tenant admin spec done by the sixteenth of January.
+
+        PRIYA: Okay. So no decision on the contractor today. Dev writes the tenant admin spec
+        by the sixteenth. I take the budget question to the director in the week of the
+        nineteenth once I've seen the spec. If approved, Ines starts the second of February
+        for eight weeks, with Marcus onboarding her in week one. Open question: whether we
+        get the budget.
+
+        MARCUS: If we don't get it, what happens to the roadmap?
+
+        DEV: Then the alerting UI slips to the second half of the year and I have an awkward
+        conversation with sales. Not the end of the world but not great.
+
+        PRIYA: Noted. Okay, flaky tests. Tomasz, ten minutes, go.
+
+        TOMASZ: Right. We currently have, as of this morning, eleven tests that fail
+        intermittently on main. I've got the list. The worst one is the retry-backoff
+        integration test which fails about one time in eight. The practical effect is that
+        the main build fails about one time in three for reasons that have nothing to do with
+        the change being built, and people have started hitting the rerun button without
+        looking, which means real failures get rerun too.
+
+        LENA: I've seen two real failures get merged that way in the last month.
+
+        TOMASZ: Exactly. My proposal is a quarantine. We tag the eleven tests so they run but
+        don't block the build. Each one gets an owner and a deadline. Within two sprints, so
+        by the end of February, every quarantined test is either fixed and un-quarantined or
+        deleted with a note explaining why. New flaky tests go into quarantine within a day of
+        being identified. And the number of quarantined tests gets reported in the Thursday
+        meeting.
+
+        MARCUS: What stops the quarantine just becoming a place tests go to die?
+
+        TOMASZ: The two-sprint deadline and the fact that it's reported weekly. If a test is
+        still in quarantine after two sprints, it's deleted automatically. I'm serious about
+        that.
+
+        DEV: I like it. Can we also measure the rerun rate? If people stop hitting rerun, we
+        know it worked.
+
+        TOMASZ: Yes, I can pull that from the CI runner.
+
+        PRIYA: Decision: adopt the quarantine as Tomasz described. Tomasz owns the list and the
+        tagging, done by Friday the ninth. Every quarantined test has a named owner by the same
+        date. Deadline for fix-or-delete is the end of February. Tomasz reports the count and
+        the rerun rate every Thursday. Okay, we're over. Quick recap of actions before we go.
+        Tomasz: written confirmation from finance on ordering, and the test quarantine by the
+        ninth. Marcus: maintenance banner, pair with Tomasz from the twelfth, shadow weeks the
+        nineteenth and twenty-sixth. Lena: re-plan the migration dates with the dry run on the
+        twenty-ninth and cutover on the fifth, provision staging two by the twenty-sixth, alert
+        pruning live by the twenty-third, Orbit test dataset by the thirtieth. Dev: tenant
+        admin spec by the sixteenth, tell Orbit about the maintenance window, confirm the test
+        dataset with Orbit, chase legal. Me: data team on-call agreement, budget conversation
+        with the director. Open
+        questions: who owns the backfill, whether legal signs off on Conveyr, whether the
+        contractor budget is approved. Did I miss anything?
+
+        LENA: The delayed-state indicator moved to after cutover, so sometime in late February.
+
+        PRIYA: Right, that's on Marcus but after the fifth. Anything else?
+
+        TOMASZ: Coffee machine.
+
+        PRIYA: Not minuted. Thanks everyone.
+
+        Instruction: Produce meeting notes from this transcript with the following sections:
+        (1) a summary of no more than three sentences; (2) Decisions, as a bulleted list;
+        (3) Action items, each with an owner and a due date where one was stated; (4) Open
+        questions. Use only what was said in the transcript.
+
+  - id: notetaker-board-call
+    max_tokens: 400
+    turns:
+      - |
+        Transcript: Brightwater Food Pantry, board of trustees, regular quarterly call,
+        Wednesday 15 October, 6:30 pm. Present: Helen (chair), Raj (treasurer), Mo (executive
+        director, non-voting), Dolores, Kwame, Ana (trustees). Apologies: Fiona, Pieter. Minutes
+        taken by Greta (staff). Eight trustees on the board in total.
+
+        HELEN: Let's get started, it's six thirty-two. We have apologies from Fiona and Pieter,
+        so we have six trustees on the call. Raj, you're a bit quiet.
+
+        RAJ: Is that better? My internet has been doing this all day.
+
+        HELEN: Better. Okay. Agenda is the usual: Mo's report, financials, then three items
+        for decision: the Lindqvist grant, the van, and the bylaws amendment. Then the gala
+        update and the ED review process. I'd like to finish by eight. Mo, over to you.
+
+        MO: Thanks Helen. I'll keep it short because the numbers will come up in Raj's section.
+        Headline is that demand is up again. We served an average of 410 households a week in
+        the third quarter, up from 370 in the second quarter and 340 this time last year. The
+        biggest growth is in working families, people with at least one job in the household,
+        who are now about forty percent of who we see. The Thursday evening session we added in
+        June is the one that's grown fastest, which tells you something.
+
+        DOLORES: Are we turning people away?
+
+        MO: Not turning away, but we've had to reduce the standard parcel twice. We took the
+        fresh fruit out in August except for families with children, and in September we
+        dropped from two tins of protein to one. I don't like it, but it was that or run out
+        on Saturdays.
+
+        KWAME: What's the volunteer picture? Because I was in on Saturday and it felt thin.
+
+        MO: It is thin. Active volunteers, meaning people who did at least one shift in the
+        quarter, went from 140 to 112. Saturday mornings are the worst hit. We lost a group of
+        about fifteen from the university when their society folded, and the summer always
+        costs us a few. We're coping on weekdays, but Saturdays we're running with seven or
+        eight when we need twelve.
+
+        ANA: I might be able to help with that. I'll come back to it under any other business
+        if that's okay, or now if people want.
+
+        HELEN: Let's take it now, briefly.
+
+        ANA: So I've got contacts at both colleges, Ridgeway and the technical college, and
+        both have volunteering requirements for some of their courses. I think we could run a
+        recruitment push in November aimed at students who need hours, with a specific pitch
+        for Saturdays. I'd need Mo's team to do the induction sessions, maybe two in November.
+
+        MO: We can do two inductions. What's the target?
+
+        ANA: I'd say get back to 130 active by the end of January. That's realistic if we get
+        twenty-five students and lose a few.
+
+        HELEN: Can we make that an action? Ana leads a volunteer recruitment push with the two
+        colleges in November, target 130 active volunteers by the end of January, Mo's team
+        runs two induction sessions.
+
+        ANA: Yes, happy to own that.
+
+        MO: One more thing from me. The payment processor switch in July. I know Raj will
+        cover the numbers, but the operational side is that we lost about sixty monthly donors
+        in the transition, because their cards didn't carry over and the re-enrolment emails
+        had a poor response. We've recovered about twenty of them by phoning. I'd like to keep
+        phoning but it's eating staff time.
+
+        RAJ: I'll pick that up in financials. That's the main reason income is down.
+
+        HELEN: Okay, Raj, financials.
+
+        RAJ: Right. Third quarter. Income was 212,400 against a budget of 230,000, so we're
+        about 17,600 behind, or just under eight percent. Expenses were 198,700 against a
+        budget of 205,000, so we underspent by about 6,300, mostly because the warehouse
+        heating was off all summer and we delayed hiring the second driver. Net for the
+        quarter is a surplus of 13,700, but budget had us at 25,000, so we're about 11,000
+        worse than planned.
+
+        DOLORES: What's that in reserves?
+
+        RAJ: Reserves are at 4.1 months of operating costs. Our policy says minimum three,
+        target four to six. So we're inside the range but at the low end of target. If the
+        donor trend continues we'd dip under four by the end of the year.
+
+        KWAME: Break down the income shortfall for me.
+
+        RAJ: Individual giving is down 9 percent year on year, which is almost entirely the
+        recurring donors Mo mentioned. Sixty donors at an average of 22 a month is about
+        1,300 a month, so roughly 4,000 for the quarter, and the knock-on is that we also lost
+        the year-end upgrades those people usually make. Grant income was on budget. Events
+        were slightly ahead because the summer fair did well. Corporate was behind because one
+        sponsor pulled out in August.
+
+        HELEN: Is the payment processor switch something we should reverse?
+
+        RAJ: I've thought about that. Reversing it would cost us another round of disruption
+        and the old processor's fees were about 1.2 percent higher, which on our volume is
+        around 3,000 a year. My recommendation is to stay and keep recovering donors by phone,
+        but I'd like Mo to put a cap on the staff time, say ten hours a week for two more
+        months, and then we stop and accept the loss.
+
+        MO: I can live with ten hours a week until mid December.
+
+        HELEN: Let's leave the processor decision as an open question for the next call and
+        see where recovery is by then. Mo, ten hours a week on donor recovery calls until the
+        fifteenth of December, and report the recovered number at the December call.
+
+        RAJ: One more thing. The second driver. We delayed hiring because of the income, but
+        with the van question coming up it matters. If we get the new van we need someone to
+        drive it. I'd suggest we don't hire until the van decision is made and the grant money
+        is in the bank.
+
+        HELEN: Agreed, that follows. Okay, the Lindqvist grant. Mo, explain the offer.
+
+        MO: The Lindqvist Family Trust has offered us 45,000, restricted to the purchase of a
+        refrigerated van. It cannot be used for operations, salaries or anything else. The
+        offer letter says the money must be spent by the thirty-first of March and they want a
+        photograph of the van with their name on it for their annual report. Which is fine. The
+        van we've specified is 38,500, plus about 2,100 for shelving and the graphics, so
+        40,600 total. That leaves 4,400 we can't spend on anything else.
+
+        DOLORES: Can we go back and ask for flexibility on the 4,400?
+
+        MO: I can ask. My read of the trust is that they'd be open to the remainder covering
+        the first year's insurance and running costs for the van specifically, because that's
+        still van-related. I wouldn't push for it to cover general operations.
+
+        KWAME: Do we need a refrigerated van? Genuine question. Our current van isn't
+        refrigerated and we've managed.
+
+        MO: We've managed by not collecting chilled surplus. Two supermarkets and the dairy
+        at Fenwick have offered us chilled food, which is the protein we keep cutting from
+        parcels, and we've had to say no because we can't transport it safely. A refrigerated
+        van is the difference between one tin of protein and fresh meat and dairy in the
+        parcel. It's the single thing that would most improve what we hand out.
+
+        KWAME: Okay, that answers it.
+
+        RAJ: Running costs. I estimate 6,200 a year for the van: insurance, fuel, servicing,
+        and the refrigeration unit maintenance. Plus the driver, which is a part-time post we
+        budgeted at 14,000. So the van commits us to around 20,000 a year of new operating cost
+        that the grant doesn't cover.
+
+        HELEN: Which brings us back to reserves.
+
+        RAJ: It does. My view is that it's still the right thing to do because the chilled
+        food offers roughly triple the value of what we'd spend, but the board should go in
+        with its eyes open.
+
+        HELEN: Okay. I'll propose that we accept the Lindqvist grant of 45,000, authorise Mo to
+        proceed with the van purchase at 38,500 plus fit-out not exceeding 2,100, and ask Mo to
+        request that the remaining 4,400 be applied to the van's first-year insurance and
+        running costs. Any objections?
+
+        DOLORES: None.
+
+        ANA: None.
+
+        KWAME: None, now that I understand it.
+
+        RAJ: None.
+
+        HELEN: Carried unanimously, six in favour. Mo, you'll write back to the trust and get
+        the order in. When would the van arrive?
+
+        MO: If I order by the end of October, about ten weeks, so early to mid January. I'll
+        confirm the date when I have it.
+
+        HELEN: And the driver hire follows once the grant money is received. Raj, that's your
+        trigger.
+
+        RAJ: Noted.
+
+        DOLORES: Sorry, that's my grandson in the background, he's meant to be in bed.
+
+        HELEN: We all have one of those. Okay, gala. This is the fourteenth of November at the
+        Corn Exchange. Mo, where are we?
+
+        MO: Ticket sales are at 180 of 250. We're a month out, so that's slightly behind last
+        year, when we were at 200 at this point. Income committed so far is about 41,000
+        including sponsorships against a target of 60,000. The two biggest sponsorships are
+        confirmed, which is the good news. The silent auction has thirty-one lots, we wanted
+        forty. The main issue is the early-bird price ended on the first of October and sales
+        fell off a cliff, about five tickets a week since.
+
+        ANA: Can we just reopen the early-bird?
+
+        MO: We could. It's 15 off per ticket. If it sells another fifty tickets that's 750 we
+        give up to gain about 3,500. I'd do it.
+
+        KWAME: Does it annoy the people who paid full price?
+
+        MO: A little. We'd frame it as a "final release" rather than extending the early-bird,
+        and we'd give the full-price people a free drink voucher. That's cost us about 200.
+
+        HELEN: Let's do it. Decision: reopen reduced-price tickets as a final release until the
+        first of November, full-price buyers get a drink voucher. Mo owns that. And can trustees
+        each commit to bringing in one auction lot by the end of October? That gets us to
+        thirty-seven.
+
+        DOLORES: I've got a weekend at my sister's cottage I can offer.
+
+        KWAME: I'll find something.
+
+        HELEN: Action for all trustees: one auction lot each by the thirty-first of October.
+        Two items I added late: the warehouse lease and the safeguarding policy. Kwame, lease.
+
+        KWAME: Right. The warehouse lease on Tanner Street expires on the thirty-first of
+        March. We currently pay 2,400 a month. The landlord's agent has written offering a
+        renewal at 2,750 a month on a three-year term, or 2,900 on a one-year term. That's a
+        fourteen and a half percent increase on the three-year option. They want an answer by
+        the thirtieth of November.
+
+        RAJ: That's 4,200 a year extra on the three-year deal. We hadn't budgeted for any
+        increase next year, so that would need to come out of the surplus, which as I said is
+        thinner than planned.
+
+        MO: For context, I've looked at alternatives twice in the last year. There is nothing
+        with a loading bay and cold storage potential within two miles for under 3,200. Moving
+        would cost us around 15,000 in fit-out and lost operating days. Tanner Street is not
+        perfect, the roof leaks over the office, but it is the cheapest option by a distance.
+
+        DOLORES: Can we negotiate? Fourteen percent is a lot when the roof leaks.
+
+        KWAME: I think so. The unit next door has been empty for five months, so the landlord
+        is not exactly turning people away. I'd like authority to negotiate up to 2,600 a month
+        on a three-year term, with a break clause at eighteen months, and the roof repair
+        written in as a landlord obligation before we sign.
+
+        ANA: What if they say no to 2,600?
+
+        KWAME: Then I come back to the board before committing. I won't go above 2,600 without
+        another vote.
+
+        HELEN: I'd like to propose that: Kwame is authorised to negotiate the Tanner Street
+        renewal up to 2,600 a month on a three-year term with an eighteen-month break and the
+        roof repair as a condition, and reports back before the thirtieth of November. Any
+        objections?
+
+        RAJ: None, and I'll model the 2,600 into next year's budget so we're not surprised.
+
+        DOLORES: None.
+
+        ANA: None.
+
+        KWAME: Obviously none.
+
+        HELEN: Carried, six in favour. Kwame, you'll respond to the agent and keep Mo in copy.
+        Dolores, safeguarding.
+
+        DOLORES: This is a short one but it matters. Our safeguarding policy was last reviewed
+        in March two years ago and our own policy says it's reviewed annually. So we're
+        eighteen months overdue, and two of our funders ask for the review date on their
+        monitoring forms. The Lindqvist letter, as it happens, asks for a copy of a current
+        safeguarding policy with the acceptance.
+
+        MO: That's correct, it's in the conditions. I was going to flag it.
+
+        DOLORES: I've gone through the policy. It needs three changes: the designated lead is
+        still listed as the previous deputy director who left a year ago, the reporting
+        procedure references a phone line that no longer exists, and there's nothing about
+        online volunteering or the student volunteers Ana is about to recruit, who may be
+        under eighteen.
+
+        ANA: Good point, some of the college students will be seventeen.
+
+        DOLORES: So I'd like to bring a revised policy to the December call for approval, with
+        Mo named as the designated lead and Greta as deputy, if they're willing.
+
+        MO: I'm willing. Greta?
+
+        GRETA: Yes, that's fine, I've done the training.
+
+        HELEN: Good. Action for Dolores: revised safeguarding policy circulated by the first of
+        December for approval at the December call. Mo, can you tell the Lindqvist trust that
+        the review is under way and the approved version will follow in December?
+
+        MO: Yes, I'll put it in the acceptance letter.
+
+        RAJ: Sorry, I've got to say something about the heating while we're on the warehouse.
+        We turned the heating off in May and it's still off. It was eleven degrees in the
+        sorting area on Saturday. The volunteers were in coats.
+
+        MO: It's going back on the first of November, it's already scheduled. We saved about
+        2,800 over the summer by doing it, which is partly why expenses were under.
+
+        KWAME: Eleven degrees is too cold for the people handling food, let alone the food.
+
+        MO: Agreed, and it's why it's going on in November rather than December as originally
+        planned.
+
+        RAJ: One housekeeping item before the bylaws, since it has a date. The annual accounts
+        for the year ending in June need to be filed by the thirty-first of January. The
+        independent examiner has them and has raised two queries, both about how we valued
+        donated food. Last year we valued it at 1.80 a kilo and this year the sector guidance
+        moved to 2.10. The difference changes our reported income by about 38,000, which is
+        not real money but looks like a big jump. I propose we adopt 2.10 and put a note in
+        the accounts explaining the change.
+
+        HELEN: Any objections to adopting the 2.10 figure with an explanatory note?
+
+        KWAME: None, as long as the note is clear that it's a valuation change and not growth.
+
+        RAJ: It will be. I'll have the draft accounts to the board by the fifteenth of
+        December for approval at the December call.
+
+        HELEN: Carried, six in favour. Action for Raj: draft accounts by the fifteenth of
+        December. Bylaws amendment. Raj, you proposed this.
+
+        RAJ: Yes. Currently our bylaws say that decisions of the board require a two-thirds
+        majority of the full board, which with eight trustees means six votes. The proposal is
+        to change that to a simple majority of trustees present, provided a quorum of five is
+        present. The reason is practical: we've had three decisions in the last year that we
+        couldn't take because we had five or six people on a call and needed six yes votes, so
+        everything had to go to email votes afterwards, which is slow and arguably not even
+        compliant.
+
+        HELEN: The irony being that amending the bylaws itself requires two-thirds of the full
+        board.
+
+        RAJ: Yes. Which is six votes. And we have six people here.
+
+        HELEN: So this only passes if all six of us vote in favour. Discussion?
+
+        KWAME: I'm uneasy. Simple majority of those present means three people could make a
+        decision for the organisation on a call where five showed up. I'd prefer a simple
+        majority of the full board, so five votes always, regardless of who's present.
+
+        RAJ: That's workable. It would still have fixed two of the three decisions we got stuck
+        on.
+
+        DOLORES: I'd support Kwame's version.
+
+        ANA: Me too.
+
+        HELEN: Raj, are you happy to amend the proposal to a simple majority of the full board,
+        so five of eight, with a quorum of five present?
+
+        RAJ: Yes.
+
+        HELEN: Then let's vote on the amended proposal. All in favour?
+
+        RAJ: In favour.
+
+        DOLORES: In favour.
+
+        ANA: In favour.
+
+        HELEN: In favour. Kwame?
+
+        KWAME: I'm going to abstain. I prefer the amended version but I'd like Fiona and Pieter
+        to have a say on a change to how the board itself works. I don't think we should change
+        the rules of the board with a quarter of the board absent.
+
+        HELEN: That's a fair position. So that's five in favour, one abstention, none against.
+        The bylaws require six for an amendment, so this does not pass tonight. Raj, I'd suggest
+        we circulate the amended wording to all eight trustees and hold a vote at the December
+        call, where we'll hopefully have everyone.
+
+        RAJ: Agreed. I'll circulate the amended wording by the end of this week.
+
+        HELEN: Action for Raj. Open question: whether the amended bylaws change passes in
+        December. Last item: the executive director review. Mo, you might want to drop off for
+        this bit, or stay, your choice.
+
+        MO: I'll stay, I know what you're going to say.
+
+        HELEN: Mo's annual review is due by the end of the year. Last year Fiona and I did it.
+        I'd like to rotate so that it isn't always the chair. Dolores, would you do it with me?
+
+        DOLORES: Yes, happy to.
+
+        HELEN: Then Dolores and I will conduct the ED review, with the written appraisal done
+        by the tenth of December so it can be noted at the December call. Mo, we'll send you
+        the self-assessment form by the end of October.
+
+        MO: Fine by me.
+
+        HELEN: Anything else? We're at seven fifty.
+
+        ANA: Just quickly, is the second site at Eastgate still a spring thing? People keep
+        asking me.
+
+        MO: Honestly, I don't know. It depends on the income trend and on whether we get the
+        community fund grant, which we hear about in January. I'd say it's an open question
+        until then.
+
+        HELEN: Open question, Eastgate site in spring, revisit in January. Thank you all. Next
+        call is Wednesday the tenth of December, same time.
+
+        Instruction: Produce board meeting notes from this transcript with the following
+        sections: (1) a summary of no more than three sentences; (2) Decisions, as a bulleted
+        list, including the outcome of each vote with the counts; (3) Action items, each with
+        an owner and a due date where one was stated; (4) Open questions. Use only what was
+        said in the transcript.
+
+  - id: notetaker-product-retro
+    max_tokens: 400
+    turns:
+      - |
+        Transcript: Tidewatch release 4.2 retrospective, Thursday 23 October, 10:00. Tidewatch
+        is a web application and harbour kiosk display for small-port operators. Present: Sam
+        (product manager, facilitating), Ingrid (design), Yusuf (backend), Chen (frontend and
+        kiosk), Bea (QA), Olu (support lead).
+
+        SAM: Okay, let's start. Standard format: what went well, what didn't, what we change.
+        I'll keep time. No blame, but we do need to be specific, because 4.2 was rough and I
+        don't want to do that again. Quick facts so we're all working from the same numbers.
+        We planned to ship on the ninth of October. We shipped on the sixteenth. The kiosk
+        hotfix went out on the nineteenth. Support tickets in the first seven days were 340
+        against a normal week of about 90. Kiosk crash-free sessions dipped to 97.9 percent on
+        release day against our target of 99.5, and recovered to 99.6 after the hotfix. Beta
+        cohort was 400 users across eleven harbours. Any corrections?
+
+        OLU: 340 is tickets opened. Unique customers was 212. Some people opened three or four.
+
+        SAM: Noted, 212 unique. Okay. What went well. Anyone.
+
+        INGRID: The design handoff was two weeks earlier than 4.1 and it showed. Chen had the
+        tide chart specs before the sprint started instead of during it, and we had zero
+        design-related rework on the chart. That's a first.
+
+        CHEN: Agreed. The tide chart was the smoothest piece of the release. Spec on day one,
+        built in a week, Bea found two visual bugs, both fixed in a day.
+
+        BEA: The beta cohort worked. Four hundred users across eleven harbours found three
+        genuine bugs before general release, including the one where the chart showed the wrong
+        day's tide after midnight in harbours west of the meridian. If that had gone to all
+        users on the ninth it would have been a very bad morning for a lot of people.
+
+        YUSUF: And the feature flags. The new map layer went out dark, we turned it on for ten
+        percent, saw the tile server load, scaled it, then went to a hundred. No incident.
+        That's how everything should ship.
+
+        SAM: Hold that thought, because it's going to come back. Anything else that went well?
+
+        OLU: Honestly, the team's response once the kiosk problem was understood. Chen had a
+        fix in four hours. It was the three days before it was understood that were the problem.
+
+        SAM: Okay. What didn't go well. Let's start with the slip. Nine to sixteen. Yusuf.
+
+        YUSUF: Two things, and they stacked. First, the tide data provider changed their feed
+        format on the sixth of October with four days' notice that went to an email address we
+        don't monitor. The new format moved the station identifier from the header to each
+        row and changed the timestamp from local to universal time. Our parser silently
+        produced garbage for about six hours before Bea noticed the beta charts were off. Fixing
+        the parser was a day. Re-validating all the stored predictions was two days.
+
+        BEA: It wasn't me who noticed, actually, it was a beta user at Carrowmore who emailed
+        Olu saying high tide was showing at three in the afternoon when it was obviously
+        morning.
+
+        OLU: Which I forwarded within the hour, to be fair to us.
+
+        YUSUF: Right. So that was the first three days of the slip. The second thing was the
+        kiosk signing certificate. The certificate we use to sign kiosk builds expired on the
+        tenth. Nobody had it on a calendar. We found out when the build on the eleventh failed
+        to install on the test kiosk. Getting a new certificate issued took two working days
+        because the registrar needed a director to confirm identity and Priya was on holiday.
+
+        SAM: So without the certificate problem, we'd have shipped on the thirteenth, and
+        without the data format problem on the ninth.
+
+        YUSUF: Roughly, yes.
+
+        INGRID: Can I add one on the slip? Because we were slipping, we skipped the final
+        design review of the favourites screen to save a day. That's directly why the sync
+        toggle was confusing, which is the thing Olu's team got hammered on.
+
+        OLU: Sixty percent of the 340 tickets were about favourites sync. People thought turning
+        on sync would delete their local favourites, because the confirmation dialog said
+        "replace favourites on this device". It didn't delete anything, it merged, but the
+        wording terrified people. We also had no release notes until the second day, so my team
+        was answering questions about a feature they hadn't seen.
+
+        SAM: Why no release notes?
+
+        OLU: Because they were on my list to write from the product brief, and the product
+        brief changed twice in the last week, and I was waiting for it to settle. That's partly
+        on me.
+
+        SAM: It's partly on me too, I changed the brief. Okay, the kiosk crash. Chen.
+
+        CHEN: The kiosk offline mode. When the kiosk loses its network connection, it's meant
+        to keep showing the last known tide chart from local storage. In 4.2 we changed how
+        stations are keyed, and the offline cache from 4.1 had the old key. On first boot after
+        the update, if the kiosk was offline, it loaded the cache, couldn't find the station,
+        and the chart component threw on a null station and took the whole display down. If
+        the kiosk was online at first boot, the cache got rewritten and everything was fine.
+        So it only hit kiosks that updated overnight and lost connection before morning, which
+        is apparently about a fifth of them, mostly the ones on piers with bad signal.
+
+        BEA: And we never tested the upgrade path offline. We tested a fresh install offline
+        and an upgrade online. Not an upgrade followed by offline. It's in the test plan now,
+        but it wasn't.
+
+        CHEN: The fix was a migration step for the cache key and a guard on the null station.
+        Four hours of work, as Olu said. Finding it took three days because the kiosks don't
+        report crashes when they're offline, obviously, so we only saw the crash rate when they
+        came back online and uploaded their logs, and the logs were from before the update, so
+        we were looking at the wrong version for a day.
+
+        SAM: Before I summarise, two more things that didn't go well that nobody has raised.
+        Communication during the outage, and the data provider relationship. Olu, communication.
+
+        OLU: The status page. We have one, and during the three days the kiosks were dark it
+        said "all systems operational" for the first nine hours after we knew about the
+        problem. I didn't have permission to update it, only Yusuf and Sam do, and Sam was in
+        the customer council meeting and Yusuf was debugging. Harbours were calling us to ask
+        if we knew, and we did know, but the page said we didn't. Two harbour masters told me
+        they'd have been fine with a dark kiosk for a day if they'd known we were on it.
+
+        YUSUF: That's fair. I saw the message asking me to update it and thought "after I find
+        the bug".
+
+        OLU: Which is the right instinct for the bug and the wrong one for the customers. I'd
+        like support to have write access to the status page and a rule that we post within
+        thirty minutes of confirming an incident, even if the post just says "we are aware and
+        investigating", and update every two hours until it's resolved.
+
+        SAM: Yes. Decision: support gets status page access, first post within thirty minutes
+        of a confirmed incident, updates at least every two hours. Olu owns it. Chen, there was
+        also the question of how we find out about kiosk problems at all.
+
+        CHEN: Right. The kiosks only upload logs when they're online, and they only upload
+        crash reports once a day. So a kiosk that crashes offline at six in the morning and
+        reconnects at nine shows up in our dashboard at some point the next day. That's why we
+        were a full day behind. What I want is a heartbeat: every kiosk posts a tiny message
+        every five minutes when it can, saying its version, uptime, and whether the display
+        process is running. If we stop hearing from more than five percent of kiosks, or hear
+        from them but the display process is down, we alert. It's about three days of work,
+        two on the kiosk and one on the backend.
+
+        YUSUF: I can do the backend side in a day. We already have the ingestion endpoint for
+        telemetry, it's just a new message type and a rule.
+
+        BEA: Can the heartbeat include the cache key version? Because that's the thing that
+        would have told us in five minutes that offline kiosks were on an old cache.
+
+        CHEN: Yes, good, I'll add it.
+
+        SAM: Decision: kiosk heartbeat with version, uptime, display status and cache version,
+        alerting on silence or display failures. Chen does the kiosk side, Yusuf the backend,
+        both done before the 4.3 freeze. Yusuf, the provider.
+
+        YUSUF: So the tide data provider. I went back and read our contract after the format
+        change. There is no clause requiring them to give us notice of format changes. None.
+        The four days' notice they gave was a courtesy, and it went to the address of someone
+        who left eighteen months ago. We pay them about 14,000 a year and we are, as far as I
+        can tell, one of their larger customers. I think we have room to ask for a thirty-day
+        notice clause and a staging feed we can test against before changes go live.
+
+        SAM: I'll raise that with their account manager. Action for me, this month. What about
+        protecting ourselves regardless of what they agree to?
+
+        YUSUF: Schema validation on ingest. Right now the parser trusts the feed. If the first
+        row doesn't look like what we expect, we should stop, keep serving the last good
+        predictions, and page someone, instead of writing garbage into the predictions table
+        for six hours. It's a day of work plus a test fixture for each format we've ever seen,
+        which is three. I can have it done by the fourteenth of November.
+
+        BEA: And I want a canary check that compares today's predictions for five reference
+        stations against yesterday's. If high tide moves by more than about an hour between
+        two consecutive days, something is wrong, tides don't do that. That would have caught
+        the garbage within the first run instead of six hours later.
+
+        YUSUF: That's cheap, I'll fold it into the same change.
+
+        INGRID: Related, and small: the kiosk should show when the data was last updated. If a
+        harbour master sees "updated 6 hours ago" in the corner, they know not to trust it and
+        they tell us. Right now a kiosk showing yesterday's tide looks identical to one showing
+        today's. It's a one-line design change and maybe half a day for Chen.
+
+        CHEN: Half a day, yes. I'll do it with the heartbeat work.
+
+        SAM: Decision: last-updated timestamp on the kiosk display, Chen, before freeze.
+
+        INGRID: Slightly off topic, but the beta cohort. The three bugs they found, were they
+        all from the same two or three harbours? Because if so, we're not really testing with
+        four hundred users, we're testing with the people at Carrowmore who like emailing.
+
+        BEA: Partly true. Two of the three came from Carrowmore. The third was from Saltmarsh
+        Bay. The other nine harbours in the cohort reported nothing, and from the usage data,
+        about half of them didn't open the beta build at all.
+
+        SAM: So the real beta is maybe two hundred users.
+
+        BEA: Maybe less. I'd like to swap out the harbours that haven't opened the build in two
+        releases and bring in ones that asked to join. There's a waiting list of six.
+
+        SAM: Fine. Decision: keep the cohort at four hundred but Bea rotates inactive harbours
+        out for 4.3 and brings in from the waiting list. Chen, anything on the kiosk hardware
+        that we haven't covered?
+
+        CHEN: Only that the pier kiosks with bad signal are also the ones with the old hardware
+        revision, mostly. So the twelve percent question and the offline question are the same
+        harbours. Whatever we decide about supporting them, they are the ones that will have
+        the worst experience of any release. We might want to visit a couple of them rather
+        than guessing.
+
+        OLU: I'll ask which ones would have us. Carrowmore will, obviously.
+
+        SAM: Okay. Let me try to summarise the problems: unmonitored provider notifications and
+        no notice clause in the contract, no certificate expiry tracking, skipped design review
+        under pressure, late release notes, untested upgrade-then-offline path, delayed crash
+        visibility for offline kiosks, a status page that said nothing for nine hours, a beta
+        cohort that is half inactive, and a scary dialog. Does that cover it?
+
+        YUSUF: Add one. We had no kill switch for favourites sync. If we'd had one, Olu could
+        have asked us to turn it off on day one while Ingrid fixed the wording, and we'd have
+        had maybe 80 tickets instead of 200. The map layer had a flag. Sync didn't, because it
+        was considered core.
+
+        INGRID: Nothing is core on release day.
+
+        SAM: Good line. Okay, what we change. I'm going to propose some things and you push
+        back. One: code freeze five working days before planned submission. No feature changes
+        after freeze, only fixes for release blockers, and the product brief is also frozen.
+
+        CHEN: Five days feels long for a monthly cadence.
+
+        BEA: Five days is what I need to run the full regression including the upgrade paths. If
+        it's three, I'm cutting something.
+
+        SAM: Five it is, and we'll revisit after 4.3. Two: every new user-facing feature ships
+        behind a flag with a kill switch, no exceptions, including things we think are core.
+
+        YUSUF: Agreed, and I'll add the flag check to the pull request template so it's not
+        something people have to remember.
+
+        SAM: Three: release notes to support three working days before release, and they're
+        written by product, meaning me, not by support. Olu's team reviews them and tells me
+        what customers will ask.
+
+        OLU: Yes please. And I'd like a draft of the in-app dialogs at the same time so we can
+        flag wording like "replace".
+
+        INGRID: I'll own that. Dialog copy review by design and support before freeze.
+
+        SAM: Four: Bea, the upgrade-then-offline path for kiosks goes into the automated
+        regression suite, not just the manual plan.
+
+        BEA: I can have that done by the twenty-first of November. It needs a kiosk simulator
+        change that Chen has to do first.
+
+        CHEN: I can do the simulator change by the seventh.
+
+        SAM: Five: certificate expiry. Yusuf.
+
+        YUSUF: I'll put every certificate and signing key we hold into the monitoring system
+        with alerts at ninety, thirty and seven days before expiry. By the end of this month.
+        And I'll find out what other email addresses our providers send notices to and get them
+        into a shared inbox that someone actually reads.
+
+        OLU: Support can own that inbox. We check ours every hour anyway.
+
+        SAM: Good. Six, and this is the one I feel strongest about: a release captain. One
+        person per release who owns the checklist, the go or no-go, and the communication, and
+        it rotates. For 4.3 I'd like it to be Chen, since kiosk is the riskiest part.
+
+        CHEN: Fine, but I want a written checklist, not a vibe.
+
+        SAM: You'll have it by the thirty-first. Ingrid, the favourites dialog.
+
+        INGRID: Rewording is done, it's in review. "Replace" becomes "combine", and we show a
+        count of how many favourites will be on the device afterwards. I'd also like to review
+        the whole favourites onboarding, because the dialog was a symptom. That's about a week.
+        I can have proposals by the fourteenth of November.
+
+        SAM: Okay. Dates. Code freeze for 4.3 is Wednesday the twenty-sixth of November. Target
+        release Thursday the fourth of December. Which means release notes to support by the
+        first of December, and all the above has to be in place by freeze. Does anyone think
+        that's wrong?
+
+        BEA: The twenty-first for the offline suite is before freeze, so fine.
+
+        YUSUF: One thing we haven't decided. Twelve percent of kiosks are still on the old
+        hardware revision that can't run the new rendering path. Do we keep supporting them in
+        4.3 or do we tell those harbours they need to upgrade? That affects what I build.
+
+        SAM: I don't think we can decide that here. I'll take it to the customer council on the
+        thirtieth and bring back an answer. Open question.
+
+        OLU: And whether we compensate the harbours that had dark kiosks for three days. Two of
+        them have asked. I'd like guidance before the invoices go out on the first.
+
+        SAM: Also open. I'll talk to finance this week. Okay, that's time. Recap of actions.
+        Yusuf: flag check in the pull request template, certificate monitoring with alerts by
+        the thirty-first of October, provider notices into the shared inbox, ingest schema
+        validation and the canary check by the fourteenth of November, heartbeat backend before
+        freeze. Olu: own the shared inbox, status page access and the thirty-minute rule, ask
+        which pier harbours will take a visit. Chen: kiosk simulator change by the seventh of
+        November, kiosk heartbeat and the last-updated timestamp before freeze, release captain
+        for 4.3. Bea: automated upgrade-then-offline regression by the twenty-first of November,
+        rotate inactive harbours out of the beta cohort. Ingrid: dialog copy review process
+        before freeze, favourites onboarding proposals by the fourteenth of November. Me:
+        release checklist by the thirty-first, release notes template and notes to support by
+        the first of December, hardware question to the customer council on the thirtieth,
+        compensation question to finance this week, notice clause and staging feed with the
+        provider's account manager this month. Decisions: five-day code freeze, flags and kill
+        switches for all new features, release notes three days ahead written by product,
+        release captain rotation starting with Chen, status page posts within thirty minutes,
+        kiosk heartbeat, ingest validation, last-updated timestamp on kiosks, beta cohort stays
+        at four hundred with inactive harbours rotated out, 4.3 freeze on the twenty-sixth of
+        November and release on the fourth of December. Anything missed?
+
+        BEA: One thing. Who is release captain for 4.4? If it rotates, people should know in
+        advance so they can shadow Chen this time.
+
+        SAM: Bea, you're next, so shadow Chen on 4.3. Call that a decision. Thanks, everyone.
+
+        Instruction: Produce retrospective notes from this transcript with the following
+        sections: (1) a summary of no more than three sentences; (2) What went well and what
+        did not, briefly; (3) Decisions, as a bulleted list; (4) Action items, each with an
+        owner and a due date where one was stated; (5) Open questions. Use only what was said
+        in the transcript.

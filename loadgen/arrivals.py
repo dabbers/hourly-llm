@@ -81,12 +81,15 @@ def hourmark_times(
 
 def arrival_times(rng: np.random.Generator, spec: Arrivals, scenario: Scenario) -> list[float]:
     duration = scenario.duration_s
+    m = scenario.rate_multiplier
     if isinstance(spec, PoissonArrivals):
-        return poisson_times(rng, spec.rate_per_min / 60.0, 0.0, duration)
+        return poisson_times(rng, m * spec.rate_per_min / 60.0, 0.0, duration)
     if isinstance(spec, DiurnalArrivals):
-        return diurnal_times(rng, scenario, spec.rate_per_min / 60.0)
+        return diurnal_times(rng, scenario, m * spec.rate_per_min / 60.0)
     if isinstance(spec, BurstyArrivals):
-        return bursty_times(rng, spec, duration)
+        scaled = spec.model_copy(update={"rate_on_per_min": m * spec.rate_on_per_min, "rate_off_per_min": m * spec.rate_off_per_min})
+        return bursty_times(rng, scaled, duration)
     if isinstance(spec, HourmarkArrivals):
-        return hourmark_times(rng, spec, scenario.hour_length_s, duration)
+        scaled = spec.model_copy(update={"per_mark": m * spec.per_mark, "background_per_min": m * spec.background_per_min})
+        return hourmark_times(rng, scaled, scenario.hour_length_s, duration)
     raise ValueError(f"closed-loop tenants have no arrival times ({spec.kind})")

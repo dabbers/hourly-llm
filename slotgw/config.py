@@ -49,6 +49,14 @@ class ReplicaConfig(BaseModel):
     curve_context: int | None = None  # which calibration level to use; default: the longest
     kv_tokens: int | None = None  # override the KV budget read from the replica
     slot_plan: dict[str, int] = Field(default_factory=dict)  # sellable slots, e.g. {small.8k.30tps: 8}
+    exclude_shapes: list[str] = Field(default_factory=list)  # shapes never placed here (phase 2: keep the fast shape off the reservation replica)
+
+    @field_validator("exclude_shapes", mode="before")
+    @classmethod
+    def _split(cls, v: Any) -> Any:
+        if isinstance(v, str):  # from an environment variable: "a,b" or ""
+            return [x.strip() for x in v.split(",") if x.strip()]
+        return v or []
 
 
 class PriceReference(BaseModel):
@@ -57,9 +65,14 @@ class PriceReference(BaseModel):
     name: str
     input_usd_per_million: float = Field(ge=0)
     output_usd_per_million: float = Field(ge=0)
+    cache_read_usd_per_million: float | None = Field(default=None, ge=0)  # the provider's price for cached prompt tokens, when it lists one
     model: str | None = None  # provider model id the prices belong to
     basket: list[str] = Field(default_factory=list)  # member names when this is the median of several
     context_length: int | None = None
+
+    def cache_read_price(self, ratio: float) -> float:
+        """USD per million cached prompt tokens: the listed cache-read price, else `ratio` x input."""
+        return self.cache_read_usd_per_million if self.cache_read_usd_per_million is not None else self.input_usd_per_million * ratio
 
 
 class TokenPricing(BaseModel):
@@ -67,8 +80,14 @@ class TokenPricing(BaseModel):
 
     input_usd_per_million: float = Field(default=0.0, ge=0)
     output_usd_per_million: float = Field(default=0.0, ge=0)
+    cache_read_usd_per_million: float | None = Field(default=None, ge=0)  # None: cache_read_ratio x input
+    cache_read_ratio: float = Field(default=0.25, ge=0, le=1)  # prefix-cache hits priced at this share of the input price (DESIGN 8)
     batch_discount: float = 0.5
     reference: str = "custom"  # which price reference the prices came from (set by Pricing)
+
+    @property
+    def cache_read_price(self) -> float:
+        return self.cache_read_usd_per_million if self.cache_read_usd_per_million is not None else self.input_usd_per_million * self.cache_read_ratio
 
 
 class ProviderPricing(BaseModel):
@@ -116,12 +135,28 @@ class Pricing(BaseModel):
                 raise ValueError(f"unknown price reference {self.reference!r}; known: {[r.name for r in self.references]}")
             self.token.input_usd_per_million = ref.input_usd_per_million
             self.token.output_usd_per_million = ref.output_usd_per_million
+            if "cache_read_usd_per_million" not in self.token.model_fields_set:
+                self.token.cache_read_usd_per_million = ref.cache_read_usd_per_million
             self.token.reference = ref.name
         elif "output_usd_per_million" not in self.token.model_fields_set:
             raise ValueError("pricing: set `reference:` to a price reference or give token prices")
         if self.shape.prompt_usd_per_million is None:
             self.shape.prompt_usd_per_million = self.token.input_usd_per_million
         return self
+
+    @property
+    def cache_read_ratio(self) -> float:
+        """Cached prompt tokens' price as a share of the input price (the reference's listed
+        cache-read price when it has one, else token.cache_read_ratio)."""
+        inp = self.token.input_usd_per_million
+        return self.token.cache_read_price / inp if inp > 0 else self.token.cache_read_ratio
+
+    def prompt_charge_usd(self, prompt_tokens: int, cached_tokens: int = 0) -> float:
+        """The shape bill's prefill charge: uncached prompt tokens at prompt_usd_per_million, cached
+        ones at the cache-read share of it (a prefix-cache hit costs the provider almost no prefill)."""
+        cached = max(0, min(cached_tokens, prompt_tokens))
+        rate = (self.shape.prompt_usd_per_million or 0.0) / 1e6
+        return (prompt_tokens - cached) * rate + cached * rate * self.cache_read_ratio
 
 
 class PacingSettings(BaseModel):
@@ -155,12 +190,17 @@ class BurstSettings(BaseModel):
     revoke_policy: Literal["finish", "grace", "abort"] = "grace"  # when a guaranteed admission needs the KV
     grace_s: float = Field(default=15.0, ge=0)
     max_context_tokens: int = Field(default=0, ge=0)  # cap for context bursts; 0 = the model's largest shape
+    # post-M4 (DESIGN 12): a context burst has no floor, so it takes the cheapest seat (the model's slowest
+    # non-lazy shape sets its tps, pacing and price) and fails fast when it cannot be placed
+    context_tps_class: Literal["slowest", "own"] = "slowest"
+    context_max_queue_s: float = Field(default=5.0, ge=0)  # a burst waits at most this (and never longer than its shape's max_queue_s)
 
 
 class GatewaySettings(BaseModel):
     pacing: PacingSettings = Field(default_factory=PacingSettings)
     admission: AdmissionSettings = Field(default_factory=AdmissionSettings)
     burst: BurstSettings = Field(default_factory=BurstSettings)
+    store_text: bool = False  # keep every request's completion (and showcase prompts) in the meter's texts table
 
 
 class Config(BaseModel):
@@ -188,6 +228,9 @@ class Config(BaseModel):
         for r in self.replicas:
             if r.model not in self.models:
                 raise ValueError(f"replica {r.id}: unknown model alias {r.model!r}")
+            for x in r.exclude_shapes:
+                if x not in names:
+                    raise ValueError(f"replica {r.id}: exclude_shapes names unknown shape {x!r}")
         tok = self.pricing.token
         for s in self.shapes:
             if s.price_per_second is None:  # parity with the reference: price_per_second / tps = $/output token
@@ -220,11 +263,18 @@ def load_config(config_dir: str | Path | None = None) -> Config:
         pricing = {**pricing, "references": refs.get("references", []), "references_source": refs.get("source"),
                    "references_fetched": str(refs.get("fetched") or "")}
     gateway = _read_yaml(base / "gateway.yaml") if (base / "gateway.yaml").exists() else {}
+    replica_list = replicas.get("replicas", [])
+    only = [x.strip() for x in os.environ.get("SLOTGW_REPLICA_IDS", "").split(",") if x.strip()]
+    if only:  # a subset of the configured replicas, e.g. one pod of the phase-2 cluster for stage A
+        replica_list = [r for r in replica_list if r.get("id") in only]
+        missing = sorted(set(only) - {r.get("id") for r in replica_list})
+        if missing:
+            raise ValueError(f"SLOTGW_REPLICA_IDS names unknown replicas {missing}")
     return Config(
         shapes=shapes.get("shapes", []),
         tenants=tenants.get("tenants", []),
         models=replicas.get("models", {}),
-        replicas=replicas.get("replicas", []),
+        replicas=replica_list,
         pricing=pricing,
         gateway=gateway,
     )

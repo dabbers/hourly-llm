@@ -1,0 +1,319 @@
+profile: batch
+prompts:
+  - id: batch-review-sentiment
+    max_tokens: 150
+    turns:
+      - |
+        Classify the customer review below. Return only a JSON object with three
+        keys: "sentiment" (one of "positive", "negative", "mixed"), "topic" (one
+        of "delivery", "product_quality", "customer_service", "pricing",
+        "packaging"), and "evidence" (one short phrase quoted from the review
+        that justifies the sentiment). No text outside the JSON.
+
+        Review:
+        "I ordered the Brindlewood oak side table on the 3rd and it arrived on the
+        6th, which was fine, and the courier even carried it up two flights of
+        stairs without being asked. The table itself is another story. The top
+        has a visible seam where the two boards meet that you can feel with your
+        fingernail, one of the legs is about three millimetres shorter than the
+        others so it rocks on a flat floor, and the finish on the underside is
+        rough enough to snag a cloth. For 240 I expected the basics to be right.
+        I contacted support and they offered a 15 percent refund or a
+        replacement, and I took the replacement, so we will see. The box it came
+        in was enormous for the size of the table but at least nothing was
+        damaged in transit. If the second one is straight I will update this."
+  - id: batch-invoice-extract
+    max_tokens: 250
+    turns:
+      - |
+        Extract the following fields from the invoice text below and return them
+        as a single JSON object with exactly these keys: invoice_number,
+        issue_date (ISO 8601), due_date (ISO 8601), supplier_name, customer_name,
+        currency, subtotal, tax_amount, total, line_item_count, and
+        payment_reference. Use numbers (not strings) for amounts. If a field is
+        not present, use null. Return only the JSON.
+
+        INVOICE
+
+        Thornbury Signage Ltd
+        Unit 7, Ferrier Yard, Oldwick
+        VAT registration: 448 1190 22
+
+        Bill to: Marrow and Finch Cafe, 12 Quay Street, Saltmarsh Bay
+
+        Invoice number: TS-2026-0917
+        Date of issue: 24 October 2026
+        Payment terms: 30 days from issue
+        Due: 23 November 2026
+
+        Description                                  Qty    Unit     Amount
+        Exterior fascia sign, 2400 x 600 mm, oak      1    1,180.00  1,180.00
+        Window vinyl lettering, opening hours         2       65.00    130.00
+        Installation, two technicians, half day       1      310.00    310.00
+        A-board, double sided, chalk surface          1       89.50     89.50
+
+        Subtotal                                                     1,709.50
+        VAT at 20 percent                                              341.90
+        Total due                                                    2,051.40
+
+        Please quote reference TS0917-MF when paying by bank transfer.
+        Thank you for your business. Late payments accrue interest at 4 percent
+        above base rate as permitted by law.
+  - id: batch-rewrite-for-kids
+    max_tokens: 250
+    turns:
+      - >
+        Rewrite the paragraph below so that a typical twelve-year-old would
+        understand it without help. Keep every fact, keep it to a single
+        paragraph of similar length, replace technical terms with everyday
+        words or a brief explanation, and do not add new information or a
+        moral. Paragraph: "Estuaries are among the most productive ecosystems
+        on the planet because they occupy the transition zone between
+        freshwater and marine environments. River water carries dissolved
+        nutrients and fine sediment downstream; when it meets denser saltwater,
+        the flow decelerates and much of that material settles out, creating
+        nutrient-rich mudflats. Twice daily tidal inundation delivers oxygen and
+        additional nutrients while exporting waste, so organisms that can
+        tolerate fluctuating salinity, such as certain worms, molluscs and
+        juvenile fish, achieve very high population densities. These dense
+        invertebrate communities in turn support large numbers of wading birds,
+        many of which rely on a specific estuary as a refuelling stop during
+        seasonal migrations of several thousand kilometres. Because estuaries are
+        also favoured sites for ports and settlements, they are disproportionately
+        affected by dredging, land reclamation and pollution, which is why
+        conservation designations frequently prioritise them."
+  - id: batch-plain-language-bullets
+    max_tokens: 250
+    turns:
+      - >
+        Convert the passage below into plain-language bullet points. Produce
+        between five and seven bullets, each a single short sentence that a
+        tenant with no legal background could act on. Preserve every number
+        and deadline. Do not add advice that is not in the passage. Passage:
+        "Clause 14.2: Where the tenant intends to vacate the premises prior to
+        the expiry of the fixed term, the tenant shall provide the landlord with
+        no fewer than sixty (60) days' written notice, such notice to be
+        delivered by recorded post or by hand to the address stated in Schedule
+        1. Upon receipt of valid notice the landlord shall use reasonable
+        endeavours to re-let the premises; the tenant shall remain liable for
+        rent until the earlier of (a) the commencement of a replacement tenancy
+        or (b) the expiry of the fixed term. The tenant shall additionally bear
+        the landlord's reasonable re-letting costs, capped at the equivalent of
+        two weeks' rent. The deposit held under Clause 9 shall be returned,
+        less any lawful deductions, within fourteen (14) days of the later of
+        the tenant's departure and the return of all keys. Any dispute as to
+        deductions shall be referred to the deposit scheme named in Schedule 2
+        within thirty (30) days."
+  - id: batch-ticket-category
+    max_tokens: 200
+    turns:
+      - |
+        Label the support ticket below with exactly one category from this set:
+        BILLING, LOGIN_ACCESS, DATA_EXPORT, PERFORMANCE, FEATURE_REQUEST,
+        BUG_REPORT, ACCOUNT_CLOSURE. Answer in two lines: the first line is the
+        category only; the second line is one sentence justifying the choice and
+        naming the runner-up category you rejected and why.
+
+        Ticket 88213, submitted by the account owner for workspace "pellworth-ops":
+
+        "Hi, since Tuesday morning the weekly usage report that normally lands in
+        my inbox at 7 am has not arrived. I checked the settings page and the
+        schedule is still enabled and pointing at the right address. I tried
+        the 'send now' button and got a green tick but nothing turned up, and
+        nothing is in spam. I also noticed the download button on the reports
+        page spins for about forty seconds and then shows a blank file of zero
+        bytes, which is new; last month the same download took a couple of
+        seconds and produced a 3 MB spreadsheet. We need this report for our
+        month-end close on the 5th, so this is fairly urgent. Our subscription
+        is paid up and I have not changed any permissions. Can someone look
+        into why the report is coming out empty?"
+  - id: batch-one-sentence-title
+    max_tokens: 150
+    turns:
+      - >
+        Write a single-sentence title for the passage below. The title must be
+        under fifteen words, must not be a question, must not use a colon, and
+        should capture the main finding rather than the topic. Return the title
+        only. Passage: "Over three winters the volunteers at the Dunmore Hill
+        weather station logged the first frost date in their own gardens as well
+        as the official reading at the station itself. The station sits in an
+        open field at 140 metres; the gardens are spread across the village
+        below, mostly between 60 and 90 metres, and most are walled or hedged.
+        On average the gardens recorded their first frost nine days later than
+        the station, but the spread was wide: two gardens on the north side of
+        the village, which lose the sun by mid afternoon in October, frosted
+        within a day of the station in all three years, while a south-facing
+        garden backed by a stone barn did not record a frost at all in the
+        mildest of the three winters. The volunteers concluded that the official
+        date is a poor guide for deciding when to protect tender plants, and
+        that a thermometer at knee height in your own plot is worth more than
+        any forecast."
+  - id: batch-rank-descriptions
+    max_tokens: 300
+    turns:
+      - |
+        Below are three product descriptions for the same item, a rechargeable
+        bicycle light. Rank them from clearest to least clear for a shopper who
+        wants to know what they are buying. Return a numbered list of the three
+        labels (A, B, C) in rank order, and for each give one sentence on what it
+        does well and one on what it does badly. Judge clarity, not persuasion.
+
+        Description A:
+        "The Lumenhart Pulse 400 is a front bicycle light with a maximum output
+        of 400 lumens and four modes: high (2 hours), medium (5 hours), low (12
+        hours) and flashing (20 hours). It charges from empty in about 3 hours
+        over USB-C, weighs 92 grams, and mounts to handlebars between 22 and 35
+        mm with the included silicone strap. It is rated IPX5, meaning it will
+        withstand rain but should not be submerged. The battery indicator turns
+        red when under 15 percent."
+
+        Description B:
+        "Light up the night with the Pulse 400! Engineered for riders who refuse
+        to compromise, this next-generation illumination system delivers
+        confidence-inspiring brightness with intuitive mode cycling and premium
+        materials throughout. Whether you are commuting through the city or
+        exploring country lanes, the Pulse has your back. Weather-ready, travel-
+        friendly and endlessly reliable, it is the last light you will ever need
+        to buy. Available now in Graphite and Arctic."
+
+        Description C:
+        "Front light. 400 lm max. Modes: 4. Runtime 2 to 20 h depending on mode.
+        Charging USB-C. Mount: strap. Water resistance yes. Colour options 2.
+        Weight under 100 g. Warranty 2 yr. Battery Li-ion 1800 mAh. Low battery
+        warning. Not for off-road use at speed. See manual for details."
+  - id: batch-report-inconsistencies
+    max_tokens: 300
+    turns:
+      - |
+        Two colleagues wrote separate reports about the same site visit. List
+        every factual inconsistency between them as a numbered list. For each,
+        quote the conflicting phrases from both reports. Do not list differences
+        of emphasis or things mentioned in only one report; only direct
+        contradictions count. If there are none, say so.
+
+        Report 1 (written by the site engineer):
+        "Visited the Carrowmore pumping station on Thursday 16 October with two
+        technicians. Arrived 08:40, left 13:15. The number two pump was
+        vibrating above the 4.5 mm/s alarm threshold, peaking at 6.1 mm/s on
+        the drive-end bearing. Pump one was within limits. We found the coupling
+        guard loose and two of four holding-down bolts under-torqued. We
+        re-torqued the bolts to 210 Nm and vibration fell to 3.2 mm/s. The site
+        operator, Dara, said the vibration had started after the power cut on
+        the 9th. We recommended a bearing inspection within 30 days. The
+        station's flow meter read 412 litres per second at the time of our
+        test. No spare bearings are held on site."
+
+        Report 2 (written by the operations supervisor):
+        "Site visit to Carrowmore on Thursday 16 October, team of three
+        including myself, on site roughly 08:45 to 12:30. Pump two was the
+        problem unit, reading 6.1 mm/s at its worst against a 4.5 alarm level.
+        Pump one was also slightly elevated at 4.8 mm/s but not alarming. Root
+        cause appears to be three loose holding-down bolts, which the team
+        tightened to 210 Nm, bringing vibration down to 3.2 mm/s. Dara reported
+        the issue began after the storm on the 12th. We advised a bearing change
+        within 30 days; one spare bearing set is held in the site store. Flow
+        at test was 412 litres per second. Overall a successful visit."
+  - id: batch-schedule-table
+    max_tokens: 350
+    turns:
+      - >
+        Convert the schedule described below into a table with the columns Day,
+        Time, Session, Room, and Lead. One row per session, in chronological
+        order. Use 24-hour times. If a detail is missing for a session, leave
+        the cell empty rather than guessing. Return the table only, as plain
+        text with pipe separators. Schedule: "The Fernhollow volunteer training
+        weekend runs Saturday 22 and Sunday 23 November. Saturday opens with
+        registration and coffee from nine until half past in the Hall foyer,
+        hosted by Priya. At 9:30 Tomas leads the safeguarding briefing in the
+        Main Hall, which runs ninety minutes. After a short break, the first aid
+        refresher with Ingrid is in Room 2 from 11:15 to 12:45. Lunch is 12:45
+        to 1:30 in the foyer. The afternoon splits into two parallel tracks from
+        1:30 to 3:00: Kwame runs the radio and comms session in Room 2, while
+        Priya runs the route marshalling walkthrough outdoors, meeting at the
+        car park. Everyone reconvenes in the Main Hall at 3:15 for the scenario
+        exercise, which Tomas and Ingrid lead jointly until 5. Sunday starts
+        later, at 10, with the kit and equipment check in the Store, led by
+        Kwame, for an hour. From 11:15 the incident reporting workshop is in
+        Room 2 with Ingrid until 12:30, followed by a closing session and
+        feedback in the Main Hall at 12:30, which should finish by 1. There is
+        no lunch provided on Sunday."
+  - id: batch-policy-summary
+    max_tokens: 150
+    turns:
+      - >
+        Summarise the policy excerpt below in exactly three bullet points, each
+        under twenty-five words. The bullets should cover, in order: who the
+        policy applies to and when, what is allowed, and what is required of the
+        employee. Do not add commentary. Policy: "This remote working policy
+        applies to all permanent employees who have completed their probationary
+        period, with effect from 1 January 2027. Eligible employees may work
+        from a location other than their contracted office for up to three days
+        in any calendar week, provided their role has been assessed as suitable
+        by their line manager and recorded on the HR system. Remote days need
+        not be fixed but must be agreed with the line manager at least one
+        working day in advance, and the employee must be reachable during core
+        hours of 10:00 to 15:00 in the office's local time zone. Employees
+        working remotely are responsible for ensuring that their workspace meets
+        the display screen equipment self-assessment standard, that company
+        data is accessed only through the managed VPN, and that confidential
+        conversations cannot be overheard. Working from outside the country of
+        employment for more than ten days in a rolling twelve-month period
+        requires prior written approval from HR because of tax and insurance
+        implications. The company will contribute up to 150 per year towards
+        home office equipment on production of receipts. This policy does not
+        alter contractual hours or place of work and may be withdrawn or
+        amended with four weeks' notice."
+  - id: batch-reading-questions
+    max_tokens: 200
+    turns:
+      - |
+        Read the passage and answer the three questions that follow. Give each
+        answer on its own line, numbered, in one sentence or less, using only
+        information from the passage.
+
+        Passage:
+        "The Wrenfield canal was cut between 1794 and 1801 to carry limestone
+        from the quarries at Hollins Edge down to the kilns at Wrenfield Basin,
+        a distance of eleven miles with a fall of 190 feet handled by fourteen
+        locks. Horse-drawn boats carried about twenty tons each and a round trip
+        took two days. Traffic peaked in the 1840s at roughly 900 boat movements
+        a year, then declined sharply after the Hollins Edge branch railway
+        opened in 1858 and the quarry company switched its contracts. The last
+        commercial cargo, a load of coal for the basin's pumping engine, was
+        carried in 1912. The canal was formally abandoned in 1931, and six of the
+        locks were filled in during the 1950s when the road was widened. A
+        volunteer trust formed in 1987 has since restored five locks and three
+        miles of channel at the basin end, and in 2024 reopened the first
+        section to small leisure boats. The trust estimates that restoring the
+        remaining nine locks, of which six must be entirely rebuilt, will cost
+        around 14 million and take at least twelve years."
+
+        Questions:
+        1. How many locks on the canal are currently navigable?
+        2. What event most directly caused the decline in canal traffic?
+        3. How many years passed between the last commercial cargo and the
+           formal abandonment of the canal?
+  - id: batch-five-tags
+    max_tokens: 150
+    turns:
+      - >
+        Produce exactly five tags for the passage below, suitable for indexing
+        it in an internal knowledge base. Each tag should be one or two
+        lowercase words, hyphenated if two words, and the five together should
+        cover the subject, the method, and the outcome rather than repeating
+        one idea five times. Return them as a comma-separated list on one line
+        and nothing else. Passage: "In the spring the facilities team at the
+        Harrowgate depot replaced the 140 fluorescent tube fittings in the
+        maintenance bays with motion-sensing LED panels. The intention was to
+        cut electricity use, but the more noticeable change was in reported
+        headaches among the night shift, which dropped from an average of four
+        per week to fewer than one after the flicker from the ageing tubes was
+        removed. Electricity use for lighting in the bays fell by 61 percent
+        over the following six months, saving roughly 2,300 against a project
+        cost of 18,900, which gives a payback of a little over eight years on
+        energy alone. The team notes that the sensors were initially set to
+        switch off after two minutes, which caused complaints from technicians
+        working under vehicles, and the delay was raised to twelve minutes in
+        the second week. They recommend the same change for the paint shop,
+        with the longer delay set from the start and with a daylight sensor
+        added, since that area has roof lights."

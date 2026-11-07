@@ -1,0 +1,40 @@
+# Shape catalog. name = model.ctx.tps[.lazy]. tps is per request (one stream), a guaranteed minimum.
+# price_per_second is derived from pricing.yaml's active per-token reference at parity:
+# price_per_second / tps == reference output price per token, x price_premium (1.25 for 16k context),
+# x batch_discount for lazy shapes. Set price_per_second on a shape to override the derivation.
+# Calibration decides which shapes a replica can honour.
+shapes:
+  - name: small.8k.15tps
+    model: small
+    max_context: 8192
+    tps: 15
+    max_queue_s: 30
+  - name: small.8k.30tps
+    model: small
+    max_context: 8192
+    tps: 30
+    max_queue_s: 30
+  - name: small.8k.60tps
+    model: small
+    max_context: 8192
+    tps: 60
+    max_queue_s: 30
+  - name: small.16k.30tps
+    model: small
+    max_context: 16384
+    tps: 30
+    price_premium: 1.25
+    max_queue_s: 30
+  - name: small.8k.15tps.lazy
+    model: small
+    max_context: 8192
+    tps: 15
+    lazy: true
+    max_queue_s: 3600
+  - name: small.16k.30tps.lazy
+    model: small
+    max_context: 16384
+    tps: 30
+    price_premium: 1.25
+    lazy: true
+    max_queue_s: 3600

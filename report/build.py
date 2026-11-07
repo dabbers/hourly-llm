@@ -9,6 +9,7 @@ timeline, interference, basic provider economics)."""
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from html import escape
 from pathlib import Path
@@ -32,8 +33,11 @@ from .metrics import (
     refusals,
     reservation_bills,
     reservations,
+    samples,
     timeline,
 )
+
+SAMPLE_PROMPT_CHARS = 6000  # a transcript-sized prompt is folded in the page; the full text is in samples.csv
 
 
 def _bills_section(pt: pd.DataFrame, xs: pd.DataFrame) -> str:
@@ -279,13 +283,16 @@ def _market_section(mk: pd.DataFrame, lp: pd.DataFrame, config, fallback) -> str
     src = f"{refs.references_source}, fetched {refs.references_fetched}" if refs.references_source else "the run's token prices only"
     if refs is not pr:
         src += " (the run's snapshot predates price references; the current config's are used)"
+    cached = mk.drop_duplicates("load_run")["cached_share"].mean() if "cached_share" in mk else np.nan
+    cached_txt = f"{cached:.1%}" if not np.isnan(cached) else "unmetered"
     intro = (
         f"<p>Per-token price references: {escape(src)}. Active reference <b>{escape(pr.token.reference)}</b> "
         f"(${pr.token.input_usd_per_million:.4f} in / ${pr.token.output_usd_per_million:.4f} out per 1M tokens) sets the "
         f"per-token bills and the shape prices derived from them. Cost per token is GPU cost ÷ tokens served, at the "
-        f"measured utilisation and as if the slot plan ran at {pr.provider.target_utilization:.0%}. Prompt tokens are "
-        f"charged at the full input price even when vLLM served them from the prefix cache, so revenue at a reference "
-        f"is an upper bound for multi-turn traffic.</p>"
+        f"measured utilisation and as if the slot plan ran at {pr.provider.target_utilization:.0%}. Prompt tokens vLLM "
+        f"served from its prefix cache ({cached_txt} of prompt tokens here) are priced at each reference's cache-read "
+        f"price: its listed one, else {pr.token.cache_read_ratio:.0%} of its input price (pricing.yaml "
+        f"<code>cache_read_ratio</code>); \"uncached\" is the revenue with cache hits charged in full.</p>"
     )
     runs = mk.drop_duplicates("load_run")
     agg = mk.groupby("reference", sort=False)["revenue_usd"].mean()
@@ -302,6 +309,8 @@ def _market_section(mk: pd.DataFrame, lp: pd.DataFrame, config, fallback) -> str
             ("load_run", "load run", html.fmt_text), ("reference", "reference", html.fmt_text), ("model", "model", html.fmt_text),
             ("active", "active", html.fmt_text),
             ("input_usd_per_million", "$/1M in", html.fmt_f(4)), ("output_usd_per_million", "$/1M out", html.fmt_f(4)),
+            ("cache_read_usd_per_million", "$/1M cached", html.fmt_f(4)), ("cached_share", "cached", html.fmt_pct),
+            ("revenue_usd_uncached", "revenue uncached", html.fmt_usd),
             ("revenue_usd", "revenue USD", html.fmt_usd), ("revenue_vs_gpu", "× GPU cost", html.fmt_f(2)),
             ("revenue_vs_shape", "× shape billed", html.fmt_f(2)), ("gross_margin", "gross margin", html.fmt_pct),
             ("utilization", "utilisation", html.fmt_pct), ("gross_margin_at_target", "margin at target util.", html.fmt_pct),
@@ -454,6 +463,116 @@ def _reservations_actual_section(rb: pd.DataFrame) -> str:
     return f'<div class="card">{chart}{tbl}</div>'
 
 
+def _sample_card(r) -> str:
+    """One showcase request: what it ran as, the prompt (last user message open, the rest folded) and the completion."""
+    def num(v, fmt):
+        return fmt(v) if v is not None else "–"
+
+    status = str(r.status)
+    if status != "ok" and r.abort_reason:
+        status += f" ({r.abort_reason})"
+    cls = " · context burst" if r.class_ctx == "burst" else ""
+    billed = f" billed as {escape(str(r.billed_shape))}" if r.billed_shape and r.billed_shape != r.shape else ""
+    meta = (
+        f"<b>{escape(str(r.tenant))}</b> · {escape(str(r.prompt_id))} turn {int(r.turn) + 1} · {escape(str(r.shape))}{billed}{cls} · "
+        f"{escape(status)} · t+{num(r.t_rel, html.fmt_int)} s · prompt {num(r.prompt_tokens, html.fmt_int)} tokens "
+        f"({num(r.cached_tokens, html.fmt_int)} cached) · output {num(r.output_tokens, html.fmt_int)} · "
+        f"queue {num(r.queued_ms, html.fmt_int)} ms · TTFT {num(r.ttft_ms, html.fmt_int)} ms · "
+        f"delivered {num(r.delivered_tps, html.fmt_f(1))} tok/s on a {num(r.tps, html.fmt_int)} tps shape · "
+        f"throttled {num(r.throttled_s, html.fmt_f(1))} s · burst {num(r.burst_share, html.fmt_pct)}"
+        f"{' · <b>floor violation</b>' if bool(r.floor_violation) else ''} · shape {num(r.shape_usd, html.fmt_usd)} / "
+        f"per-token {num(r.per_token_usd, html.fmt_usd)}"
+    )
+    prompt_html = '<p class="muted">prompt text not stored (gateway store_text was off)</p>'
+    if isinstance(r.prompt_json, str) and r.prompt_json:
+        try:
+            msgs = json.loads(r.prompt_json)
+        except json.JSONDecodeError:
+            msgs = []
+        if msgs:
+            last = msgs[-1]
+            earlier = msgs[:-1]
+            last_text = str(last.get("content", ""))
+            folded = last_text[:SAMPLE_PROMPT_CHARS]
+            more = f'<p class="muted">… {len(last_text) - SAMPLE_PROMPT_CHARS:,} more characters in samples.csv</p>' if len(last_text) > SAMPLE_PROMPT_CHARS else ""
+            prompt_html = f'<h4>{escape(str(last.get("role", "user")))}</h4><pre class="sample">{escape(folded)}</pre>{more}'
+            if earlier:
+                items = "".join(
+                    f'<h4>{escape(str(m.get("role", "")))}</h4><pre class="sample">{escape(str(m.get("content", ""))[:SAMPLE_PROMPT_CHARS])}</pre>'
+                    for m in earlier
+                )
+                prompt_html = f"<details><summary>{len(earlier)} earlier message(s) in the context</summary>{items}</details>" + prompt_html
+    output = r.output_text if isinstance(r.output_text, str) else None
+    out_html = f'<pre class="sample out">{escape(output)}</pre>' if output else '<p class="muted">no completion stored</p>'
+    return f'<div class="card sample"><p>{meta}</p>{prompt_html}<h4>completion</h4>{out_html}</div>'
+
+
+def _samples_section(sm: pd.DataFrame) -> str:
+    if sm.empty:
+        return (
+            '<p class="muted">no showcase requests in these runs (give a tenant a <code>showcase:</code> spec in the '
+            "scenario and run the gateway with store_text on)</p>"
+        )
+    intro = (
+        "<p>Real, hand-written prompts sent at a low fixed rate through the same shapes, admission, pacing and billing as "
+        "the synthetic traffic (docs/PHASE2.md section 6). Each card shows the constraints the request ran under and the "
+        "completion the client received; pacing changes when tokens arrive, not which tokens, so the text is the model's "
+        "quality at the size that fits the card, and the status shows what a tenant sees when the context limit, a burst "
+        "revocation or a refusal bites. Everything here is also in samples.csv and samples.md.</p>"
+    )
+    parts = [intro]
+    for load_run, sub in sm.groupby("load_run", sort=False):
+        parts.append(f"<h3>{escape(str(load_run))}</h3>")
+        parts.extend(_sample_card(r) for r in sub.itertuples(index=False))
+    return "".join(parts)
+
+
+def samples_markdown(sm: pd.DataFrame) -> str:
+    """samples.md: the same cards as Markdown, for curation into docs/SAMPLES.md."""
+    if sm.empty:
+        return "# Output samples\n\nNo showcase requests in these runs.\n"
+    out = ["# Output samples", "", "One section per showcase request, in arrival order. Metrics are the gateway's; text is what the client received.", ""]
+    for load_run, sub in sm.groupby("load_run", sort=False):
+        out.append(f"## {load_run}")
+        out.append("")
+        for r in sub.itertuples(index=False):
+            status = str(r.status) + (f" ({r.abort_reason})" if r.status != "ok" and r.abort_reason else "")
+            billed = f", billed as {r.billed_shape}" if r.billed_shape and r.billed_shape != r.shape else ""
+            out.append(f"### {r.tenant} · {r.prompt_id} · turn {int(r.turn) + 1}")
+            out.append("")
+            out.append(
+                f"shape {r.shape}{billed}{' (context burst)' if r.class_ctx == 'burst' else ''} · {status} · "
+                f"prompt {int(r.prompt_tokens)} tokens ({int(r.cached_tokens)} cached) · output {int(r.output_tokens)} · "
+                f"queue {html.fmt_int(r.queued_ms)} ms · TTFT {html.fmt_int(r.ttft_ms)} ms · "
+                f"delivered {html.fmt_f(1)(r.delivered_tps)} tok/s on {html.fmt_int(r.tps)} tps · throttled {html.fmt_f(1)(r.throttled_s)} s · "
+                f"burst {html.fmt_pct(r.burst_share)}{' · floor violation' if bool(r.floor_violation) else ''} · "
+                f"shape {html.fmt_usd(r.shape_usd)} / per-token {html.fmt_usd(r.per_token_usd)}"
+            )
+            out.append("")
+            if isinstance(r.prompt_json, str) and r.prompt_json:
+                try:
+                    msgs = json.loads(r.prompt_json)
+                except json.JSONDecodeError:
+                    msgs = []
+                for m in msgs:
+                    text = str(m.get("content", ""))
+                    if len(text) > SAMPLE_PROMPT_CHARS:
+                        text = text[:SAMPLE_PROMPT_CHARS] + f"\n… ({len(text) - SAMPLE_PROMPT_CHARS:,} more characters)"
+                    out.append(f"**{m.get('role', '')}**")
+                    out.append("")
+                    out.append("```text")
+                    out.append(text)
+                    out.append("```")
+                    out.append("")
+            out.append("**completion**")
+            out.append("")
+            out.append("```text")
+            out.append(str(r.output_text) if isinstance(r.output_text, str) and r.output_text else "(no completion stored)")
+            out.append("```")
+            out.append("")
+    return "\n".join(out)
+
+
 def _overview_section(pr: pd.DataFrame, run_ids: list[str]) -> str:
     tbl = html.table(
         pr,
@@ -462,7 +581,7 @@ def _overview_section(pr: pd.DataFrame, run_ids: list[str]) -> str:
             ("pacing", "pacing", html.fmt_text), ("duration_s", "duration s", html.fmt_int),
             ("requests", "requests", html.fmt_int), ("ok", "ok", html.fmt_int), ("refused", "refused", html.fmt_int), ("errors", "errors", html.fmt_int),
             ("revoked", "revoked", html.fmt_int), ("context_bursts", "ctx bursts", html.fmt_int), ("reserved_requests", "reserved req.", html.fmt_int),
-            ("prompt_tokens", "prompt tokens", html.fmt_int), ("output_tokens", "output tokens", html.fmt_int),
+            ("prompt_tokens", "prompt tokens", html.fmt_int), ("cached_share", "cached", html.fmt_pct), ("output_tokens", "output tokens", html.fmt_int),
             ("burst_share", "burst share", html.fmt_pct), ("reservation_usd", "reservation USD", html.fmt_usd),
             ("concurrency_mean", "in flight mean", html.fmt_f(1)), ("concurrency_p95", "in flight p95", html.fmt_f(1)),
             ("engine_running_mean", "engine running mean", html.fmt_f(1)),
@@ -496,6 +615,9 @@ DEFINITIONS = """
 <dt>reservation bill</dt><dd>slots × reservation duration × the shape's price per second (× pricing.shape.reservation_price_factor), whether used or not; no prefill charge. The tenant's total is that plus on-demand shape bills for its requests not served from the reservation; "used fill" is seat time of the served requests ÷ reserved slot-seconds.</dd>
 <dt>reservation what-if</dt><dd>N slots of the tenant's shape for the whole run, sized at the p50, p95 or max of the tenant's queue-free occupancy; bill = N × run time × the shape's price per second, no prefill charge; "would queue" = requests arriving while all N slots are busy; used fill = occupied slot-seconds within the reservation ÷ reserved; cost share = GPU cost × N × capacity weight ÷ plan slots, where the weight is seats(plan shape) ÷ seats(this shape) on the calibration curve; the parity slot price is the hourly slot price at which the reservation equals the tenant's per-token bill.</dd>
 <dt>in flight</dt><dd>requests between admission and last delivered token, from the meter; "running" is vLLM's own count sampled through the gateway.</dd>
+<dt>cached tokens</dt><dd>prompt tokens vLLM served from its prefix cache (usage.prompt_tokens_details.cached_tokens); priced at the cache-read price under both schemes: the reference's listed one, else pricing.token.cache_read_ratio × the input price. Unmetered before phase 2 (counted as 0).</dd>
+<dt>billed shape</dt><dd>the shape whose tps and price applied to a request: its own, or for a context burst the burst class (the model's slowest non-lazy shape by default, post-M4): that shape's tps takes the seat, paces the stream and sets the floor and the runtime price; the tenant's shape stays on the record.</dd>
+<dt>showcase / output samples</dt><dd>real prompts sent at a low fixed rate (scenario `showcase:`); the gateway keeps their prompt and completion when store_text is on, and the Output samples section shows each with the constraints it ran under.</dd>
 </dl>
 """
 
@@ -520,9 +642,13 @@ def build_report(run_dirs: list[str | Path], out_dir: str | Path | None = None, 
     mk = market(df, config, datas[0].fallback_config)
     lp = list_prices(df, config, datas[0].fallback_config)
     rs = reservations(df, config, datas[0].fallback_config, Path(config_dir) if config_dir else Path("config"))
+    all_texts = pd.concat([d.texts for d in datas if len(d.texts)], ignore_index=True) if any(len(d.texts) for d in datas) else None
+    sm = samples(df, all_texts)
 
     out = Path(out_dir) if out_dir else datas[0].run_dir / "report"
     out.mkdir(parents=True, exist_ok=True)
+    sm.to_csv(out / "samples.csv", index=False)
+    (out / "samples.md").write_text(samples_markdown(sm), encoding="utf-8", newline="\n")
     df.to_csv(out / "per_request.csv", index=False)
     pt.to_csv(out / "per_tenant.csv", index=False)
     pr.to_csv(out / "summary.csv", index=False)
@@ -554,6 +680,7 @@ def build_report(run_dirs: list[str | Path], out_dir: str | Path | None = None, 
         ("economics", "Provider economics", _economics_section(pr)),
         ("market", "Market reference prices and margin", _market_section(mk, lp, config, datas[0].fallback_config)),
         ("reservations", "Reservation what-if", _reservations_section(rs)),
+        ("samples", "Output samples", _samples_section(sm)),
         ("definitions", "Definitions", DEFINITIONS),
     ]
     (out / "report.html").write_text(html.page("slotgw report", intro, sections), encoding="utf-8")

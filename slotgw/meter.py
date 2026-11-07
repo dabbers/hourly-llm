@@ -42,7 +42,16 @@ CREATE TABLE IF NOT EXISTS requests (
   scenario TEXT,
   seed INTEGER,
   delivered_tokens INTEGER,
-  reservation_id TEXT
+  reservation_id TEXT,
+  cached_tokens INTEGER,
+  billed_shape TEXT,
+  showcase TEXT
+);
+CREATE TABLE IF NOT EXISTS texts (
+  run_id TEXT NOT NULL,
+  request_id TEXT PRIMARY KEY,
+  prompt_json TEXT,
+  output_text TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS reservations (
   run_id TEXT NOT NULL,
@@ -94,6 +103,10 @@ class RequestRecord:
     seed: int | None = None
     delivered_tokens: int = 0  # tokens the client actually received (billed quantity)
     reservation_id: str | None = None  # served from this reservation's slot (milestone 4)
+    # phase 2
+    cached_tokens: int = 0  # prompt tokens vLLM served from its prefix cache (priced at the cache-read rate)
+    billed_shape: str | None = None  # the shape whose tps and price applied: the request's own, or the burst class of a context burst
+    showcase: str | None = None  # X-Slotgw-Showcase: a real prompt whose text is kept for the report's output samples
 
     @property
     def ttft_ms(self) -> float | None:
@@ -148,11 +161,21 @@ class Meter:
         have = {row[1] for row in self._conn.execute("PRAGMA table_info(requests)")}
         for col, typ in (
             ("load_run", "TEXT"), ("scenario", "TEXT"), ("seed", "INTEGER"), ("delivered_tokens", "INTEGER"),
-            ("reservation_id", "TEXT"),
+            ("reservation_id", "TEXT"), ("cached_tokens", "INTEGER"), ("billed_shape", "TEXT"), ("showcase", "TEXT"),
         ):
-            if col not in have:  # meter files written before milestone 2
+            if col not in have:  # meter files written before the column existed
                 self._conn.execute(f"ALTER TABLE requests ADD COLUMN {col} {typ}")
         self._conn.commit()
+
+    def record_text(self, request_id: str, output_text: str, prompt_json: str | None = None) -> None:
+        """Keep a request's completion (and, for showcase requests, its prompt) for the report's
+        output samples; written only when gateway.store_text is on."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO texts (run_id, request_id, prompt_json, output_text) VALUES (?, ?, ?, ?)",
+                (self.run_id, request_id, prompt_json, output_text),
+            )
+            self._conn.commit()
 
     def record(self, rec: RequestRecord) -> None:
         row = asdict(rec)

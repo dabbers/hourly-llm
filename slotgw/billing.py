@@ -14,8 +14,17 @@ from dataclasses import dataclass
 from .config import Pricing, Shape, TokenPricing
 
 
-def per_token_usd(prompt_tokens: int, output_tokens: int, lazy: bool, pricing: TokenPricing) -> float:
-    usd = (prompt_tokens * pricing.input_usd_per_million + output_tokens * pricing.output_usd_per_million) / 1e6
+def per_token_usd(
+    prompt_tokens: int, output_tokens: int, lazy: bool, pricing: TokenPricing, cached_tokens: int = 0
+) -> float:
+    """Prompt tokens at the input price, except prefix-cache hits at the cache-read price; output
+    tokens at the output price; lazy requests at the batch discount."""
+    cached = max(0, min(cached_tokens, prompt_tokens))
+    usd = (
+        (prompt_tokens - cached) * pricing.input_usd_per_million
+        + cached * pricing.cache_read_price
+        + output_tokens * pricing.output_usd_per_million
+    ) / 1e6
     return usd * (pricing.batch_discount if lazy else 1.0)
 
 
@@ -75,13 +84,15 @@ def bill_request(
     t_admitted: float | None,
     t_first_token: float | None,
     t_last_token: float | None,
+    cached_tokens: int = 0,
 ) -> Bill:
     """`output_tokens` is what the engine generated for the billed run; `delivered_tokens` what the
-    client received. Discarded (preempted) runs and undelivered tokens are never billed."""
+    client received. Discarded (preempted) runs and undelivered tokens are never billed. `shape` is
+    the shape whose tps and price apply (a context burst's burst class, otherwise the request's own)."""
     delivered = max(0, delivered_tokens)
     wall_s, bound_s, billed_s = shape_seconds(t_admitted, t_first_token, t_last_token, delivered, shape.tps)
     p = shape.price_per_second
-    prompt_usd = prompt_tokens * pricing.shape.prompt_usd_per_million / 1e6 if delivered > 0 else 0.0
+    prompt_usd = pricing.prompt_charge_usd(prompt_tokens, cached_tokens) if delivered > 0 else 0.0
     return Bill(
         delivered_tokens=delivered,
         wall_s=wall_s,
@@ -91,5 +102,5 @@ def bill_request(
         shape_usd=billed_s * p + prompt_usd,
         bound_usd=bound_s * p + prompt_usd,
         wall_usd=wall_s * p + prompt_usd,
-        per_token_usd=per_token_usd(prompt_tokens, output_tokens, shape.lazy, pricing.token),
+        per_token_usd=per_token_usd(prompt_tokens, output_tokens, shape.lazy, pricing.token, cached_tokens),
     )

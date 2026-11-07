@@ -82,12 +82,37 @@ docker compose run --rm loadgen --scenario config/scenarios/mixed.yaml --seed 1 
 | `SLOTGW_MAX_PREFILL_TOKENS` | 0 | cap on prompt tokens prefilling at once per replica; 0 = off |
 | `SLOTGW_BURST` | true | burst manager: lend idle step rate to running requests and admit over-context requests into free KV |
 | `SLOTGW_BURST_REVOKE` | grace | `finish` / `grace` (15 s) / `abort`: what happens to a context burst when a guaranteed request needs its capacity |
+| `SLOTGW_BURST_CTX_CLASS` | slowest | a context burst runs as the model's slowest non-lazy shape (seat, pacing, floor, price); `own` keeps the request's shape (milestone-4 behaviour) |
+| `SLOTGW_BURST_QUEUE_S` | 5 | how long a context burst waits for a seat before `503 capacity` (never longer than its shape's `max_queue_s`) |
+| `SLOTGW_STORE_TEXT` | false | keep every completion (and showcase prompts) in the meter's `texts` table for the report's Output samples |
 | `SLOTGW_PRICE_REFERENCE` | basket-3b | per-token market reference from `config/price_references.yaml` (`gpt-4o-mini`, `llama-3.2-3b`, …, or `custom`); shape prices derive from it |
 | `SLOTGW_PROMPT_USD_PER_MILLION` | auto | prefill charge added to shape bills; auto = the reference's input price, 0 = runtime only |
 | `VLLM_MAX_NUM_BATCHED_TOKENS` | 128 | vLLM prefill chunk size (vLLM's own default is 2048); smaller = less decode interference |
 | `VLLM_GPU_MEM` | 0.82 | vLLM memory fraction (lower it when other apps hold VRAM) |
 
 Stop with `docker compose --profile gpu down` (or `--profile fake`).
+
+### Phase 2: three replicas on RunPod
+
+The plan, decisions, budget and gates are in `docs/PHASE2.md`; the operator's commands in
+`docs/RUNBOOK.md`. The phase-2 configuration lives in `config/phase2/` (three pod replicas, the 7B
+price basket, text capture on) with the scenario `config/scenarios/mixed-4090.yaml` and the run
+matrix `config/phase2/matrix.yaml`. Everything can be rehearsed without a pod on three fake
+replicas with a 4090-like curve:
+
+```bash
+docker compose --profile fake3 up --build -d
+```
+
+```bash
+docker compose run --rm loadgen --scenario config/scenarios/mixed-4090.yaml --seed 1 --config-dir config/phase2 --no-reservations
+```
+
+A scenario tenant can carry a `showcase:` spec (a file of real prompts under `config/prompts/`, one
+session every few minutes); with text capture on, the report's Output samples section shows their
+completions with the constraints they ran under. `reservation: {replica: ...}` pins a tenant's
+reservation to one replica and `--reservation-replica ID|none` overrides it per run; a replica's
+`exclude_shapes` keeps a shape off it (the "reservations on their own replica" setting).
 
 ## Develop
 

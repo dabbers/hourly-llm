@@ -1,0 +1,30 @@
+# Phase 2 (docs/PHASE2.md): three RunPod RTX 4090 pods, each serving the 7B AWQ model on port 8000.
+# The gateway runs on pod A next to its vLLM, so A is reached on localhost and B and C over RunPod
+# global networking; scripts/runpod_pods.py env-file writes REPLICA_*_URL into runs/phase2/phase2.env.
+# `curve:` (REPLICA_CURVE) is the fake-replica rehearsal's inline step-rate curve; empty in production,
+# where each pod's calibration file (stage A) is the profile.
+models:
+  small: Qwen/Qwen2.5-7B-Instruct-AWQ
+replicas:
+  - id: runpod-4090-a
+    kind: vllm
+    url: ${REPLICA_A_URL:-http://127.0.0.1:8000}
+    model: small
+    calibration: calibration/runpod-4090-a.yaml
+    curve: ${REPLICA_CURVE:-}
+    slot_plan: {small.8k.30tps: 24}       # placeholder until stage A's calibration sets the sellable seats
+    exclude_shapes: ${REPLICA_A_EXCLUDE:-}  # matrix setting 3: "small.8k.60tps" keeps the fast shape off the reservation replica
+  - id: runpod-4090-b
+    kind: vllm
+    url: ${REPLICA_B_URL:-http://runpod-b.runpod.internal:8000}
+    model: small
+    calibration: calibration/runpod-4090-b.yaml
+    curve: ${REPLICA_CURVE:-}
+    slot_plan: {small.8k.30tps: 24}
+  - id: runpod-4090-c
+    kind: vllm
+    url: ${REPLICA_C_URL:-http://runpod-c.runpod.internal:8000}
+    model: small
+    calibration: calibration/runpod-4090-c.yaml
+    curve: ${REPLICA_CURVE:-}
+    slot_plan: {small.8k.30tps: 24}

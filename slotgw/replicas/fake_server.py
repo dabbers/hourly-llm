@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -71,10 +72,28 @@ class FakeState:
     completed: int = 0
     generated_tokens: int = 0
     prompt_tokens: int = 0
+    prefix_cache: bool = True
+    seen_prefixes: set[str] = field(default_factory=set)  # hashes of message-list prefixes already prefilled
 
     @property
     def kv_used(self) -> int:
         return sum(self.running.values())
+
+    def cached_tokens(self, messages: list[dict[str, Any]], prompt_tokens: int) -> int:
+        """Emulate vLLM's prefix cache: the longest message-list prefix prefilled before counts as
+        cached (whole blocks), so a multi-turn session's history is cached from its second turn on."""
+        if not self.prefix_cache:
+            return 0
+        keys = [hashlib.sha1(json.dumps(messages[:k], sort_keys=True).encode()).hexdigest() for k in range(1, len(messages) + 1)]
+        cached = 0
+        for k in range(len(messages), 0, -1):
+            if keys[k - 1] in self.seen_prefixes:
+                cached = estimate_tokens(messages[:k]) // self.block_size * self.block_size
+                break
+        if len(self.seen_prefixes) > 100_000:
+            self.seen_prefixes.clear()
+        self.seen_prefixes.update(keys)
+        return max(0, min(cached, prompt_tokens))
 
 
 def create_fake_app(
@@ -83,6 +102,7 @@ def create_fake_app(
     block_size: int = 16,
     curve: str = "1:60,8:40,16:30,32:20",
     prefill_tps: float = 2000.0,
+    prefix_cache: bool = True,
 ) -> FastAPI:
     state = FakeState(
         model=model,
@@ -90,6 +110,7 @@ def create_fake_app(
         block_size=block_size,
         curve=parse_curve(curve),
         prefill_tps=prefill_tps,
+        prefix_cache=prefix_cache,
     )
     app = FastAPI(title="fake-vllm")
     app.state.fake = state
@@ -130,6 +151,7 @@ def create_fake_app(
         body = await request.json()
         messages = body.get("messages") or []
         prompt_tokens = estimate_tokens(messages)
+        cached_tokens = state.cached_tokens(messages, prompt_tokens)
         max_tokens = int(body.get("max_tokens") or 64)
         ignore_eos = bool(body.get("ignore_eos", False))
         if ignore_eos:
@@ -151,7 +173,7 @@ def create_fake_app(
             state.running[request_id] = context
             state.prompt_tokens += prompt_tokens
             try:
-                await asyncio.sleep(prompt_tokens / state.prefill_tps)
+                await asyncio.sleep((prompt_tokens - cached_tokens) / state.prefill_tps)  # cache hits skip prefill
                 due = time.perf_counter()
                 i = 0
                 while i < n_out:
@@ -174,6 +196,14 @@ def create_fake_app(
 
         finish_reason = "length" if n_out >= max_tokens else "stop"
 
+        def usage_obj(completion_tokens: int) -> dict[str, Any]:
+            return {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "prompt_tokens_details": {"cached_tokens": cached_tokens},
+            }
+
         if not stream:
             parts: list[str] = []
             async for _, _, text in generate():
@@ -191,11 +221,7 @@ def create_fake_app(
                             "finish_reason": finish_reason,
                         }
                     ],
-                    "usage": {
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": n_out,
-                        "total_tokens": prompt_tokens + n_out,
-                    },
+                    "usage": usage_obj(n_out),
                 }
             )
 
@@ -208,11 +234,7 @@ def create_fake_app(
                 "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
             }
             if completion_tokens is not None:
-                obj["usage"] = {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": prompt_tokens + completion_tokens,
-                }
+                obj["usage"] = usage_obj(completion_tokens)
             return f"data: {json.dumps(obj)}\n\n"
 
         async def sse():
@@ -228,11 +250,7 @@ def create_fake_app(
                     "created": created,
                     "model": state.model,
                     "choices": [],
-                    "usage": {
-                        "prompt_tokens": prompt_tokens,
-                        "completion_tokens": done,
-                        "total_tokens": prompt_tokens + done,
-                    },
+                    "usage": usage_obj(done),
                 }
                 yield f"data: {json.dumps(obj)}\n\n"
             yield "data: [DONE]\n\n"

@@ -59,6 +59,11 @@ td { font-variant-numeric: tabular-nums; }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; }
 dt { color: var(--ink); font-weight: 600; } dd { margin: 0; color: var(--ink2); }
 code { font-size: 12px; background: var(--grid); padding: 1px 4px; border-radius: 3px; }
+pre.sample { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.45 ui-monospace, Consolas, monospace;
+  background: var(--page); border: 1px solid var(--grid); border-radius: 6px; padding: 10px 12px; margin: 4px 0 10px; color: var(--ink); }
+pre.sample.out { border-color: var(--s1); }
+.card.sample h4 { font-size: 12px; margin: 10px 0 2px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+details summary { cursor: pointer; color: var(--ink2); margin: 6px 0; }
 """
 
 

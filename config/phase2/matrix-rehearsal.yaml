@@ -1,0 +1,18 @@
+# G0 rehearsal of the chain on the three fake replicas (docs/PHASE2.md section 4): the smoke
+# scenario under two settings, one seed each, so runchain.sh, preflight, the load generator and the
+# report are exercised end to end before a pod exists. Same format as matrix.yaml.
+scenario: config/scenarios/smoke-4090.yaml
+config_dir: config/phase2
+expect_replicas: 3
+expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
+expect_calibration: runpod-4090     # preflight: every ledger's calibration source must contain this
+report_out: runs/phase2/report-rehearsal
+runs:
+  - label: burst
+    seeds: [1]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
+    loadgen_args: ["--no-reservations"]
+  - label: resv-split
+    seeds: [1]
+    env: {SLOTGW_BURST: "true", REPLICA_A_EXCLUDE: small.8k.60tps}
+    loadgen_args: ["--reservation-replica", "runpod-4090-a"]

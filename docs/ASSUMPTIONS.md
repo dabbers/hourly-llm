@@ -419,6 +419,42 @@ What the runs show:
   share, ≥ 2.3 ($0.0375 per slot-hour = $0.30 ÷ 8 seats, the what-if's $0.038). The knob exists;
   the config keeps 1.0 so the report shows the parity case.
 
+## Phase 2 assumptions set before any pod exists (G0, 2026-11-07)
+
+Measured values replace these in stage A (docs/PHASE2.md section 4); until then they are inputs,
+not findings.
+
+- **Cache-read price.** Prompt tokens vLLM serves from its prefix cache are priced at the active
+  reference's cache-read price when it lists one, else `pricing.token.cache_read_ratio` = 0.25 × the
+  input price, under both schemes and in the shape bill's prefill charge. The 7B basket lists one:
+  the median of Llama 3.1 8B ($0.025), Ministral 8B ($0.015) and Granite 8B ($0.015) is **$0.015 per
+  1M cached tokens** against $0.08 input, a 0.19 ratio; Qwen 2.5 7B lists none. 0.25 is a middle
+  value between the 0.1× of Anthropic and DeepSeek and the 0.5× of OpenAI; most open-model hosts on
+  OpenRouter list no cache-read price at all, which means they charge hits in full, and the report
+  keeps that case visible as the "uncached" revenue column. The 2080 Ti runs have no cached-token
+  counts (the meter did not keep them), so their margins stay upper bounds.
+- **7B price basket** (`config/phase2/price_references.yaml`, OpenRouter list of 2026-11-07):
+  `basket-7b` = median of qwen/qwen-2.5-7b-instruct ($0.10 / $0.20 per 1M in / out),
+  meta-llama/llama-3.1-8b-instruct ($0.05 / $0.08), mistralai/ministral-8b-2512 ($0.15 / $0.15) and
+  ibm-granite/granite-4.2-8b ($0.06 / $0.25) = **$0.08 in / $0.175 out**. At parity a 30 tps slot is
+  $0.175 × 30 / 1e6 per second = **$0.0189 per hour** (the 3B basket's was $0.0162). Mistral 7B
+  Instruct is no longer listed, hence Ministral 8B.
+- **GPU price.** $0.89 per pod-hour (RunPod Secure Cloud on-demand RTX 4090, October 2026 price
+  snapshots); storage adds about $0.004 per pod-hour for a 20 GB volume. A stopped pod keeps its
+  volume at $0.20 per GB-month and nothing else.
+- **4090 step-rate curve, a guess.** The fake replicas used for the rehearsal run
+  `1:130, 8:110, 16:95, 32:70, 48:50, 64:35` tokens/s per stream with a 280k-token KV budget
+  (`FAKE_RATE_CURVE_4090`, `FAKE_KV_TOKENS_4090` in compose.yaml), the author's estimate for a 7B
+  AWQ model on a 4090 with FlashAttention. On that curve a replica holds about 65 seats at 30 tps
+  and 34 at 60 tps, eight times the 2080 Ti's, so `mixed-4090.yaml` keeps `rate_multiplier: 1.0`
+  only as a placeholder; stage A's calibration sets the curve, the shapes and the multiplier.
+- **Reservation price factor 2.3** (`SLOTGW_RESERVATION_FACTOR`): the 2080 Ti's break-even for the
+  reserved slice; carried over as the starting point, and the report prints the bill at other
+  factors since it is linear in it.
+- **Context bursts run as the slowest non-lazy shape** (`context_tps_class: slowest`, queue 5 s):
+  the post-M4 design change, verified by the fake-replica tests (tests/test_phase2.py) and not yet
+  on hardware.
+
 ## Environment the numbers depend on
 
 - Docker Desktop 4.2.0 with the WSL driver-store workaround (`scripts/vllm-entrypoint.sh`); WSL kernel

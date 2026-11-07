@@ -12,6 +12,7 @@ from typing import Any, Protocol
 class Usage:
     prompt_tokens: int
     completion_tokens: int
+    cached_tokens: int = 0  # prompt tokens served from the prefix cache (usage.prompt_tokens_details.cached_tokens)
 
 
 @dataclass

@@ -48,6 +48,7 @@ class Cluster:
         meter_path: Path,
         burst: BurstSettings | None = None,
         kv_tokens: int | None = None,
+        store_text: bool = False,
     ):
         self.fakes = [ServerHandle(create_fake_app(curve=c, prefill_tps=50_000.0)).start() for c in curves]
         config = load_config(REPO / "config")
@@ -60,7 +61,7 @@ class Cluster:
                 ],
                 "gateway": GatewaySettings(
                     pacing=PacingSettings(enabled=True, bucket_depth_s=1.0), admission=admission,
-                    burst=burst or BurstSettings(enabled=False),
+                    burst=burst or BurstSettings(enabled=False), store_text=store_text,
                 ),
             }
         )

@@ -85,6 +85,9 @@ services:
       SLOTGW_PROMPT_USD_PER_MILLION: ${SLOTGW_PROMPT_USD_PER_MILLION:-auto}
       SLOTGW_BURST: ${SLOTGW_BURST:-true}
       SLOTGW_BURST_REVOKE: ${SLOTGW_BURST_REVOKE:-grace}
+      SLOTGW_BURST_CTX_CLASS: ${SLOTGW_BURST_CTX_CLASS:-slowest}
+      SLOTGW_BURST_QUEUE_S: ${SLOTGW_BURST_QUEUE_S:-5}
+      SLOTGW_STORE_TEXT: ${SLOTGW_STORE_TEXT:-false}
     depends_on:
       vllm:
         condition: service_healthy
@@ -116,8 +119,71 @@ services:
       SLOTGW_PROMPT_USD_PER_MILLION: ${SLOTGW_PROMPT_USD_PER_MILLION:-auto}
       SLOTGW_BURST: ${SLOTGW_BURST:-true}
       SLOTGW_BURST_REVOKE: ${SLOTGW_BURST_REVOKE:-grace}
+      SLOTGW_BURST_CTX_CLASS: ${SLOTGW_BURST_CTX_CLASS:-slowest}
+      SLOTGW_BURST_QUEUE_S: ${SLOTGW_BURST_QUEUE_S:-5}
+      SLOTGW_STORE_TEXT: ${SLOTGW_STORE_TEXT:-false}
     depends_on:
       - fake-replica
+
+  # Phase 2 rehearsal (docs/PHASE2.md G0): three fake replicas on a 4090-like curve behind the gateway
+  # with the phase-2 config, so the matrix, the scripts and the sized scenario are exercised for free:
+  #   docker compose --profile fake3 up --build -d
+  #   docker compose run --rm -e SLOTGW_CONFIG_DIR=/app/config/phase2 loadgen --scenario config/scenarios/mixed-4090.yaml --seed 1 --config-dir config/phase2
+  # FAKE_RATE_CURVE_4090 is a guess until stage A's calibration replaces it.
+  fake-a:
+    profiles: ["fake3"]
+    image: slotgw-gateway:local
+    build: .
+    command: ["slotgw-fake-replica", "--port", "8000"]
+    environment:
+      FAKE_MODEL: Qwen/Qwen2.5-7B-Instruct-AWQ
+      FAKE_RATE_CURVE: ${FAKE_RATE_CURVE_4090:-1:130,8:110,16:95,32:70,48:50,64:35}
+      FAKE_KV_TOKENS: ${FAKE_KV_TOKENS_4090:-280000}
+      FAKE_PREFILL_TPS: ${FAKE_PREFILL_TPS_4090:-20000}
+  fake-b:
+    profiles: ["fake3"]
+    image: slotgw-gateway:local
+    build: .
+    command: ["slotgw-fake-replica", "--port", "8000"]
+    environment:
+      FAKE_MODEL: Qwen/Qwen2.5-7B-Instruct-AWQ
+      FAKE_RATE_CURVE: ${FAKE_RATE_CURVE_4090:-1:130,8:110,16:95,32:70,48:50,64:35}
+      FAKE_KV_TOKENS: ${FAKE_KV_TOKENS_4090:-280000}
+      FAKE_PREFILL_TPS: ${FAKE_PREFILL_TPS_4090:-20000}
+  fake-c:
+    profiles: ["fake3"]
+    image: slotgw-gateway:local
+    build: .
+    command: ["slotgw-fake-replica", "--port", "8000"]
+    environment:
+      FAKE_MODEL: Qwen/Qwen2.5-7B-Instruct-AWQ
+      FAKE_RATE_CURVE: ${FAKE_RATE_CURVE_4090:-1:130,8:110,16:95,32:70,48:50,64:35}
+      FAKE_KV_TOKENS: ${FAKE_KV_TOKENS_4090:-280000}
+      FAKE_PREFILL_TPS: ${FAKE_PREFILL_TPS_4090:-20000}
+
+  gateway-fake3:
+    <<: *gateway
+    profiles: ["fake3"]
+    command: ["slotgw", "--port", "8080", "--config-dir", "/app/config/phase2"]
+    environment:
+      REPLICA_A_URL: http://fake-a:8000
+      REPLICA_B_URL: http://fake-b:8000
+      REPLICA_C_URL: http://fake-c:8000
+      REPLICA_CURVE: ${FAKE_RATE_CURVE_4090:-1:130,8:110,16:95,32:70,48:50,64:35}
+      REPLICA_A_EXCLUDE: ${REPLICA_A_EXCLUDE:-}
+      SLOTGW_RUN_ID: ${RUN_ID:-}
+      SLOTGW_PRICE_REFERENCE: ${SLOTGW_PRICE_REFERENCE:-basket-7b}
+      SLOTGW_TPS_OVERCOMMIT: ${SLOTGW_TPS_OVERCOMMIT:-1.0}
+      SLOTGW_LAZY_PREEMPT: ${SLOTGW_LAZY_PREEMPT:-never}
+      SLOTGW_MAX_PREFILL_TOKENS: ${SLOTGW_MAX_PREFILL_TOKENS:-0}
+      SLOTGW_PROMPT_USD_PER_MILLION: ${SLOTGW_PROMPT_USD_PER_MILLION:-auto}
+      SLOTGW_RESERVATION_FACTOR: ${SLOTGW_RESERVATION_FACTOR:-2.3}
+      SLOTGW_BURST: ${SLOTGW_BURST:-true}
+      SLOTGW_BURST_REVOKE: ${SLOTGW_BURST_REVOKE:-grace}
+      SLOTGW_BURST_CTX_CLASS: ${SLOTGW_BURST_CTX_CLASS:-slowest}
+      SLOTGW_BURST_QUEUE_S: ${SLOTGW_BURST_QUEUE_S:-5}
+      SLOTGW_STORE_TEXT: ${SLOTGW_STORE_TEXT:-true}
+    depends_on: [fake-a, fake-b, fake-c]
 
   loadgen:
     <<: *tool

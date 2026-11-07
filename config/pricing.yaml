@@ -4,6 +4,12 @@
 reference: ${SLOTGW_PRICE_REFERENCE:-basket-3b}   # a name in price_references.yaml, or custom
 token:
   batch_discount: 0.5          # applied to lazy requests under the per-token reference
+  # Prompt tokens vLLM served from its prefix cache (usage.prompt_tokens_details.cached_tokens) are
+  # priced at this share of the input price under both schemes, unless the active reference lists a
+  # cache-read price (price_references.yaml `cache_read_usd_per_million`, OpenRouter `input_cache_read`).
+  # Assumption, not a market fact: large providers charge 0.1x (Anthropic, DeepSeek) to 0.5x (OpenAI);
+  # most open-model hosts on OpenRouter list no cache-read price at all, i.e. charge hits in full.
+  cache_read_ratio: 0.25
   # used only when reference is custom (or price_references.yaml is absent): the original
   # gpt-4o-mini-class placeholder
   input_usd_per_million: 0.15

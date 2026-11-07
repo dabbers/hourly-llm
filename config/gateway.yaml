@@ -20,3 +20,7 @@ burst:                           # burst manager (docs/DESIGN.md section 7)
   revoke_policy: ${SLOTGW_BURST_REVOKE:-grace}   # finish | grace | abort, when a guaranteed admission needs the KV
   grace_s: 15
   max_context_tokens: 0          # cap for context bursts; 0 = the model's largest shape context
+  # post-M4 (DESIGN 12): a context burst has no floor, so it takes the cheapest seat and fails fast
+  context_tps_class: ${SLOTGW_BURST_CTX_CLASS:-slowest}   # slowest = the model's slowest non-lazy shape sets its tps, pacing and price; own = M4 behaviour
+  context_max_queue_s: ${SLOTGW_BURST_QUEUE_S:-5}        # a burst waits at most this many seconds for a seat (never longer than its shape's max_queue_s)
+store_text: ${SLOTGW_STORE_TEXT:-false}   # keep every completion (and showcase prompts) in the meter's texts table for the report's output samples

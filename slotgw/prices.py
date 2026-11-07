@@ -68,24 +68,32 @@ def build_references(
         if m is None:
             raise KeyError(f"model {model_id!r} (reference {name!r}) not in the price list")
         pricing = m.get("pricing") or {}
-        refs.append({
+        ref: dict[str, Any] = {
             "name": name,
             "model": model_id,
             "input_usd_per_million": _per_million(pricing.get("prompt", 0)),
             "output_usd_per_million": _per_million(pricing.get("completion", 0)),
             "context_length": m.get("context_length"),
-        })
+        }
+        cache_read = pricing.get("input_cache_read")
+        if cache_read not in (None, "", "0", 0) and float(cache_read) > 0:
+            ref["cache_read_usd_per_million"] = _per_million(cache_read)  # the provider prices prefix-cache hits
+        refs.append(ref)
     by_name = {r["name"]: r for r in refs}
     for name, members in baskets.items():
         missing = [x for x in members if x not in by_name]
         if missing:
             raise KeyError(f"basket {name!r}: unknown members {missing}")
-        refs.append({
+        basket: dict[str, Any] = {
             "name": name,
             "basket": list(members),
             "input_usd_per_million": round(statistics.median(by_name[x]["input_usd_per_million"] for x in members), 4),
             "output_usd_per_million": round(statistics.median(by_name[x]["output_usd_per_million"] for x in members), 4),
-        })
+        }
+        cached = [by_name[x]["cache_read_usd_per_million"] for x in members if "cache_read_usd_per_million" in by_name[x]]
+        if cached:
+            basket["cache_read_usd_per_million"] = round(statistics.median(cached), 4)
+        refs.append(basket)
     return {
         "source": source,
         "fetched": fetched or dt.date.today().isoformat(),

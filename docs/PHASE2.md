@@ -1,7 +1,13 @@
 # Phase 2 plan: three replicas on RunPod (milestone 5)
 
-Status: plan, 2026-11-07. Nothing in it is built or started; no pod has been created. Budget cap for
-the whole phase: **$150**, set by the project owner. Every paid stage starts only on an explicit go.
+Status: plan, 2026-11-07; G0 (local work) built the same day, no pod created: the two M4 fixes, output
+capture, placement rules (pinned reservations, excluded shapes), the phase-2 configuration under
+`config/phase2/` with the 7B price basket, the sized-later scenario `mixed-4090.yaml`, the run matrix, the
+pod and chain scripts (docs/RUNBOOK.md), and a rehearsal of the stack on three fake replicas
+(`docker compose --profile fake3`). Stage A waits for the API key in `.env`. Budget cap for the whole
+phase: **$150**, set by the project owner; **$80 of prepaid credit loaded on 2026-11-07**, which is
+the hard cap until more is added. The owner has allowed the headroom above the planned ~$17 to be
+spent on the optional experiments in section 3. Every paid stage starts only on an explicit go.
 
 ## 1. Why move, and what the 2080 Ti could not answer
 
@@ -33,6 +39,7 @@ Phase 2 therefore answers, on rented hardware with real replicas:
 |---|---|---|
 | Card | RTX 4090 24 GB, RunPod Secure Cloud, on demand ($0.89/h in the October 2026 price snapshot) | Cheapest card with FlashAttention and fp8 KV; three pods test the scheduler for the price of one A100. Alternative: A100 80 GB ($1.79/h) if fp16 weights and 32k contexts matter more than replica count |
 | Replicas | 3 identical pods | Shape affinity and "reservations on their own replica" need at least three: one for reservations, one for the fast shape, one general |
+| Placement rules | `exclude_shapes` per replica and a `replica` pin on reservations (G0) | The simplest rules that express "reservations on their own replica": setting 3 pins the reservations to A and keeps the 60 tps shape off A; setting 4 runs the same reservations unpinned |
 | Model | `Qwen/Qwen2.5-7B-Instruct-AWQ` | Ungated on Hugging Face (no licence click, no token on the pods); same tokenizer family as the 3B, so the load generator's token-exact vocabulary stays exact; AWQ weights (~5.5 GB) leave ~16 GB of KV and keep single-stream decode fast enough for a 60 tps shape. fp16 7B on a 4090 (~15 GB of weights, an expected 60–70 tok/s alone) would make 60 tps unsellable. Alternative: fp16 `Qwen/Qwen2.5-7B-Instruct` with `--kv-cache-dtype fp8` and 60 tps dropped from the catalog |
 | Price reference | New basket `basket-7b` from OpenRouter via `slotgw-fetch-prices` (Qwen2.5 7B, Llama 3.1 8B, Mistral 7B class) | The 3B basket is the wrong tier for a 7B product |
 | GPU cost knob | `provider.gpu_usd_per_hour` = the pod's actual price | Replaces the $0.30 placeholder |
@@ -55,7 +62,17 @@ Expected spend is well under the cap; the cap exists for reruns, not for the pla
 | C: the matrix | 3 × ~4 h | ~$11 | 4 settings × 2 seeds, plus a third seed for the two on-demand settings: 10 runs of ~22 min |
 | Storage | network volume for the HF cache | ~$1 | avoids re-downloading the model per pod restart |
 | **Planned total** | | **~$17** | |
-| Reserve | | ~$133 | reruns after a failed gate, an optional A100 cross-check (1 pod × 2 h, ~$4), a fourth seed |
+| Reserve | | ~$63 of the $80 loaded | reruns after a failed gate first; then the optional experiments below, in this order, while credit lasts |
+
+Optional experiments, each only after the planned matrix is complete and committed:
+
+| Experiment | Pods × hours | Cost | What it adds |
+|---|---|---|---|
+| fp16 vs AWQ on the same pod | 1 × 1.5 h | ~$1.5 | `Qwen2.5-7B-Instruct` fp16 with fp8 KV calibrated on the 4090 next to the AWQ build: seat ceilings and output samples side by side, the quality question for the write-up |
+| Third and fourth seed for the reservation settings | 3 × 1.5 h | ~$4 | tenant-level numbers for the note-taker and the reservation bills stop being single-sample |
+| A100 80 GB cross-check | 1 × 2 h | ~$4 | calibration, interference probe and one burst-on run of the sized scenario on the reference product card; shows how much of Q5 is the 4090 rather than "a modern card" |
+| 120 tps shape and 32k note-taker | 3 × 1.5 h | ~$4 | only if `n_max(120)` is at least 4 on the 4090: one on-demand run with the agent tenant on 120 tps and the note-taker on a 32k shape |
+| `abort` revocation policy | 3 × 0.75 h | ~$2 | only if the `grace` run shows revocations: the same seed under `abort` |
 
 Matrix settings (all on `mixed-4090.yaml`): (1) burst off, on demand; (2) burst on (`grace`), on
 demand; (3) burst on, reservations at factor 2.3, reservations placed on replica A and the 60 tps
@@ -69,7 +86,7 @@ the gateway and all replicas stayed healthy for the whole run, vLLM preemptions 
 guaranteed load, and the artifacts (meter rows, load samples, plan) are complete and copied back.
 Everything that can be tested without a GPU is tested before a pod exists.
 
-**G0, local and free.** Done before any pod is created:
+**G0, local and free.** Done before any pod is created (built 2026-11-07; see DESIGN.md section 12 for the decisions):
 
 - The two hardware-independent fixes from M4: meter `cached_tokens` with cache-read pricing in the
   report (otherwise every phase-2 margin is an upper bound), and context bursts admitted at the
@@ -143,3 +160,6 @@ refusal bites.
 2. SSH public key added under RunPod account settings (pods are driven over SSH).
 3. `RUNPOD_API_KEY=...` in the repo's `.env` (gitignored); the scripts read it, nothing prints it.
 4. A go for each paid stage (A, B, C); the assistant creates and stops the pods through the API.
+
+The API key is a live credential that spends money: the assistant never copies, prints or types it,
+and the owner should rotate it in RunPod's settings once phase 2 is finished.

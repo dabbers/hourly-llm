@@ -64,6 +64,15 @@ class GatewayState:
             return cap
         return max(s.max_context for s in self.config.shapes if s.model == shape.model)
 
+    def burst_shape_for(self, shape: Shape) -> Shape:
+        """The shape a context burst of `shape` runs as (DESIGN 12, post-M4): a request with no
+        floor takes the cheapest seat, so by default the model's slowest non-lazy shape sets its
+        tps (seat check, pacing) and price; `context_tps_class: own` keeps the request's shape."""
+        if self.config.gateway.burst.context_tps_class == "own":
+            return shape
+        candidates = [s for s in self.config.shapes if s.model == shape.model and not s.lazy]
+        return min(candidates, key=lambda s: (s.tps, -s.max_context), default=shape)
+
 
 def openai_error(
     status: int, message: str, code: str | None = None, type_: str = "invalid_request_error", headers: dict | None = None
@@ -103,6 +112,18 @@ def _load_tags(request: Request, rec: RequestRecord) -> None:
     rec.scenario = request.headers.get("x-slotgw-scenario") or None
     seed = request.headers.get("x-slotgw-seed")
     rec.seed = int(seed) if seed and seed.lstrip("-").isdigit() else None
+    rec.showcase = request.headers.get("x-slotgw-showcase") or None
+
+
+def _store_text(state: GatewayState, rec: RequestRecord, payload: dict[str, Any], text: str) -> None:
+    """Keep the completion (and a showcase request's prompt) when gateway.store_text is on."""
+    if not state.config.gateway.store_text:
+        return
+    prompt_json = json.dumps(payload.get("messages"), ensure_ascii=False) if rec.showcase else None
+    try:
+        state.meter.record_text(rec.request_id, text, prompt_json)
+    except Exception:  # the sample is a convenience, never worth failing the request
+        log.exception("could not store text for %s", rec.request_id)
 
 
 def _release(state: GatewayState, hold: Hold | None) -> None:
@@ -197,7 +218,7 @@ def build_router() -> APIRouter:
 
     @router.post("/admin/reservations")
     async def admin_reserve(request: Request):
-        """Create a standing reservation: {tenant, shape, slots, load_run?, scenario?, seed?}."""
+        """Create a standing reservation: {tenant, shape, slots, replica?, load_run?, scenario?, seed?}."""
         state: GatewayState = request.app.state.gw
         if state.scheduler is None:
             return openai_error(503, "admission control is off; reservations need ledgers", code="no_admission", type_="server_error")
@@ -216,8 +237,9 @@ def build_router() -> APIRouter:
         except (TypeError, ValueError):
             return openai_error(400, "'slots' must be an integer")
         tags = {k: body.get(k) for k in ("load_run", "scenario", "seed") if body.get(k) is not None}
+        replica_id = body.get("replica") or None  # pin every slot to one replica (phase 2 placement rule)
         try:
-            res = state.scheduler.reserve(tenant.name, shape, slots, body.get("id"), tags)
+            res = state.scheduler.reserve(tenant.name, shape, slots, body.get("id"), tags, replica_id=replica_id)
         except Unsellable:
             return openai_error(503, f"no replica can honour shape {shape.name}", code="shape_unsellable", type_="server_error")
         except ReservationCapacity as e:
@@ -359,14 +381,18 @@ def build_router() -> APIRouter:
         payload["max_tokens"] = max_tokens
         payload["priority"] = PRIORITY_BURST if burst_ctx else (PRIORITY_LAZY if shape.lazy else PRIORITY_INTERACTIVE)
 
-        pacer = state.pacer_for(shape)
+        # A context burst runs as its burst class (the model's slowest shape by default): that shape's
+        # tps takes the seat, paces the stream and prices the runtime; the tenant's shape stays on the record.
+        billed_shape = state.burst_shape_for(shape) if burst_ctx else shape
+        rec.billed_shape = billed_shape.name
+        pacer = state.pacer_for(billed_shape)
         hold: Hold | None = None
         if state.scheduler is not None:
             admission = state.config.gateway.admission
             preemptable = shape.lazy and not stream and admission.lazy_preempt == "requeue"
             try:
                 hold = await state.scheduler.admit(
-                    request_id, shape, prompt_tokens, tenant=tenant.name, preemptable=preemptable,
+                    request_id, billed_shape, prompt_tokens, tenant=tenant.name, preemptable=preemptable,
                     kv_tokens=need if burst_ctx else None, burst_ctx=burst_ctx,
                 )
             except Unsellable:
@@ -413,12 +439,14 @@ def _usage_dict(rec: RequestRecord, usage: Usage | None, counted: int) -> dict[s
         "prompt_tokens": prompt,
         "completion_tokens": completion,
         "total_tokens": prompt + completion,
+        "prompt_tokens_details": {"cached_tokens": rec.cached_tokens},
     }
 
 
 def _bill(state: GatewayState, rec: RequestRecord, shape: Shape) -> Bill:
+    billed = state.config.shape(rec.billed_shape) if rec.billed_shape else None
     return bill_request(
-        shape=shape,
+        shape=billed or shape,
         pricing=state.config.pricing,
         prompt_tokens=rec.prompt_tokens,
         output_tokens=rec.output_tokens,
@@ -426,6 +454,7 @@ def _bill(state: GatewayState, rec: RequestRecord, shape: Shape) -> Bill:
         t_admitted=rec.t_admitted,
         t_first_token=rec.t_first_token,
         t_last_token=rec.t_last_token,
+        cached_tokens=rec.cached_tokens,
     )
 
 
@@ -433,9 +462,11 @@ def _slotgw_dict(rec: RequestRecord, shape: Shape, pacer: Pacer, bill: Bill | No
     d: dict[str, Any] = {
         "request_id": rec.request_id,
         "shape": shape.name,
+        "billed_shape": rec.billed_shape or shape.name,
         "replica": rec.replica,
         "class_ctx": rec.class_ctx,
         "reservation_id": rec.reservation_id,
+        "cached_tokens": rec.cached_tokens,
         "ttft_ms": rec.ttft_ms,
         "queued_ms": rec.queued_ms,
         "throttled_ms": rec.throttled_ms,
@@ -453,6 +484,7 @@ def _finalize(rec: RequestRecord, usage: Usage | None, counted: int, pacer: Pace
     rec.output_tokens = usage.completion_tokens if usage else counted
     if usage and usage.prompt_tokens:
         rec.prompt_tokens = usage.prompt_tokens
+    rec.cached_tokens = max(0, min(usage.cached_tokens, rec.prompt_tokens)) if usage else 0
     rec.output_tokens_burst = min(rec.output_tokens, pacer.burst_tokens)
     rec.output_tokens_guaranteed = rec.output_tokens - rec.output_tokens_burst
     rec.throttled_ms = pacer.throttled_ms
@@ -577,6 +609,7 @@ async def _complete_response(
     rec.t_last_token = now()
     bill = _bill(state, rec, shape)
     state.meter.record(rec)
+    _store_text(state, rec, payload, "".join(parts))
     return JSONResponse(
         {
             "id": rec.request_id,
@@ -614,6 +647,7 @@ async def _stream_response(
     usage: Usage | None = None
     finish: str | None = None
     recorded = False
+    texts: list[str] = []  # delivered text, kept for the report's output samples when store_text is on
     queue: asyncio.Queue[TokenChunk | ReplicaError | BurstRevoked | None] = asyncio.Queue()
 
     async def produce() -> None:
@@ -677,6 +711,8 @@ async def _stream_response(
                 if t_deliver > t_now:
                     await asyncio.sleep(t_deliver - t_now)
                 delivered += item.n_tokens
+                if item.text:
+                    texts.append(item.text)
                 yield _sse(chunk_obj({"content": item.text}, None, delivered))
                 rec.t_last_token = now()
         _finalize(rec, usage, produced, pacer, delivered)
@@ -720,3 +756,5 @@ async def _stream_response(
         if not recorded:
             rec.status = "error" if rec.status == "ok" else rec.status
             state.meter.record(rec)
+        if texts or rec.showcase:
+            _store_text(state, rec, payload, "".join(texts))

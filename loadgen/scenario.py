@@ -115,6 +115,54 @@ class ReservationSpec(BaseModel):
     slots: int = Field(ge=1)
     shape: str | None = None
     phases: list[str] = Field(default_factory=list)
+    replica: str | None = None  # pin the slots to one replica (phase 2 placement rule); --reservation-replica overrides
+
+
+class ShowcaseSpec(BaseModel):
+    """The showcase lane (docs/PHASE2.md section 6): real, hand-written prompts from a prompt file,
+    one session every `every_s` seconds from `offset_s`, cycling through the file. They go through
+    the same shape, admission, pacing and billing as the synthetic traffic, stop at end-of-sequence
+    like real requests, and carry `X-Slotgw-Showcase` so the gateway keeps their text."""
+
+    prompts: str  # config/prompts/<profile>.yaml, relative to the working directory or the scenario file
+    every_s: float = Field(default=180.0, gt=0)
+    offset_s: float = Field(default=30.0, ge=0)
+    max_tokens: int | None = None  # overrides the prompt file's per-prompt budget
+    think_s: float = Field(default=3.0, ge=0)  # pause between the turns of one prompt
+
+
+class ShowcasePrompt(BaseModel):
+    id: str
+    turns: list[str] = Field(min_length=1)
+    max_tokens: int = Field(default=300, ge=1)
+
+
+class PromptFile(BaseModel):
+    profile: str
+    system: str | None = None
+    prompts: list[ShowcasePrompt] = Field(min_length=1)
+
+
+def resolve_prompts_path(spec_path: str, scenario_path: str | Path | None = None) -> Path:
+    """The prompt file: as given (relative to the working directory), else relative to the scenario
+    file's directory, else to the config directory above it (config/scenarios -> config)."""
+    p = Path(spec_path)
+    if p.is_file() or scenario_path is None:
+        return p
+    base = Path(scenario_path).resolve().parent
+    for candidate in (base / p, base.parent / p, base.parent.parent / p):
+        if candidate.is_file():
+            return candidate
+    return p
+
+
+def load_prompts(path: str | Path) -> PromptFile:
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    pf = PromptFile.model_validate(data)
+    ids = [p.id for p in pf.prompts]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"{path}: duplicate prompt ids")
+    return pf
 
 
 class TenantSpec(BaseModel):
@@ -124,6 +172,7 @@ class TenantSpec(BaseModel):
     profile: Profile
     arrivals: Arrivals | None = None
     reservation: ReservationSpec | None = None
+    showcase: ShowcaseSpec | None = None
 
     @model_validator(mode="after")
     def _closed_loop_for_batch(self) -> TenantSpec:
@@ -141,6 +190,7 @@ class Scenario(BaseModel):
     hour_length_s: float = Field(default=600.0, gt=0)
     drain_s: float = Field(default=60.0, ge=0)
     sample_interval_s: float = Field(default=2.0, gt=0)
+    rate_multiplier: float = Field(default=1.0, ge=0)  # scales every open-loop arrival rate: the sizing knob for a bigger replica
     phases: list[Phase] = Field(min_length=1)
     tenants: list[TenantSpec] = Field(min_length=1)
 

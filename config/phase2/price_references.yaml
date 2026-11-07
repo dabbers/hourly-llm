@@ -1,0 +1,69 @@
+# Per-token market prices (USD per million tokens), snapshotted by `slotgw-fetch-prices` from
+# https://openrouter.ai/api/v1/models (saved list) on 2026-11-07. Rerun the command to refresh; do not edit by hand.
+# A basket is the median of its members. pricing.yaml `reference:` names the active one.
+source: https://openrouter.ai/api/v1/models
+fetched: '2026-11-07'
+references:
+- name: llama-3.2-3b
+  model: meta-llama/llama-3.2-3b-instruct
+  input_usd_per_million: 0.0509
+  output_usd_per_million: 0.335
+  context_length: 131072
+- name: gemma-3-4b
+  model: google/gemma-3-4b-it
+  input_usd_per_million: 0.05
+  output_usd_per_million: 0.1
+  context_length: 131072
+- name: ministral-3b
+  model: mistralai/ministral-3b-2512
+  input_usd_per_million: 0.1
+  output_usd_per_million: 0.1
+  context_length: 131072
+  cache_read_usd_per_million: 0.01
+- name: qwen-2.5-7b
+  model: qwen/qwen-2.5-7b-instruct
+  input_usd_per_million: 0.1
+  output_usd_per_million: 0.2
+  context_length: 32768
+- name: gpt-4o-mini
+  model: openai/gpt-4o-mini
+  input_usd_per_million: 0.15
+  output_usd_per_million: 0.6
+  context_length: 128000
+  cache_read_usd_per_million: 0.075
+- name: llama-3.1-8b
+  model: meta-llama/llama-3.1-8b-instruct
+  input_usd_per_million: 0.05
+  output_usd_per_million: 0.08
+  context_length: 131072
+  cache_read_usd_per_million: 0.025
+- name: ministral-8b
+  model: mistralai/ministral-8b-2512
+  input_usd_per_million: 0.15
+  output_usd_per_million: 0.15
+  context_length: 262144
+  cache_read_usd_per_million: 0.015
+- name: granite-8b
+  model: ibm-granite/granite-4.2-8b
+  input_usd_per_million: 0.06
+  output_usd_per_million: 0.25
+  context_length: 131072
+  cache_read_usd_per_million: 0.015
+- name: basket-3b
+  basket:
+  - llama-3.2-3b
+  - gemma-3-4b
+  - ministral-3b
+  - qwen-2.5-7b
+  input_usd_per_million: 0.0755
+  output_usd_per_million: 0.15
+  cache_read_usd_per_million: 0.01
+- name: basket-7b
+  basket:
+  - qwen-2.5-7b
+  - llama-3.1-8b
+  - ministral-8b
+  - granite-8b
+  input_usd_per_million: 0.08
+  output_usd_per_million: 0.175
+  cache_read_usd_per_million: 0.015
