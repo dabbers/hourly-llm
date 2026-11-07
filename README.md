@@ -50,6 +50,27 @@ docker compose run --rm report runs/<run_id>
 bound), their variance across seeds, latency, throttled time, floor violations, a timeline and
 prefill interference. `config/scenarios/smoke.yaml` is a two-minute version of the same workload.
 
+Settings that are worth varying per run are environment overrides, so one run differs from the next
+by a prefix, and `--label` keeps them apart in the report:
+
+```bash
+SLOTGW_TPS_OVERCOMMIT=1.5 docker compose --profile gpu up -d gateway-gpu
+```
+
+```bash
+docker compose run --rm loadgen --scenario config/scenarios/mixed.yaml --seed 1 --label oc1.5
+```
+
+| Variable | Default | What |
+|---|---|---|
+| `SLOTGW_TPS_OVERCOMMIT` | 1.0 | seats = calibrated `n_max` × this (the vCPU lever) |
+| `SLOTGW_LAZY_PREEMPT` | never | `requeue` lets an interactive request evict a running lazy (complete-mode) request |
+| `SLOTGW_MAX_PREFILL_TOKENS` | 0 | cap on prompt tokens prefilling at once per replica; 0 = off |
+| `SLOTGW_PRICE_REFERENCE` | basket-3b | per-token market reference from `config/price_references.yaml` (`gpt-4o-mini`, `llama-3.2-3b`, …, or `custom`); shape prices derive from it |
+| `SLOTGW_PROMPT_USD_PER_MILLION` | auto | prefill charge added to shape bills; auto = the reference's input price, 0 = runtime only |
+| `VLLM_MAX_NUM_BATCHED_TOKENS` | 128 | vLLM prefill chunk size (vLLM's own default is 2048); smaller = less decode interference |
+| `VLLM_GPU_MEM` | 0.82 | vLLM memory fraction (lower it when other apps hold VRAM) |
+
 Stop with `docker compose --profile gpu down` (or `--profile fake`).
 
 ## Develop
@@ -59,20 +80,24 @@ uv sync --extra dev
 uv run pytest
 uv run slotgw-fake-replica --port 8001       # fake vLLM on :8001
 uv run slotgw --config-dir config            # gateway on :8080, expects VLLM_URL (default http://localhost:8000)
-uv run slotgw-loadgen --scenario config/scenarios/smoke.yaml --seed 1
-uv run slotgw-report runs/<run_id>
+uv run slotgw-loadgen --scenario config/scenarios/smoke.yaml --seed 1 [--label tag]
+uv run slotgw-report runs/<run_id> [runs/<other_run_id> ...] [--out DIR]
+uv run slotgw-fetch-prices                     # refresh config/price_references.yaml from OpenRouter (no key)
 uv run python scripts/calibrate.py --url http://localhost:8000 --replica-id local-2080ti
 ```
 
-Knobs: `config/shapes.yaml` (catalog and prices), `config/tenants.yaml` (API keys are local test
-values), `config/pricing.yaml` (per-token reference, GPU cost), `config/gateway.yaml` (pacing on/off,
-bucket depth), `config/scenarios/*.yaml` (profiles, arrival processes, phases).
+Knobs: `config/shapes.yaml` (catalog; prices derive from the active reference unless set),
+`config/tenants.yaml` (API keys are local test values), `config/pricing.yaml` (active price reference,
+GPU cost, margin targets, prefill charge), `config/price_references.yaml` (OpenRouter snapshot),
+`config/gateway.yaml`
+(pacing, admission margins, overcommit, lazy share and preemption, prefill cap), `config/replicas.yaml`
+(replica URLs, calibration curve, slot plan), `config/scenarios/*.yaml` (profiles, arrivals, phases).
 
 ## Layout
 
 | Path | What |
 |------|------|
-| `slotgw/` | gateway: `api.py` (OpenAI surface), `pacing.py` (token bucket), `billing.py`, `meter.py`, `config.py`, `replicas/` (vLLM client, fake server) |
+| `slotgw/` | gateway: `api.py` (OpenAI surface), `admission.py` (ledgers, queues, scheduler), `calibration.py` (step-rate profiles), `pacing.py` (token bucket), `billing.py`, `prices.py` (market price snapshot), `meter.py`, `config.py`, `replicas/` (vLLM client, fake server) |
 | `loadgen/` | `scenario.py`, `arrivals.py` (poisson, diurnal, bursty, hour marks), `plan.py` (seeded plan), `content.py`, `runner.py` |
 | `report/` | `metrics.py`, `charts.py` (inline SVG), `html.py`, `build.py` |
 | `config/` | shapes, tenants, replicas, pricing, gateway, scenarios |
@@ -91,6 +116,8 @@ Docker Desktop, that is a no-op.
 
 ## Status
 
-Milestone 1 (vLLM + gateway passthrough + meter) and milestone 2 (per-request pacing, seeded load
-generator, first report) built and verified on the local GPU. Next: milestone 3 (admission control,
-multi-replica scheduler, prefill-interference mitigation). See `docs/DESIGN.md` section 11.
+Milestones 1–3 built and verified on the local GPU: vLLM + gateway + meter, per-request pacing +
+seeded load generator + report, admission control + multi-replica scheduler + prefill-interference
+mitigation (measured defaults: 128-token prefill chunks, overcommit 1.0, lazy requeue off). Next:
+milestone 4 (burst manager, bursting on/off comparison, `docs/RESULTS.md`). See `docs/DESIGN.md`
+section 11 and `docs/ASSUMPTIONS.md` "Milestone 3 measurements".

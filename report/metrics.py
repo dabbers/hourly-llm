@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from slotgw.billing import per_token_usd, shape_seconds
-from slotgw.config import Config, load_config
+from slotgw.config import Config, PriceReference, load_config
 
 LONG_PREFILL_TOKENS = 3000  # a prompt at least this long counts as a "long prefill" (DESIGN A4)
 FLOOR_TOLERANCE = 0.95  # delivered rate below 95% of the shape's tps is a floor violation
@@ -36,7 +36,8 @@ class RunData:
     run_id: str
     requests: pd.DataFrame
     loads: list[LoadRun]
-    config: Config
+    config: Config  # the run's own config snapshot when it has one
+    fallback_config: Config | None = None  # the --config-dir config, for settings the snapshot lacks
 
 
 def read_meter(path: Path) -> pd.DataFrame:
@@ -72,11 +73,13 @@ def load_run_dir(run_dir: str | Path, config_dir: str | Path | None = None) -> R
         if (lr.dir / "config" / "shapes.yaml").is_file():
             cfg_dir = lr.dir / "config"  # the configuration the run actually used
             break
-    if cfg_dir is None:
-        cfg_dir = Path(config_dir) if config_dir else Path("config")
-    config = load_config(cfg_dir)
+    fallback_dir = Path(config_dir) if config_dir else Path("config")
+    fallback = load_config(fallback_dir) if (fallback_dir / "shapes.yaml").is_file() else None
+    config = load_config(cfg_dir) if cfg_dir is not None else fallback
+    if config is None:
+        raise FileNotFoundError(f"no config snapshot in {run_dir} and no config at {fallback_dir}")
     run_id = str(df["run_id"].iloc[0]) if not df.empty else run_dir.name
-    return RunData(run_dir=run_dir, run_id=run_id, requests=df, loads=loads, config=config)
+    return RunData(run_dir=run_dir, run_id=run_id, requests=df, loads=loads, config=config, fallback_config=fallback)
 
 
 def enrich(df: pd.DataFrame, config: Config) -> pd.DataFrame:
@@ -104,9 +107,11 @@ def enrich(df: pd.DataFrame, config: Config) -> pd.DataFrame:
         for r in df.itertuples(index=False)
     ]
     df["wall_s"], df["bound_s"], df["billed_s"] = (np.array([s[i] for s in secs]) for i in range(3))
-    df["shape_usd"] = df["billed_s"] * df["price_per_second"].fillna(0)
-    df["bound_usd"] = df["bound_s"] * df["price_per_second"].fillna(0)
-    df["wall_usd"] = df["wall_s"] * df["price_per_second"].fillna(0)
+    prompt_price = config.pricing.shape.prompt_usd_per_million / 1e6
+    df["prompt_usd"] = np.where(ok & (df["delivered_tokens"] > 0), df["prompt_tokens"] * prompt_price, 0.0)
+    df["shape_usd"] = df["billed_s"] * df["price_per_second"].fillna(0) + df["prompt_usd"]
+    df["bound_usd"] = df["bound_s"] * df["price_per_second"].fillna(0) + df["prompt_usd"]
+    df["wall_usd"] = df["wall_s"] * df["price_per_second"].fillna(0) + df["prompt_usd"]
     df["burst_discount_usd"] = df["bound_usd"] - df["shape_usd"]
     df["per_token_usd"] = [
         per_token_usd(int(r.prompt_tokens), int(r.output_tokens), bool(r.lazy), pricing) if r.ok else 0.0
@@ -134,9 +139,15 @@ def _q(p: float):
 
 def per_tenant(df: pd.DataFrame) -> pd.DataFrame:
     """One row per (scenario, seed, load_run, tenant, shape, delivery)."""
+    df = df.assign(
+        refused_context=df["refused"] & (df["abort_reason"] == "context_exceeds_shape"),
+        refused_capacity=df["refused"] & df["abort_reason"].fillna("").str.startswith("capacity"),
+    )
     all_rows = df.groupby(GROUP, dropna=False).agg(
         requests=("request_id", "count"),
         refused=("refused", "sum"),
+        refused_context=("refused_context", "sum"),
+        refused_capacity=("refused_capacity", "sum"),
         errors=("error", "sum"),
         lazy=("lazy", "max"),
         tps=("tps", "first"),
@@ -149,6 +160,7 @@ def per_tenant(df: pd.DataFrame) -> pd.DataFrame:
         output_tokens=("output_tokens", "sum"),
         delivered_tokens=("delivered_tokens", "sum"),
         per_token_usd=("per_token_usd", "sum"),
+        prompt_usd=("prompt_usd", "sum"),
         shape_usd=("shape_usd", "sum"),
         bound_usd=("bound_usd", "sum"),
         wall_usd=("wall_usd", "sum"),
@@ -157,6 +169,7 @@ def per_tenant(df: pd.DataFrame) -> pd.DataFrame:
         wall_s=("wall_s", "sum"),
         stream_s=("stream_s", "sum"),
         throttled_s=("throttled_s", "sum"),
+        queued_p50_ms=("queued_ms", _q(0.5)),
         queued_p95_ms=("queued_ms", _q(0.95)),
         ttft_p50_ms=("ttft_ms", _q(0.5)),
         ttft_p95_ms=("ttft_ms", _q(0.95)),
@@ -170,8 +183,8 @@ def per_tenant(df: pd.DataFrame) -> pd.DataFrame:
     )
     out = all_rows.join(ok_rows, how="left")
     counts = ["ok", "prompt_tokens", "output_tokens", "delivered_tokens", "floor_judged", "floor_violations"]
-    sums = ["per_token_usd", "shape_usd", "bound_usd", "wall_usd", "billed_s", "bound_s", "wall_s", "stream_s",
-            "throttled_s", "violation_stream_s"]
+    sums = ["per_token_usd", "prompt_usd", "shape_usd", "bound_usd", "wall_usd", "billed_s", "bound_s", "wall_s",
+            "stream_s", "throttled_s", "violation_stream_s"]
     out[counts] = out[counts].fillna(0).astype(int)
     out[sums] = out[sums].fillna(0.0)
     out["burst_discount_usd"] = out["bound_usd"] - out["shape_usd"]
@@ -251,10 +264,251 @@ def per_run(df: pd.DataFrame, loads: list[LoadRun], config: Config) -> pd.DataFr
     return pd.DataFrame(rows)
 
 
+def _run_window(sub: pd.DataFrame) -> tuple[float, float]:
+    ok = sub[sub["ok"]]
+    t0 = float(sub["t_arrival"].min())
+    t1 = float(max(ok["t_last_token"].max() if len(ok) else t0, sub["t_arrival"].max()))
+    return t0, t1
+
+
+def _num(s: pd.DataFrame, col: str) -> pd.Series:
+    return pd.to_numeric(s[col], errors="coerce") if col in s else pd.Series(dtype=float)
+
+
+def per_replica(
+    df: pd.DataFrame, loads: list[LoadRun], config: Config, fallback: Config | None = None
+) -> pd.DataFrame:
+    """Per (load_run, replica): seat-seconds held, fill rate against the slot plan, utilisation,
+    revenue vs GPU cost, the break-even fill rate, and the sampled ledger/engine state. A slot plan
+    is a reporting choice, so a run whose snapshot has none takes the current config's."""
+    shapes = {s.name: s for s in config.shapes}
+    plans = {r.id: r.slot_plan for r in (fallback.replicas if fallback else [])}
+    plans.update({r.id: r.slot_plan for r in config.replicas if r.slot_plan})
+    metas = {lr.id: lr for lr in loads}
+    gpu_h = config.pricing.provider.gpu_usd_per_hour
+    rows = []
+    for load_run, run in df.groupby("load_run", sort=False):
+        t0, t1 = _run_window(run)
+        duration = max(0.0, t1 - t0)
+        ok_all = run[run["ok"]]
+        for replica, ok in ok_all.groupby("replica"):
+            plan = plans.get(replica, {})
+            slots = sum(plan.values())
+            plan_price_s = sum(n * shapes[name].price_per_second for name, n in plan.items() if name in shapes)
+            plan_tps = sum(n * shapes[name].tps for name, n in plan.items() if name in shapes)
+            seat_s = float((ok["t_engine_done"] - ok["t_admitted"]).clip(lower=0).sum())
+            row = {
+                "scenario": run["scenario"].iloc[0],
+                "load_run": load_run,
+                "replica": replica,
+                "duration_s": round(duration, 1),
+                "ok": len(ok),
+                "output_tokens": int(ok["output_tokens"].sum()),
+                "prompt_tokens": int(ok["prompt_tokens"].sum()),
+                "seat_seconds": seat_s,
+                "slots": slots,
+                "slot_plan": ";".join(f"{n}x{name}" for name, n in plan.items()),
+                "fill_rate": seat_s / (slots * duration) if slots and duration else np.nan,
+                "utilization": float(ok["output_tokens"].sum()) / (plan_tps * duration) if plan_tps and duration else np.nan,
+                "shape_usd": float(ok["shape_usd"].sum()),
+                "per_token_usd": float(ok["per_token_usd"].sum()),
+                "gpu_cost_usd": gpu_h * duration / 3600.0,
+                "shape_usd_per_hour": float(ok["shape_usd"].sum()) / duration * 3600.0 if duration else np.nan,
+                "per_token_usd_per_hour": float(ok["per_token_usd"].sum()) / duration * 3600.0 if duration else np.nan,
+                "plan_usd_per_hour_full": plan_price_s * 3600.0,
+                "breakeven_fill_rate": gpu_h / (plan_price_s * 3600.0) if plan_price_s else np.nan,
+                "ledger_running_mean": np.nan,
+                "ledger_kv_held_share_mean": np.nan,
+                "seats_now_mean": np.nan,
+                "engine_running_mean": np.nan,
+                "engine_kv_usage_mean": np.nan,
+                "engine_kv_usage_p95": np.nan,
+                "queue_interactive_mean": np.nan,
+                "queue_interactive_max": np.nan,
+                "queue_lazy_mean": np.nan,
+                "gw_timeouts": np.nan,
+                "gw_preemptions": np.nan,
+            }
+            lr = metas.get(load_run)
+            if lr is not None and lr.samples is not None and "replica" in lr.samples:
+                s = lr.samples[lr.samples["replica"] == replica]
+
+                def num(col: str, s: pd.DataFrame = s) -> pd.Series:
+                    return _num(s, col)
+
+                if len(s):
+                    row["engine_running_mean"] = float(num("running").mean())
+                    row["engine_kv_usage_mean"] = float(num("kv_usage").mean())
+                    row["engine_kv_usage_p95"] = float(num("kv_usage").quantile(0.95))
+                    if "ledger_running" in s and num("ledger_running").notna().any():
+                        row["ledger_running_mean"] = float(num("ledger_running").mean())
+                        held, usable = num("ledger_kv_held"), num("ledger_kv_usable")
+                        row["ledger_kv_held_share_mean"] = float((held / usable.replace(0, np.nan)).mean())
+                        row["seats_now_mean"] = float(num("seats_now").mean())
+                        row["queue_interactive_mean"] = float(num("queue_interactive").mean())
+                        row["queue_interactive_max"] = float(num("queue_interactive").max())
+                        row["queue_lazy_mean"] = float(num("queue_lazy").mean())
+                        row["gw_timeouts"] = float(num("gw_timeouts").max())
+                        row["gw_preemptions"] = float(num("gw_preemptions").max())
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _slot_plans(config: Config, fallback: Config | None) -> dict[str, dict[str, int]]:
+    plans = {r.id: r.slot_plan for r in (fallback.replicas if fallback else [])}
+    plans.update({r.id: r.slot_plan for r in config.replicas if r.slot_plan})
+    return plans
+
+
+def _run_traffic(df: pd.DataFrame, config: Config, fallback: Config | None) -> pd.DataFrame:
+    """Per load run: token sums split interactive / lazy, GPU cost, both revenues and the measured
+    utilisation against the slot plans of the replicas the run used."""
+    shapes = {s.name: s for s in config.shapes}
+    plans = _slot_plans(config, fallback)
+    gpu_h = config.pricing.provider.gpu_usd_per_hour
+    rows = []
+    for load_run, run in df.groupby("load_run", sort=False):
+        t0, t1 = _run_window(run)
+        duration = max(0.0, t1 - t0)
+        ok = run[run["ok"]]
+        lazy = ok["lazy"].astype(bool)
+        plan_tps = sum(
+            n * shapes[name].tps
+            for rep in ok["replica"].dropna().unique()
+            for name, n in plans.get(rep, {}).items()
+            if name in shapes
+        )
+        output_total = float(ok["output_tokens"].sum())
+        rows.append({
+            "scenario": run["scenario"].iloc[0],
+            "seed": int(run["seed"].iloc[0]),
+            "load_run": load_run,
+            "duration_s": duration,
+            "prompt_tokens_interactive": int(ok.loc[~lazy, "prompt_tokens"].sum()),
+            "output_tokens_interactive": int(ok.loc[~lazy, "output_tokens"].sum()),
+            "prompt_tokens_lazy": int(ok.loc[lazy, "prompt_tokens"].sum()),
+            "output_tokens_lazy": int(ok.loc[lazy, "output_tokens"].sum()),
+            "gpu_cost_usd": gpu_h * duration / 3600.0,
+            "shape_usd": float(ok["shape_usd"].sum()),
+            "per_token_usd": float(ok["per_token_usd"].sum()),
+            "utilization": output_total / (plan_tps * duration) if plan_tps and duration else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+def _references(config: Config, fallback: Config | None) -> list[PriceReference]:
+    """The run's price references, or the current config's for a run snapshotted before they
+    existed; the run's own (active) per-token prices are always one of them."""
+    tok = config.pricing.token
+    refs = list(config.pricing.references) or list(fallback.pricing.references if fallback else [])
+    if not any(r.name == tok.reference for r in refs):
+        refs.insert(0, PriceReference(name=tok.reference, model="the run's own token prices",
+                                      input_usd_per_million=tok.input_usd_per_million,
+                                      output_usd_per_million=tok.output_usd_per_million))
+    return refs
+
+
+def market(df: pd.DataFrame, config: Config, fallback: Config | None = None) -> pd.DataFrame:
+    """Per (load run, price reference): what the run's traffic earns at that reference's per-token
+    prices (lazy requests at the batch discount) against GPU cost and the run's own shape revenue,
+    the gross margin, and the GPU price per hour at which that reference breaks even, at the
+    measured utilisation and as if the slot plan ran at the target utilisation (cost per token
+    scales with measured ÷ target). Prompt tokens served from the prefix cache are charged in full,
+    so the revenue is an upper bound for multi-turn traffic."""
+    traffic = _run_traffic(df, config, fallback)
+    pr = config.pricing
+    d = pr.token.batch_discount
+    target = pr.provider.target_utilization
+    rows = []
+    for t in traffic.itertuples(index=False):
+        hours = t.duration_s / 3600.0
+        scale = (target / t.utilization) if t.utilization and not np.isnan(t.utilization) else np.nan
+        for ref in _references(config, fallback):
+            rev = (
+                t.prompt_tokens_interactive * ref.input_usd_per_million + t.output_tokens_interactive * ref.output_usd_per_million
+                + d * (t.prompt_tokens_lazy * ref.input_usd_per_million + t.output_tokens_lazy * ref.output_usd_per_million)
+            ) / 1e6
+            rows.append({
+                "scenario": t.scenario,
+                "load_run": t.load_run,
+                "reference": ref.name,
+                "model": ref.model or ("median of " + ", ".join(ref.basket)),
+                "active": ref.name == pr.token.reference,
+                "input_usd_per_million": ref.input_usd_per_million,
+                "output_usd_per_million": ref.output_usd_per_million,
+                "revenue_usd": rev,
+                "revenue_usd_per_hour": rev / hours if hours else np.nan,
+                "gpu_cost_usd": t.gpu_cost_usd,
+                "shape_usd": t.shape_usd,
+                "revenue_vs_gpu": rev / t.gpu_cost_usd if t.gpu_cost_usd else np.nan,
+                "revenue_vs_shape": rev / t.shape_usd if t.shape_usd else np.nan,
+                "gross_margin": 1.0 - t.gpu_cost_usd / rev if rev else np.nan,
+                "utilization": t.utilization,
+                "target_utilization": target,
+                "gross_margin_at_target": 1.0 - t.gpu_cost_usd / (rev * scale) if rev and not np.isnan(scale) else np.nan,
+                "breakeven_gpu_usd_per_hour": rev / hours if hours else np.nan,
+                "breakeven_gpu_usd_per_hour_at_target": rev * scale / hours if hours and not np.isnan(scale) else np.nan,
+            })
+    return pd.DataFrame(rows)
+
+
+def list_prices(df: pd.DataFrame, config: Config, fallback: Config | None = None) -> pd.DataFrame:
+    """Per (load run, margin target): the per-token prices this provider would have to list to earn
+    that gross margin on revenue from the run's traffic, at the measured and at the target
+    utilisation, against the active market reference (the current config's when the run's snapshot
+    predates price references). Prompt tokens count as output-equivalent tokens at that reference's
+    input:output price ratio (the input price follows at that ratio) and lazy tokens at the batch
+    discount, so one output price covers the whole bill."""
+    traffic = _run_traffic(df, config, fallback)
+    pr = config.pricing
+    tok = pr.token if pr.references or not (fallback and fallback.pricing.references) else fallback.pricing.token
+    ratio = tok.input_usd_per_million / tok.output_usd_per_million if tok.output_usd_per_million else 0.0
+    d = tok.batch_discount
+    target = pr.provider.target_utilization
+    rows = []
+    for t in traffic.itertuples(index=False):
+        weighted = (
+            t.output_tokens_interactive + ratio * t.prompt_tokens_interactive
+            + d * (t.output_tokens_lazy + ratio * t.prompt_tokens_lazy)
+        )
+        scale = (t.utilization / target) if t.utilization and not np.isnan(t.utilization) else np.nan
+        for m in pr.provider.margin_targets:
+            out = t.gpu_cost_usd / (1.0 - m) / weighted * 1e6 if weighted else np.nan
+            rows.append({
+                "scenario": t.scenario,
+                "load_run": t.load_run,
+                "margin_target": m,
+                "utilization": t.utilization,
+                "target_utilization": target,
+                "output_usd_per_million": out,
+                "input_usd_per_million": out * ratio,
+                "output_usd_per_million_at_target": out * scale,
+                "input_usd_per_million_at_target": out * scale * ratio,
+                "reference": tok.reference,
+                "reference_output_usd_per_million": tok.output_usd_per_million,
+                "vs_reference": out / tok.output_usd_per_million if tok.output_usd_per_million else np.nan,
+                "vs_reference_at_target": out * scale / tok.output_usd_per_million if tok.output_usd_per_million else np.nan,
+            })
+    return pd.DataFrame(rows)
+
+
+def refusals(df: pd.DataFrame) -> pd.DataFrame:
+    """Refusals by reason per load run and tenant (429 context, 503 capacity by ledger rule)."""
+    ref = df[df["refused"]].copy()
+    if ref.empty:
+        return pd.DataFrame(columns=["scenario", "load_run", "tenant", "reason", "n", "queued_p50_ms"])
+    ref["reason"] = ref["abort_reason"].fillna("unknown")
+    out = ref.groupby(["scenario", "load_run", "tenant", "reason"], dropna=False).agg(
+        n=("request_id", "count"), queued_p50_ms=("queued_ms", "median")
+    ).reset_index()
+    return out
+
+
 def across_seeds(pt: pd.DataFrame) -> pd.DataFrame:
     """Per (scenario, tenant): mean and coefficient of variation of each bill across seeds."""
     t = pt.groupby(["scenario", "seed", "load_run", "tenant"], dropna=False).agg(
         per_token_usd=("per_token_usd", "sum"),
+        prompt_usd=("prompt_usd", "sum"),
         shape_usd=("shape_usd", "sum"),
         bound_usd=("bound_usd", "sum"),
         output_tokens=("output_tokens", "sum"),
@@ -266,6 +520,7 @@ def across_seeds(pt: pd.DataFrame) -> pd.DataFrame:
         seeds=("seed", "nunique"),
         per_token_usd_mean=("per_token_usd", "mean"),
         per_token_usd_std=("per_token_usd", "std"),
+        prompt_usd_mean=("prompt_usd", "mean"),
         shape_usd_mean=("shape_usd", "mean"),
         shape_usd_std=("shape_usd", "std"),
         bound_usd_mean=("bound_usd", "mean"),

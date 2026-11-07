@@ -18,6 +18,8 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
+MIN_SLEEP_S = 0.016  # below the clock resolution of some event loops a sleep returns at once
+
 WORDS = ["the", "quick", "brown", "fox", "jumps", "over", "the", "lazy", "dog", "while", "the", "meter", "counts", "every", "token", "that", "the", "fake", "replica", "emits", "at", "a", "calibrated", "rate"]
 
 
@@ -142,14 +144,30 @@ def create_fake_app(
         context = prompt_tokens + n_out
 
         async def generate():
+            """Yields (tokens_done, k, text): k tokens due by now. Tokens are scheduled on absolute
+            due times at the current step rate; sleeps never go below MIN_SLEEP_S (event-loop
+            clocks are coarse on some platforms), and tokens that fell due meanwhile go out in one
+            chunk, so the long-run rate matches the curve on every platform."""
             state.running[request_id] = context
             state.prompt_tokens += prompt_tokens
             try:
                 await asyncio.sleep(prompt_tokens / state.prefill_tps)
-                for i in range(n_out):
-                    await asyncio.sleep(1.0 / step_rate(state.curve, len(state.running)))
-                    state.generated_tokens += 1
-                    yield i, WORDS[i % len(WORDS)] + " "
+                due = time.perf_counter()
+                i = 0
+                while i < n_out:
+                    rate = step_rate(state.curve, len(state.running))
+                    due += 1.0 / rate
+                    delay = due - time.perf_counter()
+                    if delay > 0:
+                        await asyncio.sleep(max(delay, MIN_SLEEP_S))
+                    k = 1
+                    while i + k < n_out and due + k / rate <= time.perf_counter():
+                        k += 1
+                    due += (k - 1) / rate
+                    state.generated_tokens += k
+                    text = "".join(WORDS[(i + j) % len(WORDS)] + " " for j in range(k))
+                    i += k
+                    yield i, k, text
             finally:
                 state.running.pop(request_id, None)
                 state.completed += 1
@@ -158,8 +176,8 @@ def create_fake_app(
 
         if not stream:
             parts: list[str] = []
-            async for _, word in generate():
-                parts.append(word)
+            async for _, _, text in generate():
+                parts.append(text)
             return JSONResponse(
                 {
                     "id": request_id,
@@ -200,9 +218,8 @@ def create_fake_app(
         async def sse():
             yield chunk({"role": "assistant", "content": ""}, None, 0 if continuous else None)
             done = 0
-            async for i, word in generate():
-                done = i + 1
-                yield chunk({"content": word}, None, done if continuous else None)
+            async for done, _, text in generate():
+                yield chunk({"content": text}, None, done if continuous else None)
             yield chunk({}, finish_reason, done if (continuous or include_usage) else None)
             if include_usage and not continuous:
                 obj = {

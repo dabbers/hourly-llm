@@ -1,0 +1,23 @@
+{
+ "vllm_version": "0.32.0",
+ "probes": [
+  {
+   "aggressor_prefill_s": 5.24,
+   "victim_tps_before": 138.51,
+   "victim_tps_during_prefill": 5.53,
+   "victim_tps_after": 133.84,
+   "victim_tokens": 1200,
+   "victim_context": 2048,
+   "aggressor_context": 6144
+  },
+  {
+   "aggressor_prefill_s": 0.096,
+   "victim_tps_before": 138.87,
+   "victim_tps_during_prefill": 62.24,
+   "victim_tps_after": 132.96,
+   "victim_tokens": 1200,
+   "victim_context": 2048,
+   "aggressor_context": 6144
+  }
+ ]
+}

@@ -1,5 +1,6 @@
 """OpenAI-compatible API. The OpenAI `model` field names the shape to run against
-(docs/DESIGN.md section 4.1). Milestone 2: auth, shape check, per-request pacing, billing, meter."""
+(docs/DESIGN.md section 4.1). Milestone 3: auth, shape check, admission (ledgers + queue), pacing,
+billing, meter."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import __version__
+from .admission import Hold, QueueTimeout, Scheduler, Unsellable
 from .billing import Bill, bill_request
 from .clock import now
 from .config import Config, Shape, Tenant
@@ -23,32 +25,42 @@ from .replicas.base import Replica, ReplicaError, TokenChunk, Usage
 
 log = logging.getLogger("slotgw.api")
 
-_PASSTHROUGH_EXCLUDE = {"model", "shape", "stream", "stream_options"}
+_PASSTHROUGH_EXCLUDE = {"model", "shape", "stream", "stream_options", "priority"}
+PRIORITY_INTERACTIVE = 0  # vLLM --scheduling-policy priority: lower runs first
+PRIORITY_LAZY = 5
+RETRY_AFTER_S = 5
 
 
 class GatewayState:
-    def __init__(self, config: Config, meter: Meter, replicas: list[Replica]):
+    def __init__(self, config: Config, meter: Meter, replicas: list[Replica], scheduler: Scheduler | None = None):
         self.config = config
         self.meter = meter
         self.replicas = replicas
+        self.scheduler = scheduler
+        self._by_id = {r.id: r for r in replicas}
 
     def select_replica(self, shape: Shape) -> Replica | None:
-        # Milestone 2: first replica serving the shape's model. Milestone 3 replaces this with
-        # ledger-based admission and shape-affinity scoring.
+        """Without admission (milestone-2 mode): first replica serving the shape's model."""
         for r in self.replicas:
             if r.model_alias == shape.model:
                 return r
         return None
+
+    def replica_by_id(self, replica_id: str) -> Replica:
+        return self._by_id[replica_id]
 
     def pacer_for(self, shape: Shape) -> Pacer:
         p = self.config.gateway.pacing
         return Pacer(shape.tps, p.bucket_depth_s, p.enabled)
 
 
-def openai_error(status: int, message: str, code: str | None = None, type_: str = "invalid_request_error") -> JSONResponse:
+def openai_error(
+    status: int, message: str, code: str | None = None, type_: str = "invalid_request_error", headers: dict | None = None
+) -> JSONResponse:
     return JSONResponse(
         status_code=status,
         content={"error": {"message": message, "type": type_, "param": None, "code": code}},
+        headers=headers,
     )
 
 
@@ -82,6 +94,16 @@ def _load_tags(request: Request, rec: RequestRecord) -> None:
     rec.seed = int(seed) if seed and seed.lstrip("-").isdigit() else None
 
 
+def _release(state: GatewayState, hold: Hold | None) -> None:
+    if hold is not None and state.scheduler is not None:
+        state.scheduler.release(hold)
+
+
+def _prefill_done(state: GatewayState, hold: Hold | None) -> None:
+    if hold is not None and not hold.prefill_done and state.scheduler is not None:
+        state.scheduler.mark_prefill_done(hold)
+
+
 def build_router() -> APIRouter:
     router = APIRouter()
 
@@ -93,15 +115,18 @@ def build_router() -> APIRouter:
             "version": __version__,
             "run_id": state.meter.run_id,
             "pacing": state.config.gateway.pacing.model_dump(),
+            "admission": state.config.gateway.admission.model_dump(),
         }
 
     @router.get("/admin/replicas")
     async def admin_replicas(request: Request) -> dict[str, Any]:
         state: GatewayState = request.app.state.gw
+        ledgers = {ledg.id: ledg for ledg in state.scheduler.ledgers} if state.scheduler else {}
         out = []
         for r in state.replicas:
             h = await r.health()
             cc = await r.cache_config()
+            ledg = ledgers.get(r.id)
             out.append(
                 {
                     "id": r.id,
@@ -122,9 +147,14 @@ def build_router() -> APIRouter:
                         "block_size": cc.block_size,
                         "kv_tokens_total": cc.kv_tokens_total,
                     },
+                    "ledger": ledg.snapshot() if ledg else None,
                 }
             )
-        return {"replicas": out}
+        sched = None
+        if state.scheduler:
+            snap = state.scheduler.snapshot()
+            sched = {"queues": snap["queues"], "preemptions": snap["preemptions"], "timeouts": snap["timeouts"]}
+        return {"replicas": out, "scheduler": sched}
 
     @router.post("/admin/tokenize")
     async def admin_tokenize(request: Request):
@@ -236,18 +266,45 @@ def build_router() -> APIRouter:
 
         payload = {k: v for k, v in body.items() if k not in _PASSTHROUGH_EXCLUDE}
         payload["max_tokens"] = max_tokens
-        rec.t_admitted = now()  # milestone 2: no admission control, admitted on arrival
+        payload["priority"] = PRIORITY_LAZY if shape.lazy else PRIORITY_INTERACTIVE
+
+        hold: Hold | None = None
+        if state.scheduler is not None:
+            admission = state.config.gateway.admission
+            preemptable = shape.lazy and not stream and admission.lazy_preempt == "requeue"
+            try:
+                hold = await state.scheduler.admit(request_id, shape, prompt_tokens, preemptable=preemptable)
+            except Unsellable:
+                rec.status, rec.http_status, rec.abort_reason = "refused", 503, "shape_unsellable"
+                state.meter.record(rec)
+                return openai_error(
+                    503, f"no replica can honour shape {shape.name}", code="shape_unsellable", type_="server_error"
+                )
+            except QueueTimeout as e:
+                rec.status, rec.http_status, rec.abort_reason = "refused", 503, f"capacity:{e.reason}"
+                rec.queued_ms = e.waited_s * 1000.0
+                state.meter.record(rec)
+                return openai_error(
+                    503,
+                    f"no capacity for shape {shape.name} within {shape.max_queue_s:.0f}s ({e.reason})",
+                    code="capacity",
+                    type_="server_error",
+                    headers={"Retry-After": str(RETRY_AFTER_S)},
+                )
+            replica = state.replica_by_id(hold.ledger.id)
+            rec.replica = replica.id
+        rec.t_admitted = now()
         rec.queued_ms = (rec.t_admitted - rec.t_arrival) * 1000.0
         created = int(rec.t_admitted)
         pacer = state.pacer_for(shape)
 
         if stream:
             return StreamingResponse(
-                _stream_response(state, replica, shape, payload, rec, created, pacer),
+                _stream_response(state, replica, shape, payload, rec, created, pacer, hold),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Request-Id": request_id},
             )
-        return await _complete_response(state, replica, shape, payload, rec, created, pacer)
+        return await _complete_response(state, replica, shape, payload, rec, created, pacer, hold)
 
     return router
 
@@ -265,10 +322,10 @@ def _usage_dict(rec: RequestRecord, usage: Usage | None, counted: int) -> dict[s
 def _bill(state: GatewayState, rec: RequestRecord, shape: Shape) -> Bill:
     return bill_request(
         shape=shape,
-        pricing=state.config.pricing.token,
+        pricing=state.config.pricing,
         prompt_tokens=rec.prompt_tokens,
         output_tokens=rec.output_tokens,
-        wasted_tokens=rec.wasted_tokens,
+        delivered_tokens=rec.delivered_tokens,
         t_admitted=rec.t_admitted,
         t_first_token=rec.t_first_token,
         t_last_token=rec.t_last_token,
@@ -283,6 +340,7 @@ def _slotgw_dict(rec: RequestRecord, shape: Shape, pacer: Pacer, bill: Bill | No
         "ttft_ms": rec.ttft_ms,
         "queued_ms": rec.queued_ms,
         "throttled_ms": rec.throttled_ms,
+        "preempted_runs": rec.preempted_runs,
         "pacing": pacer.enabled,
     }
     if bill is not None:
@@ -290,24 +348,27 @@ def _slotgw_dict(rec: RequestRecord, shape: Shape, pacer: Pacer, bill: Bill | No
     return d
 
 
-def _finalize(rec: RequestRecord, usage: Usage | None, counted: int, pacer: Pacer) -> None:
+def _finalize(rec: RequestRecord, usage: Usage | None, counted: int, pacer: Pacer, delivered: int) -> None:
     rec.output_tokens = usage.completion_tokens if usage else counted
     if usage and usage.prompt_tokens:
         rec.prompt_tokens = usage.prompt_tokens
-    rec.output_tokens_guaranteed = rec.output_tokens  # milestone 2: everything is guaranteed
+    rec.output_tokens_guaranteed = rec.output_tokens  # milestone 3: everything is guaranteed
     rec.output_tokens_burst = 0
     rec.throttled_ms = pacer.throttled_ms
+    rec.delivered_tokens = max(0, delivered)
 
 
-async def _complete_response(
+async def _consume_engine(
     state: GatewayState,
     replica: Replica,
-    shape: Shape,
     payload: dict[str, Any],
     rec: RequestRecord,
-    created: int,
     pacer: Pacer,
-) -> JSONResponse:
+    hold: Hold | None,
+    progress: dict[str, int],
+) -> tuple[list[str], int, Usage | None, str | None, float | None]:
+    """One engine run for a complete response: drain the engine, run every chunk through the
+    bucket virtually, free the seat when the engine is done (or fails, or is cancelled)."""
     parts: list[str] = []
     counted = 0
     usage: Usage | None = None
@@ -319,9 +380,10 @@ async def _complete_response(
                 t_now = now()
                 if rec.t_first_token is None:
                     rec.t_first_token = t_now
+                    _prefill_done(state, hold)
                 counted += chunk.n_tokens
+                progress["counted"] = counted
                 parts.append(chunk.text)
-                # Virtual pacing: run the chunk through the same bucket a stream would use.
                 t_deliver = pacer.schedule(chunk.n_tokens, t_now)
                 t_release = t_deliver if t_release is None else max(t_release, t_deliver)
             if chunk.usage:
@@ -329,19 +391,68 @@ async def _complete_response(
             if chunk.finish_reason:
                 finish = chunk.finish_reason
         rec.t_engine_done = now()
-    except ReplicaError as e:
-        rec.status, rec.http_status, rec.abort_reason = "upstream_error", 502, e.detail
-        rec.t_engine_done = now()
-        _finalize(rec, usage, counted, pacer)
-        state.meter.record(rec)
-        return openai_error(502, f"replica error: {e.detail}", code="upstream_error", type_="server_error")
-    except asyncio.CancelledError:
-        rec.status, rec.abort_reason = "client_disconnect", "client_disconnect"
-        _finalize(rec, usage, counted, pacer)
-        rec.wasted_tokens = rec.output_tokens
-        state.meter.record(rec)
-        raise
-    _finalize(rec, usage, counted, pacer)
+    finally:
+        _release(state, hold)
+    return parts, counted, usage, finish, t_release
+
+
+async def _complete_response(
+    state: GatewayState,
+    replica: Replica,
+    shape: Shape,
+    payload: dict[str, Any],
+    rec: RequestRecord,
+    created: int,
+    pacer: Pacer,
+    hold: Hold | None,
+) -> JSONResponse:
+    while True:
+        progress = {"counted": 0}
+        task = asyncio.create_task(_consume_engine(state, replica, payload, rec, pacer, hold, progress))
+        if hold is not None:
+            hold.task = task
+        try:
+            parts, counted, usage, finish, t_release = await task
+            break
+        except ReplicaError as e:
+            rec.status, rec.http_status, rec.abort_reason = "upstream_error", 502, e.detail
+            rec.t_engine_done = now()
+            _finalize(rec, None, progress["counted"], pacer, 0)
+            rec.wasted_tokens += progress["counted"]
+            state.meter.record(rec)
+            return openai_error(502, f"replica error: {e.detail}", code="upstream_error", type_="server_error")
+        except asyncio.CancelledError:
+            if hold is not None and hold.preempted and state.scheduler is not None:
+                # Policy `requeue`: the run is discarded unbilled and the request re-enters at the
+                # head of the lazy queue (docs/DESIGN.md 4.1 step 9).
+                rec.preempted_runs += 1
+                rec.wasted_tokens += progress["counted"]
+                rec.t_first_token = None
+                rec.t_engine_done = None
+                pacer = state.pacer_for(shape)
+                try:
+                    hold = await state.scheduler.admit(
+                        rec.request_id, shape, rec.prompt_tokens, preemptable=True, front=True
+                    )
+                except QueueTimeout as e:
+                    rec.status, rec.http_status, rec.abort_reason = "refused", 503, f"capacity:{e.reason}"
+                    rec.queued_ms = (now() - rec.t_arrival) * 1000.0
+                    state.meter.record(rec)
+                    return openai_error(
+                        503, f"no capacity after preemption ({e.reason})", code="capacity", type_="server_error",
+                        headers={"Retry-After": str(RETRY_AFTER_S)},
+                    )
+                replica = state.replica_by_id(hold.ledger.id)
+                rec.replica = replica.id
+                rec.t_admitted = now()  # the billed run starts now; everything before is unbilled
+                rec.queued_ms = (rec.t_admitted - rec.t_arrival) * 1000.0
+                continue
+            rec.status, rec.abort_reason = "client_disconnect", "client_disconnect"
+            _finalize(rec, None, progress["counted"], pacer, 0)
+            rec.wasted_tokens += progress["counted"]
+            state.meter.record(rec)
+            raise
+    _finalize(rec, usage, counted, pacer, delivered=usage.completion_tokens if usage else counted)
     # Release the response when the paced stream would have delivered its last token (DESIGN 6).
     if t_release is not None:
         delay = t_release - now()
@@ -378,8 +489,10 @@ async def _stream_response(
     rec: RequestRecord,
     created: int,
     pacer: Pacer,
+    hold: Hold | None,
 ) -> AsyncIterator[str]:
-    """Consume the engine as fast as it produces (producer task), deliver at bucket pace."""
+    """Consume the engine as fast as it produces (producer task), deliver at bucket pace. The seat
+    is freed when the engine finishes, which can be well before delivery ends."""
     produced = 0
     delivered = 0
     usage: Usage | None = None
@@ -391,6 +504,8 @@ async def _stream_response(
         nonlocal produced, usage, finish
         try:
             async for chunk in replica.stream_chat(payload, rec.request_id):
+                if (chunk.text or chunk.n_tokens) and produced == 0:
+                    _prefill_done(state, hold)
                 produced += chunk.n_tokens
                 if chunk.usage:
                     usage = chunk.usage
@@ -407,17 +522,22 @@ async def _stream_response(
         except Exception as e:  # noqa: BLE001 - anything else is an upstream failure to the client
             rec.t_engine_done = now()
             await queue.put(ReplicaError(502, f"{type(e).__name__}: {e}"))
+        finally:
+            _release(state, hold)
 
     producer = asyncio.create_task(produce())
 
-    def chunk_obj(delta: dict[str, Any], finish_reason: str | None) -> dict[str, Any]:
-        return {
+    def chunk_obj(delta: dict[str, Any], finish_reason: str | None, delivered_tokens: int | None = None) -> dict[str, Any]:
+        obj: dict[str, Any] = {
             "id": rec.request_id,
             "object": "chat.completion.chunk",
             "created": created,
             "model": shape.name,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
         }
+        if delivered_tokens is not None:  # a chunk may carry several tokens; clients can count them
+            obj["slotgw"] = {"delivered_tokens": delivered_tokens}
+        return obj
 
     try:
         yield _sse(chunk_obj({"role": "assistant", "content": ""}, None))
@@ -434,10 +554,10 @@ async def _stream_response(
                 t_deliver = pacer.schedule(item.n_tokens, t_now)
                 if t_deliver > t_now:
                     await asyncio.sleep(t_deliver - t_now)
-                yield _sse(chunk_obj({"content": item.text}, None))
                 delivered += item.n_tokens
+                yield _sse(chunk_obj({"content": item.text}, None, delivered))
                 rec.t_last_token = now()
-        _finalize(rec, usage, produced, pacer)
+        _finalize(rec, usage, produced, pacer, delivered)
         if rec.t_last_token is None:
             rec.t_last_token = now()
         bill = _bill(state, rec, shape)
@@ -451,7 +571,7 @@ async def _stream_response(
         recorded = True
     except ReplicaError as e:
         rec.status, rec.http_status, rec.abort_reason = "upstream_error", 502, e.detail
-        _finalize(rec, usage, produced, pacer)
+        _finalize(rec, usage, produced, pacer, delivered)
         rec.wasted_tokens = max(0, produced - delivered)
         state.meter.record(rec)
         recorded = True
@@ -459,7 +579,7 @@ async def _stream_response(
         yield "data: [DONE]\n\n"
     except (asyncio.CancelledError, GeneratorExit):
         rec.status, rec.abort_reason = "client_disconnect", "client_disconnect"
-        _finalize(rec, usage, produced, pacer)
+        _finalize(rec, usage, produced, pacer, delivered)
         rec.wasted_tokens = max(0, produced - delivered)  # generated but never delivered
         state.meter.record(rec)
         recorded = True

@@ -133,7 +133,7 @@ async def test_loadgen_runs_against_gateway_and_tags_the_meter(gateway, meter_ro
     tenants = {r["tenant"] for r in ok_rows}
     assert tenants == {"chat", "agent", "notetaker", "batch"}
     streamed = [r for r in ok_rows if r["stream"] == "True"]
-    assert streamed and all(int(r["chunks"]) >= 8 for r in streamed)
+    assert streamed and all(int(r["chunks"]) >= 1 and int(r["output_tokens"]) >= 8 for r in streamed)
 
     rows = meter_rows(load_run="tiny-s7-test")
     assert len(rows) == len(ok_rows) + len([r for r in client_rows if r["status"] == "refused"])

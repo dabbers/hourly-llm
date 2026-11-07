@@ -145,6 +145,139 @@ What the run shows:
   decode. Shape prices (or a per-prompt-token component) must cover prefill before the schemes are
   compared on revenue; that is a pricing input to milestone 3/4, not a property of time-slicing.
 
+## Milestone 3 measurements (admission, prefill chunk size, overcommit, lazy requeue)
+
+All on 2026-11-07, KV budget at `VLLM_GPU_MEM=0.64` (124,688 tokens with the 128-token chunk below,
+118,453 usable after `kv_margin`), seat curve `context_6144` of the calibration file: 19 / 8 / 2
+seats at 15 / 30 / 60 tps.
+
+### Prefill chunk size (`--max-num-batched-tokens`, A4)
+
+`scripts/calibrate.py --interference-only`: one 2k-context stream decodes alone, then a 6,144-token
+prompt arrives; the victim's rate is measured before, during and after the aggressor's prefill. Raw
+probes: `calibration/interference/local-2080ti-chunk<size>.json`. Only the first of the two repeats
+counts: the second sends the same prompt and hits the prefix cache (prefill 0.09 s).
+
+| chunk tokens | aggressor prefill | victim tok/s before → during → after |
+|---|---|---|
+| 2048 (vLLM default) | 4.78 s | 137 → **1.7** → 133 |
+| 512 | 5.07 s | 138 → 3.2 → 134 |
+| 256 | 5.24 s | 139 → 5.5 → 134 |
+| 128 | 5.51 s | 138 → **9.8** → 133 |
+
+The victim gets about one decode step per prefill chunk, so its rate during a prefill is roughly the
+prefill rate divided by the chunk size (1,115 tok/s ÷ 128 ≈ 8.7, measured 9.8). A 30 tps floor would
+need ~37-token chunks, and the per-step overhead already costs 15% of prefill speed at 128 (64 and
+32 were not measured). Decision: 128 is the compose default (6× the victim rate for +15% prefill
+time); A4 stays a documented limit of this card, not something chunking removes. The per-replica cap
+on prefill tokens in flight (`SLOTGW_MAX_PREFILL_TOKENS`) bounds how many long prefills queue behind
+each other, a TTFT lever rather than a decode-rate one, and was not measured on the GPU.
+
+### GPU runs of `config/scenarios/mixed.yaml` with admission on (chunk 128)
+
+Four gateway runs on the same 18-minute timeline as the milestone-2 run (`20261106-224910`: chunk
+2048, no admission), which is the baseline column. `max_queue_s` is 30 s for the interactive shapes.
+Seeds in each cell are separated by `;`.
+
+| | M2 baseline (s1; s2) | overcommit 1.0 (s1; s2) `20261107-005416` | overcommit 1.5 (s1) `20261107-013112` | overcommit 2.0 (s1) `20261107-014935` | overcommit 1.0 + `requeue` (s1) `20261107-020804` |
+|---|---|---|---|---|---|
+| ok / refused context / refused seat | 594 / 34 / –; 575 / 27 / – | 520 / 31 / 7; 489 / 23 / 8 | 514 / 30 / 8 | 534 / 32 / 4 | 510 / 33 / 5 |
+| output tokens (per GPU-hour) | 140k (459k); 136k (447k) | 115k (377k); 110k (362k) | 115k (378k) | 118k (386k) | 110k (364k) |
+| engine running mean / max holds (with a 60 tps hold) | 4.3 / – | 2.05 / 8 (2); 2.09 / 8 (2) | 2.67 / 12 (3) | 3.44 / 13 (4) | 2.04 / 8 (2) |
+| floor violations | 301; 267 | 59; 59 | 197 | 259 | 78 |
+| violation share chat / agent / notetaker / batch | 52 / 92 / 63 / 10% | 9 / 16 / 13 / 0%; 8 / 15 / 50 / 9% | 14 / 76 / 20 / 6% | 23 / 92 / 33 / 3% | 9 / 24 / 13 / 14% |
+| chat queue wait p50 / p95 | 0 | 8.8 / 21 s; 10.2 / 25 s | 10.4 / 22 s | 9.2 / 25 s | 9.8 / 25 s |
+| per-token USD / shape USD (of which prefill) | 0.352 / 0.090 (0); 0.331 / 0.086 (0) | 0.318 / 0.244 (0.171); 0.295 / 0.227 (0.157) | 0.315 / 0.246 (0.169) | 0.327 / 0.257 (0.176) | 0.317 / 0.241 (0.170) |
+| fill / utilisation (break-even fill 58%) | – | 28 / 44%; 28 / 42% | 35 / 44% | 44 / 45% | 27 / 42% |
+| gateway preemptions / vLLM preemptions | – / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 21 / 0 |
+
+What the runs show:
+
+- **Admission never exceeded a ledger.** Replaying every admission against the calibration curve:
+  holds filled the seat ceiling exactly and never passed it; at most 2 / 3 / 4 concurrent holds while
+  a 60 tps request ran at overcommit 1.0 / 1.5 / 2.0, at most 8 / 12 / 13 otherwise. vLLM's own
+  preemption counter stayed 0 (A9). KV usage mean 6%, p95 13%.
+- **Floor violations fell 80%** (301 / 267 → 59 / 59 per run): chat 52% → 9%, agent 92% → 16%,
+  batch 10% → 0–9%, note-taker 63% → 13% / 50% (14–15 requests). The residual is prefill
+  interference: chat streams with no long prefill in flight had 0% violations at 85 tok/s engine
+  rate; with one, 19% at 49 tok/s (p10 22), against 58% and 29 tok/s (p10 13.5) in the M2 run.
+- **The price is queueing and throughput.** Output per run −18% (140k → 115k tokens; 459k → 377k
+  per GPU-hour), interactive queue wait p50 7–10 s and p95 19–26 s, 7–8 requests per run (1.4%)
+  refused `capacity:seat` after the full 30 s wait. The context refusals (23–31) are agent sessions
+  outgrowing 8k, as in M2. The cause is shape nesting: `n_max(60)` = 2 at 6k context, so one agent
+  request on the 60 tps shape shrinks the replica from 8 seats to 2 for its lifetime and idles six
+  chat slots. On this card the 60 tps shape is the one that costs capacity; the honest options are
+  to price it for the capacity it displaces or not to sell it here (Q3, milestone 4).
+- **Overcommit buys nothing on this card.** 1.5× raised engine concurrency to 2.7 and 2.0× to 3.4,
+  output tokens by 0% and +2%, queue waits not at all (p50 9–10 s), while agent violations returned
+  to 76% and 92% (the no-admission level) and chat's rose to 14% and 23%. Decode is compute-bound
+  here, so extra seats split the same step rate. `SLOTGW_TPS_OVERCOMMIT` stays 1.0.
+- **`requeue` hurts the lazy tenant without helping the interactive ones.** 21 preemptions, batch
+  completions 35 → 22, 2,270 of 7,899 batch output tokens discarded (29%), batch e2e p95 215 → 469 s;
+  chat queue p50 9.8 s vs 8.8 s, seat refusals 5 vs 7, agent violations 24% vs 16% (noise either
+  way). The seats interactive requests wait for are taken by the 60 tps rule, not by lazy work
+  (lazy share ≤ 50%, lazy queue mean 1.1). Default stays `never`.
+- **Economics with the prefill charge** ($0.10 per 1M prompt tokens): shape revenue $0.244 per run,
+  of which $0.171 prefill and $0.073 runtime, against $0.318 per-token and $0.092 GPU cost: 77% of
+  per-token revenue and 2.7× GPU cost (M2 without the charge: 26% and 1.0×). Fill 28% against a
+  break-even of 58% on the runtime-only plan price: the runtime price alone ($0.24 per hour at this
+  fill) does not pay for the GPU ($0.30 per hour), the prefill charge does. Fill counts each hold as
+  one slot of the 8 × 30 tps plan, so a 60 tps hold worth four slots' capacity counts as one;
+  utilisation (output tokens against the plan's 240 tok/s), 42–45%, is the better measure of how
+  much of the card the plan sells.
+- **Bill variance across seeds** (two seeds, overcommit 1.0; CV per-token vs shape): chat 0.26% vs
+  0.11%, agent 10.9% vs 10.1%, batch 10.0% vs 12.0%, note-taker 6.6% vs 9.0%. The prefill charge
+  makes the shape bill track prompt tokens the way the per-token bill does, so the milestone-2 gap
+  narrowed; chat, the only tenant with a large sample, still varies less under shapes.
+
+### Market reference prices (OpenRouter snapshot of 2026-11-06)
+
+`slotgw-fetch-prices` snapshotted OpenRouter's public list into `config/price_references.yaml`.
+Qwen2.5-3B is not listed; the comparables are the 3B-class open models, and `basket-3b` (their
+median) is now the active reference, so shape prices derived from it are 4× below the gpt-4o-mini
+placeholder the milestone-2/3 runs were billed at (30 tps: $4.5 per million seconds instead of $18;
+prefill $0.0755 per 1M prompt tokens instead of $0.10).
+
+| reference | $/1M in | $/1M out | M3 run revenue | × GPU cost | gross margin | break-even GPU $/h (44% / 70% util.) |
+|---|---|---|---|---|---|---|
+| gemma-3-4b | 0.050 | 0.100 | $0.094 | 1.03 | 3% | 0.31 / 0.50 |
+| llama-3.2-3b | 0.051 | 0.335 | $0.121 | 1.32 | 24% | 0.40 / 0.64 |
+| **basket-3b** (median, active) | 0.0755 | 0.150 | $0.142 | 1.56 | 36% | 0.47 / 0.76 |
+| ministral-3b | 0.100 | 0.100 | $0.177 | 1.94 | 48% | 0.58 / 0.94 |
+| qwen-2.5-7b | 0.100 | 0.200 | $0.188 | 2.06 | 51% | 0.62 / 1.00 |
+| gpt-4o-mini (old placeholder) | 0.150 | 0.600 | $0.314 | 3.45 | 71% | 1.03 / 1.67 |
+
+Revenue is the mean over the five admission-on runs above (1.6–1.8M prompt and 110–118k output
+tokens each, GPU cost $0.091–0.092 at $0.30 per hour, utilisation 42–45%); lazy requests at the
+batch discount. Prices this provider would have to list to earn a gross margin on that traffic
+(overcommit 1.0, seed 1; prompt tokens weighted at the basket's 1:2 input:output ratio):
+
+| gross margin | $/1M in / out at 44% utilisation | × basket out price | at 70% utilisation | × basket |
+|---|---|---|---|---|
+| 0% | 0.048 / 0.096 | 0.64 | 0.030 / 0.060 | 0.40 |
+| 25% | 0.064 / 0.128 | 0.85 | 0.040 / 0.080 | 0.53 |
+| 50% | 0.097 / 0.192 | 1.28 | 0.060 / 0.120 | 0.80 |
+
+What it says:
+
+- **At market prices the card is viable on this traffic, with a caveat.** A $0.30-per-hour 2080 Ti
+  serving the AWQ 3B model earns 1.56× its cost at the 3B basket's prices at the measured 44%
+  utilisation (36% gross margin), 1.03× at the cheapest listing (Gemma 3 4B) and 3.45× at the
+  gpt-4o-mini placeholder, which is why the earlier economics looked comfortable. To earn 25% it
+  could list 15% below the basket today, or 47% below at 70% utilisation; it can afford a GPU up to
+  $0.47 per hour at break-even ($0.76 at 70%).
+- **The revenue is in prompt tokens.** 1.7M prompt tokens against 115k output tokens: at the
+  basket, 90% of the per-token revenue is input. The same holds for shape bills once the prefill
+  charge is at parity, and the runtime part alone (8 × 30 tps × $4.5 per million seconds = $0.13 per
+  hour at 100% fill) can never pay for a $0.30-per-hour card: on prompt-heavy traffic a price per
+  second of decode is the smaller half of the bill, and the prefill charge is not optional.
+- **The caveat**: the meter counts every prompt token at the input price, but the agent profile's
+  growing history is mostly prefix-cache hits inside vLLM, and providers that publish cache-read
+  prices discount them (Ministral 3B 90%, gpt-4o-mini 50%). The margins above are upper bounds
+  until cached tokens are metered and priced separately (DESIGN.md §13).
+- **Variance is unchanged by the reference**: both bills scale with the same token counts, so the
+  milestone-2/3 predictability findings hold at any reference; only the level moves.
+
 ## Environment the numbers depend on
 
 - Docker Desktop 4.2.0 with the WSL driver-store workaround (`scripts/vllm-entrypoint.sh`); WSL kernel
@@ -152,3 +285,7 @@ What the run shows:
 - The GPU also drives the Windows desktop (WDDM). Free memory at vLLM start varies with what else is
   open; the calibration file records the free memory it saw. Close LM Studio before runs.
 - Numbers are for this card and this model build; phase-2 replicas get their own calibration files.
+- The fake replica (tests, `--profile fake`) schedules tokens on absolute due times with a 16 ms
+  minimum sleep and emits several tokens per chunk when behind: on Windows the asyncio clock has
+  15.6 ms resolution and treats shorter sleeps as already due whenever the loop is busy, which made
+  the fake 20x too fast in streaming mode before this fix. Inside Docker (Linux) sleeps are accurate.

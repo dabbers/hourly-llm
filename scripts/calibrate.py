@@ -249,6 +249,9 @@ async def main() -> None:
     p.add_argument("--config-dir", default="config")
     p.add_argument("--out", default=None)
     p.add_argument("--skip-interference", action="store_true")
+    p.add_argument("--interference-only", action="store_true",
+                   help="run only the prefill interference probe and print it as JSON (no calibration file)")
+    p.add_argument("--repeat", type=int, default=1, help="repeat the interference probe this many times")
     args = p.parse_args()
 
     levels = [int(x) for x in args.concurrency.split(",")]
@@ -293,6 +296,19 @@ async def main() -> None:
         }
         warm = await build_prompt(client, args.url, model, 256, nonce + "-warm")
         await one_stream(client, args.url, model, warm, 16)
+
+        if args.interference_only:
+            victim = await build_prompt(client, args.url, model, min(contexts), nonce + "-victim")
+            aggressor = await build_prompt(client, args.url, model, max(contexts), nonce + "-aggressor")
+            probes = []
+            for _ in range(args.repeat):
+                probe = await interference_probe(client, args.url, model, victim, aggressor, 1200)
+                probe.update({"victim_context": min(contexts), "aggressor_context": max(contexts)})
+                probes.append(probe)
+                print(json.dumps(probe))
+            if args.out:
+                Path(args.out).write_text(json.dumps({"vllm_version": version, "probes": probes}, indent=1))
+            return
 
         for ctx in contexts:
             print(f"\n== context {ctx} ==")

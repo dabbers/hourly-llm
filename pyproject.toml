@@ -25,6 +25,7 @@ slotgw = "slotgw.main:main"
 slotgw-fake-replica = "slotgw.replicas.fake_server:main"
 slotgw-loadgen = "loadgen.main:main"
 slotgw-report = "report.build:main"
+slotgw-fetch-prices = "slotgw.prices:main"
 
 [build-system]
 requires = ["hatchling"]

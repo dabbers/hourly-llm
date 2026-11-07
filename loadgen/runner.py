@@ -65,7 +65,12 @@ class ClientRecord:
 
 
 CLIENT_COLUMNS = [f.name for f in fields(ClientRecord)] + ["ttft_ms", "e2e_ms"]
-SAMPLE_COLUMNS = ["t", "replica", "kv_usage", "running", "waiting", "preemptions", "client_inflight"]
+SAMPLE_COLUMNS = [
+    "t", "replica", "kv_usage", "running", "waiting", "preemptions", "client_inflight",
+    # gateway ledger view (milestone 3; empty when admission is off)
+    "ledger_running", "ledger_lazy_running", "ledger_kv_held", "ledger_kv_usable", "seats_now",
+    "prefill_tokens_in_flight", "queue_interactive", "queue_lazy", "gw_preemptions", "gw_timeouts",
+]
 
 
 class CsvSink:
@@ -110,15 +115,19 @@ class LoadRunner:
         config_dir: str | Path | None = None,
         scenario_path: str | Path | None = None,
         progress_every_s: float = 10.0,
+        label: str | None = None,
     ):
         self.scenario = scenario
         self.plan = plan
         self.gateway_url = gateway_url.rstrip("/")
         self.runs_dir = Path(runs_dir)
-        self.load_run_id = load_run_id or f"{scenario.name}-s{plan.seed}-{time.strftime('%Y%m%d-%H%M%S')}"
+        stem = f"{scenario.name}-{label}" if label else scenario.name
+        self.load_run_id = load_run_id or f"{stem}-s{plan.seed}-{time.strftime('%Y%m%d-%H%M%S')}"
         self.config_dir = Path(config_dir) if config_dir else None
         self.scenario_path = Path(scenario_path) if scenario_path else None
         self.progress_every_s = progress_every_s
+        self.label = label
+        self.scenario_label = f"{scenario.name}+{label}" if label else scenario.name
         self.counters = Counters()
         self.out_dir: Path | None = None
         self.gateway_run_id: str | None = None
@@ -181,7 +190,8 @@ class LoadRunner:
             ended = datetime.now(UTC)
             meta = {
                 "load_run": self.load_run_id,
-                "scenario": self.scenario.name,
+                "scenario": self.scenario_label,
+                "label": self.label,
                 "seed": self.plan.seed,
                 "gateway_url": self.gateway_url,
                 "gateway_run_id": self.gateway_run_id,
@@ -312,12 +322,12 @@ class LoadRunner:
         headers = {
             "Authorization": f"Bearer {tp.api_key}",
             "X-Slotgw-Run": self.load_run_id,
-            "X-Slotgw-Scenario": self.scenario.name,
+            "X-Slotgw-Scenario": self.scenario_label,
             "X-Slotgw-Seed": str(self.plan.seed),
         }
         rec = ClientRecord(
             load_run=self.load_run_id,
-            scenario=self.scenario.name,
+            scenario=self.scenario_label,
             seed=self.plan.seed,
             tenant=tp.name,
             session=session.id,
@@ -444,8 +454,12 @@ class LoadRunner:
             try:
                 r = await client.get("/admin/replicas", timeout=5)
                 t = now()
-                for rep in r.json().get("replicas", []):
+                body = r.json()
+                sched = body.get("scheduler") or {}
+                queues = sched.get("queues") or {}
+                for rep in body.get("replicas", []):
                     h = rep.get("health") or {}
+                    lg = rep.get("ledger") or {}
                     self._sample_sink.write(
                         {
                             "t": t,
@@ -455,6 +469,16 @@ class LoadRunner:
                             "waiting": h.get("waiting"),
                             "preemptions": h.get("preemptions"),
                             "client_inflight": self.counters.inflight,
+                            "ledger_running": lg.get("running"),
+                            "ledger_lazy_running": lg.get("lazy_running"),
+                            "ledger_kv_held": lg.get("kv_held"),
+                            "ledger_kv_usable": lg.get("kv_usable"),
+                            "seats_now": lg.get("seats_now"),
+                            "prefill_tokens_in_flight": lg.get("prefill_tokens_in_flight"),
+                            "queue_interactive": queues.get("interactive"),
+                            "queue_lazy": queues.get("lazy"),
+                            "gw_preemptions": sched.get("preemptions"),
+                            "gw_timeouts": sched.get("timeouts"),
                         }
                     )
             except (httpx.HTTPError, ValueError) as e:

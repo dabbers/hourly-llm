@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS requests (
   abort_reason TEXT,
   load_run TEXT,
   scenario TEXT,
-  seed INTEGER
+  seed INTEGER,
+  delivered_tokens INTEGER
 );
 """
 
@@ -74,6 +75,7 @@ class RequestRecord:
     load_run: str | None = None  # set from X-Slotgw-Run by the load generator
     scenario: str | None = None
     seed: int | None = None
+    delivered_tokens: int = 0  # tokens the client actually received (billed quantity)
 
     @property
     def ttft_ms(self) -> float | None:
@@ -104,7 +106,9 @@ class Meter:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA)
         have = {row[1] for row in self._conn.execute("PRAGMA table_info(requests)")}
-        for col, typ in (("load_run", "TEXT"), ("scenario", "TEXT"), ("seed", "INTEGER")):
+        for col, typ in (
+            ("load_run", "TEXT"), ("scenario", "TEXT"), ("seed", "INTEGER"), ("delivered_tokens", "INTEGER")
+        ):
             if col not in have:  # meter files written before milestone 2
                 self._conn.execute(f"ALTER TABLE requests ADD COLUMN {col} {typ}")
         self._conn.commit()

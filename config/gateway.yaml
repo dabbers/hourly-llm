@@ -2,3 +2,13 @@
 pacing:
   enabled: true          # false = milestone-1 passthrough (tokens leave as fast as the engine makes them)
   bucket_depth_s: 1.0    # per-request token bucket depth, in seconds of the shape's rate
+admission:
+  enabled: true                   # false = milestone-2 behaviour (no ledgers, no queue)
+  kv_margin: 0.05                 # A3: KV headroom for block rounding and transient allocations
+  tps_margin: 0.10                # A3: calibration noise on the step-rate curve
+  tps_overcommit: ${SLOTGW_TPS_OVERCOMMIT:-1.0}             # the vCPU lever: seats = n_max x overcommit
+  lazy_max_share: 0.5                                       # lazy shapes hold at most this share of seats
+  lazy_preempt: ${SLOTGW_LAZY_PREEMPT:-never}               # never | requeue (interactive evicts lazy)
+  max_prefill_tokens_in_flight: ${SLOTGW_MAX_PREFILL_TOKENS:-0}  # prompt tokens prefilling at once; 0 = off
+  dispatch_tick_s: 0.25
+  health_interval_s: 5.0

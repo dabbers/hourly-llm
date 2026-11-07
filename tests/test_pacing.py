@@ -54,7 +54,8 @@ def test_pacer_throttled_time_is_wall_time_held_by_bucket():
 
 
 async def _stream_token_times(gateway, body, headers=CHAT_KEY):
-    times: list[float] = []
+    """(time, cumulative delivered tokens) per content chunk, plus the final chunk."""
+    times: list[tuple[float, int]] = []
     final = None
     async with (
         httpx.AsyncClient(base_url=gateway.url, timeout=60) as c,
@@ -72,7 +73,7 @@ async def _stream_token_times(gateway, body, headers=CHAT_KEY):
                 raise AssertionError(obj)
             choice = obj["choices"][0]
             if choice["delta"].get("content"):
-                times.append(now())
+                times.append((now(), obj["slotgw"]["delivered_tokens"]))
             if choice["finish_reason"]:
                 final = obj
     return times, final
@@ -84,12 +85,13 @@ async def test_stream_is_paced_at_shape_rate(gateway, meter_rows):
     n = 120
     body = {"model": "small.8k.30tps", "messages": MESSAGES, "max_tokens": n, "ignore_eos": True, "stream": True}
     times, final = await _stream_token_times(gateway, body)
-    assert len(times) == n
+    assert times[-1][1] == n
     depth = 30  # 1 s of 30 tps
-    steady = times[depth - 1 :]
-    rate = (len(steady) - 1) / (steady[-1] - steady[0])
+    t0, c0 = next((t, c) for t, c in times if c >= depth)
+    t1, c1 = times[-1]
+    rate = (c1 - c0) / (t1 - t0)
     assert rate == pytest.approx(30.0, rel=0.05), f"steady-state delivered rate {rate:.1f} tok/s"
-    assert times[depth - 1] - times[0] < 1.0  # the bucket's head start went out fast
+    assert t0 - times[0][0] < 1.0  # the bucket's head start went out fast
     assert final["slotgw"]["pacing"] is True
     assert final["slotgw"]["throttled_ms"] > 1500  # engine was ~3 s ahead of delivery
     bill = final["slotgw"]["billing"]

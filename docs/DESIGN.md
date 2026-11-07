@@ -228,6 +228,14 @@ concurrent streams at two context lengths (≈2k and ≈6k) and writes `calibrat
 admits a request of shape tps `t` only if, afterwards, `n_running ≤ n_max(max tps among running requests
 including this one)`. The fastest running shape sets the ceiling, which is the price of honouring it.
 
+Implementation (milestone 3, `slotgw/calibration.py`, `slotgw/admission.py`): the gateway loads one
+calibration level per replica (`replicas.yaml` `calibration:` + optional `curve_context:`, default the
+longest context measured) or an inline `curve:` for fakes, and interpolates linearly between measured
+points (a chord under a convex decay curve, so slightly conservative) and extrapolates past the last
+point. On the 2080 Ti's 6k-context curve that gives 19 / 8 / 2 seats at 15 / 30 / 60 tps, against
+16 / 8 / 2 from measured points alone. A request holds its seat and KV from admission until the
+engine finishes; paced delivery may continue afterwards without holding capacity.
+
 **Overcommit (the vCPU lever).** `tps_overcommit` (default 1.0 = strict) allows
 `n_running ≤ n_max × tps_overcommit`. Above 1.0 the provider sells more floors than the replica can
 honour if every seat streams at once; as with vCPU overcommit the cost is "steal" (floor violations),
@@ -243,7 +251,7 @@ and `300tps` shapes belong to phase-2 GPUs (or to tenant-aggregate bundles, see 
 - **A1** KV is held worst case for the request's shape (`max_context`), not its actual length, so a short request in a big shape still pays the shape's KV. No KV overcommit.
 - **A2** Prefix caching stays enabled (it helps growing-context profiles) but the budget never counts on it; cached blocks are evictable and count as free in vLLM too.
 - **A3** `kv_margin` (5%) covers block rounding and transient allocations; `tps_margin` (10%) covers calibration noise.
-- **A4** The shape's tps applies to steady-state decode. Prefill of long prompts (chunked prefill) slows concurrent decode steps. **Measured on the 2080 Ti (ASSUMPTIONS.md): a 6k-token prefill takes 4.6 s and drops a concurrently decoding stream from 130 to 1.7 tokens/s for that time.** Phase 1 reports the resulting floor violations; M3 measures the mitigations (smaller `--max-num-batched-tokens`, a per-replica cap on concurrent prefill tokens at admission, vLLM priority scheduling) and picks one.
+- **A4** The shape's tps applies to steady-state decode. Prefill of long prompts (chunked prefill) slows concurrent decode steps. **Measured on the 2080 Ti (ASSUMPTIONS.md): a 6k-token prefill takes 4.8 s and drops a concurrently decoding stream from 137 to 1.7 tokens/s at vLLM's default 2048-token chunk, and to 9.8 tokens/s at 128-token chunks (+15% prefill time); the victim gets about one decode step per chunk.** Milestone 3 decision: `--max-num-batched-tokens 128` is the default, and the floor during a long prefill stays a documented limit of this card (the billing cap keeps the customer from paying for it, §8). The per-replica cap on prefill tokens in flight (`max_prefill_tokens_in_flight`) bounds TTFT queueing, not decode rate, and vLLM priority (0 interactive, 5 lazy) is set but its effect was not isolated; neither was measured on the GPU.
 - **A5** Pacing happens at the gateway (delivery), not inside the engine (§6). GPU work per token is the same with or without pacing; pacing changes *when* tokens are delivered and therefore the closed-loop arrival rate.
 - **A6** fp16 KV cache; an fp8 KV cache is not assumed to work on Turing.
 - **A7** One model per replica; shapes name the model; no cross-model packing.
@@ -263,6 +271,17 @@ This is where "optimize the requests intelligently" lives, and it is pure policy
    with several it naturally sorts fast interactive shapes and slow lazy shapes onto different replicas.
 3. **Filler**: lazy requests are admitted only when no interactive request is waiting for that replica,
    so idle capacity is filled without delaying paying interactive traffic.
+
+Queue semantics (milestone 3): two FIFO queues, interactive and lazy; strict FIFO within a class
+(a big request at the head is never overtaken, so it cannot starve); lazy work is dispatched only when
+the interactive queue is empty; a waiter times out after its shape's `max_queue_s` with
+`503 capacity` + `Retry-After`, metered as `refused` with the ledger rule it last failed
+(`capacity:seat|kv|lazy_share|prefill`). A shape no replica can honour even alone is refused at once
+(`503 shape_unsellable`). Policy `requeue` evicts the youngest preemptable lazy run whose removal alone
+makes a waiting interactive request fit; only complete-mode lazy requests are preemptable (a stream
+that has already delivered tokens cannot be restarted transparently), the discarded run's tokens are
+`wasted_tokens`, `preempted_runs` counts, and the request re-enters at the head of the lazy queue.
+`/admin/replicas` exposes every ledger and the queues; the load generator samples them.
 
 Fake replicas make all of this testable without a second GPU.
 
@@ -361,14 +380,43 @@ shrinks. That cap is what makes the bill predictable (an upper bound known in ad
 quantity honest. The report also shows the uncapped wall-clock and the bound so the gap is visible.
 Preempted lazy runs are discarded and unbilled; only the completed run counts.
 
-Placeholder shape prices are derived from the per-token reference so that `$/output token at the
-guaranteed rate` (= `price_per_second ÷ tps`) matches the reference for interactive shapes and the
-discounted reference for lazy shapes; `pricing.yaml` can override every number.
+Shape prices are derived from the per-token reference so that `$/output token at the guaranteed
+rate` (= `price_per_second ÷ tps`) matches the reference for interactive shapes and the discounted
+reference for lazy shapes, × a per-shape `price_premium` (1.25 for 16k context); a shape that sets
+`price_per_second` keeps it.
+
+Price references (post-milestone 3): the per-token reference is a market price point, not a
+placeholder. `slotgw-fetch-prices` snapshots OpenRouter's public model list (no key) into
+`config/price_references.yaml` with the fetch date: the 3B-class open models comparable to the
+Qwen2.5-3B served here (Llama 3.2 3B, Gemma 3 4B, Ministral 3B, Qwen 2.5 7B), `gpt-4o-mini` (the
+original placeholder), and `basket-3b`, the median of the 3B-class members and the default.
+`pricing.yaml` `reference:` (env `SLOTGW_PRICE_REFERENCE`) picks the active one, which sets the
+per-token bills, the derived shape prices and, with `prompt_usd_per_million: auto`, the prefill
+charge (parity with the market's input price). `custom` uses the token block's own numbers. Load
+runs snapshot the references file, so a report reproduces the prices a run was billed at.
+
+Margin basis: the report prices every run's traffic under every reference and compares it with GPU
+cost (`provider.gpu_usd_per_hour`): gross margin = 1 − cost ÷ revenue, and the GPU price per hour at
+which a reference breaks even. Because providers' margins are not public, the report also lists the
+prices *this* provider would have to charge at each `provider.margin_targets` (0%, 25%, 50% of
+revenue) given its measured cost per token, at the measured utilisation and as if the slot plan ran
+at `provider.target_utilization` (70%; cost per token scales with measured ÷ target). Prompt tokens
+are converted to output-equivalent tokens at the market reference's input:output price ratio so one
+output price covers the bill, and the input price follows at that ratio. Prompt tokens served from
+vLLM's prefix cache are charged in full, so revenue at a reference is an upper bound for multi-turn
+traffic (§13).
 
 Every response carries the bill it would get under both schemes in its `slotgw.billing` object
 (`billed_s`, `bound_s`, `wall_s`, `shape_usd`, `bound_usd`, `per_token_usd`, `delivered_tokens`), and
 `slotgw.throttled_ms`, so a customer can audit a request without the meter (`slotgw/billing.py`).
 The report recomputes the same numbers from the meter rows with the config snapshot of the run.
+
+Prefill charge (milestone 3): `pricing.yaml` `shape.prompt_usd_per_million` adds
+`prompt_tokens × price` to every shape bill (billed, bound and uncapped alike, so the cap still
+bounds the runtime part). The milestone-2 GPU run showed why: prefill is GPU time at a different
+rate than decode, and a `price_per_second` derived from the output-token reference leaves it free.
+The default is derived from measured cost (ASSUMPTIONS.md "Prefill pricing"); 0 restores
+runtime-only bills. The report shows the prefill component of each bill separately.
 
 Token classification: each delivered token draws from the guaranteed bucket first; if that bucket is
 empty and burst rate is lent, the token is burst. Prompt tokens are guaranteed if the request is within
@@ -447,6 +495,11 @@ Provider economics: revenue under each scheme, GPU cost, analytic break-even fil
 `f* = gpu_$/h ÷ (Σ_slots price_per_second × 3600)` for the slot plan, and the fill rate at which shape
 revenue overtakes per-token revenue for the measured workload mix, per overcommit setting.
 
+Market reference prices (`market.csv`, `list_prices.csv`): the run's traffic priced under every
+reference in `price_references.yaml`, × GPU cost, × shape revenue, gross margin and break-even GPU
+price at the measured and the target utilisation; and the per-token prices this provider would have
+to list at each margin target (§8).
+
 ---
 
 ## 11. Milestones
@@ -459,6 +512,15 @@ revenue overtakes per-token revenue for the measured workload mix, per overcommi
 | **M4** burst manager | tps and context bursts, priority classes, revocation policies, bursting-on vs off runs in report; written answers to Q1–Q4 in `docs/RESULTS.md` | revocation under injected guaranteed load restores shape rates within one tick; report shows burst share, revocations, floor violations, utilization with/without bursting |
 
 Each milestone ends with: tests green, `docker compose up` works from a clean checkout, docs updated.
+
+Status (2026-11-07): M1 and M2 done and verified on the GPU (ASSUMPTIONS.md). M3 done: ledgers,
+queues, scheduler, `requeue`, overcommit, slot plan and the replica section of the report. Acceptance
+met by unit tests with fake replicas (a small shape placed into a larger free slot, fast and lazy
+shapes separated across replicas, lazy work never ahead of a waiting interactive request, admission
+never over a ledger) and by the GPU runs (every admission replayed against the calibration curve
+stayed within the seat ceiling; vLLM preemptions 0). Not done as written: the combined 1 real + 3
+fake replica run; the GPU runs used the single real replica. Measured outcomes and the defaults they
+set (chunk 128, overcommit 1.0, `requeue` off) are in ASSUMPTIONS.md "Milestone 3 measurements".
 
 ---
 
@@ -485,6 +547,17 @@ Each milestone ends with: tests green, `docker compose up` works from a clean ch
 | Report charts (M2) | Inline SVG generated in Python instead of Chart.js | Self-contained offline HTML without vendoring a JS library; the CSVs carry the numbers, native `<title>` tooltips carry hover values. |
 | Bucket head start (M2) | `bucket_depth_s = 1.0`: the first second of tokens leaves unpaced | Per §6; a floor violation is a delivered rate below 95% of the promise over the whole stream, which the head start can only help, and the billing cap already bounds what the customer pays. |
 | Agent context overflow (M2) | Sent as specified; the gateway refuses with 429 and the session ends | Keeps the profile honest to the brief and gives milestone 4's context bursts a measured baseline instead of hiding the problem in the load generator. |
+| Seat curve (M3) | Linear interpolation between calibration levels, extrapolation past the last; one level per replica (longest context by default) | Conservative on a convex decay curve, finer than measured points only; the level choice is a config knob (`curve_context`). |
+| Queues (M3) | Two strict-FIFO queues (interactive, lazy); lazy dispatched only when no interactive request waits; `max_queue_s` → `503 capacity` + `Retry-After` | No starvation of large requests, no lazy work ahead of paying interactive traffic, refusals carry the ledger rule that blocked them. |
+| Lazy preemption (M3) | `requeue` evicts only complete-mode lazy runs, youngest first, and only when that alone makes the interactive request fit | A delivered stream cannot be restarted invisibly; the youngest run wastes the least work. Default stays `never`. |
+| Slot plan (M3) | `replicas.yaml` `slot_plan` (e.g. 8 × small.8k.30tps) is the provider's sellable-capacity accounting for fill rate and break-even | Admission is by resources, so the plan is a reporting choice, not a constraint; the report falls back to the current config for runs whose snapshot has none. |
+| Prefill price (M3) | `pricing.shape.prompt_usd_per_million`: $0.10 per 1M prompt tokens in the milestone-3 runs (measured prefill cost × the decode markup); default now `auto` = the active reference's input price | Prefill was unpriced under shapes (M2 finding); parity with the market's input price once a market reference exists; the report itemises it. |
+| Price reference (post-M3) | `config/price_references.yaml` snapshotted from OpenRouter by `slotgw-fetch-prices`; default `basket-3b` (median of Llama 3.2 3B, Gemma 3 4B, Ministral 3B, Qwen 2.5 7B), `gpt-4o-mini` kept as a named alternative; shape prices derive from the active reference | User: compare against OpenRouter's prices and find where we would have to price. Qwen2.5-3B is not listed, so a basket of 3B-class models; a snapshot keeps runs reproducible. |
+| Margin basis (post-M3) | Gross margin on revenue at 0 / 25 / 50% and a 70% target utilisation, both config knobs; list prices from measured cost per output-equivalent token | Providers' margins are not public, so a sweep instead of a guess; the two utilisation bases bracket the phase-2 question (a fuller plan or a cheaper card). |
+| Run-time knobs (M3) | `SLOTGW_TPS_OVERCOMMIT`, `SLOTGW_LAZY_PREEMPT`, `SLOTGW_MAX_PREFILL_TOKENS`, `SLOTGW_PROMPT_USD_PER_MILLION`, `SLOTGW_PRICE_REFERENCE`, `VLLM_MAX_NUM_BATCHED_TOKENS` as environment overrides | Lets `docker compose` runs vary one setting per run without editing config; the load generator's `--label` keeps them apart in the report. |
+| Prefill chunk (M3, measured) | `VLLM_MAX_NUM_BATCHED_TOKENS` default 128 | 6× the concurrent decode rate during a 6k prefill for +15% prefill time; no practical chunk size holds a 30 tps floor on this card (ASSUMPTIONS.md). |
+| Overcommit default (M3, measured) | 1.0 | 1.5 and 2.0 added no output on the compute-bound card and returned the 60 tps shape's violations to the no-admission level. |
+| Lazy requeue default (M3, measured) | `never` | 29% of the lazy tenant's tokens wasted for no measurable gain to interactive tenants: the seats they wait for are taken by the 60 tps nesting rule, not by lazy work. |
 
 ---
 
@@ -493,9 +566,11 @@ Each milestone ends with: tests green, `docker compose up` works from a clean ch
 - Turing gets the Triton attention backend without tensor-core MMA (§2.1): prefill of 3k–8k note-taker prompts will take seconds and will visibly slow concurrent decode (A4); feasible shapes on this card are slow. Calibration decides, names stay config, and the v0.23.0 escape hatch exists (Q12).
 - No public report of vLLM v0.32.0 on Turing under Docker Desktop/WSL2; the M1 smoke test is the real confirmation. Fallbacks in order: `--enforce-eager`, the `v0.23.0` image, native WSL2 install.
 - Desktop apps share the GPU (WDDM). Free memory varies run to run; the calibration script records it, and runs should close LM Studio.
-- Prefill interference (A4) is not noise on this card, it is a pause: one long prompt stalls every running stream for seconds. Without a mitigation in M3 the 30/60 tps shapes are honest only while no long prompt is prefilling.
+- Prefill interference (A4) is not noise on this card, it is a pause: one long prompt stalls every running stream for seconds. Milestone 3 measured the chunk-size mitigation (ASSUMPTIONS.md): 128-token chunks lift the stalled stream from 1.7 to 9.8 tok/s, still under every shape sold, so a 30 tps floor is honest only while no long prompt is prefilling. With admission on, 19% of chat streams that overlap a long prefill still violate (58% before); the provider carries it through the cap.
+- Revenue at a market reference charges every prompt token at the input price, but vLLM serves most of a multi-turn agent's history from the prefix cache, and providers that publish cache-read prices discount them (Ministral 3B 90%, gpt-4o-mini 50% on OpenRouter). The meter does not record cached tokens yet, so the market revenue, margin and list prices are upper bounds for prompt-heavy traffic; recording `cached_tokens` from vLLM's usage and pricing cache hits separately is the fix.
+- Shape nesting makes the fastest shape sold the capacity cost of the whole replica: `n_max(60)` = 2 at 6k context, so one agent request idles six of eight 30 tps slots for its lifetime (ASSUMPTIONS.md, M3). Selling 60 tps on this card needs its own price or its own replica (Q3, milestone 4).
 - Wall-clock billing needs honest timestamps: queue time must be excluded and the cap needs TTFT, so arrival, admission, first-token, engine-done and delivered are separate meter columns.
-- Prefill is GPU time that the placeholder shape prices do not cover: `price_per_second` was derived from the output-token reference, so a long prompt bills only its TTFT seconds at the decode rate. Measured in the milestone-2 GPU run (ASSUMPTIONS.md): 1.9M prompt tokens vs 140k output tokens, shape revenue a quarter of per-token revenue, roughly GPU cost. Milestone 3 must price prefill (a prompt-token component, or a price per second that includes the measured prefill share) before the schemes are compared on provider revenue.
+- Prefill is GPU time that the placeholder shape prices do not cover: `price_per_second` was derived from the output-token reference, so a long prompt bills only its TTFT seconds at the decode rate. Measured in the milestone-2 GPU run (ASSUMPTIONS.md): 1.9M prompt tokens vs 140k output tokens, shape revenue a quarter of per-token revenue, roughly GPU cost. Milestone 3 added `shape.prompt_usd_per_million` ($0.10, a placeholder derived from measured prefill cost): with it, shape revenue is 77% of per-token and 2.7× GPU cost in the admission-on runs, and prefill is 70% of the shape bill. The runtime price alone ($0.24 per hour at 28% fill) does not pay for the GPU ($0.30 per hour), so milestone 4's comparison hinges on this price as much as on time-slicing.
 - Under wall-clock billing every tps burst is revenue given away; the report quantifies it so the provider can decide how much latency goodwill to buy.
 - Python gateway overhead at a few hundred tokens/s across tens of streams is fine; at phase-2 scale (3–4 replicas) still fine; beyond that a Go rewrite would be the answer.
 
@@ -508,7 +583,7 @@ vLLM/
   compose.yaml                 # vllm (gpu profile), gateway, fake replicas (fake profile), loadgen/report as run-once services
   config/{shapes,tenants,replicas,pricing,gateway}.yaml, config/scenarios/*.yaml
   calibration/<replica>.yaml   # measured KV + step-rate curves + feasible shapes
-  slotgw/                      # gateway: api.py, config.py, pacing.py, billing.py, meter.py, clock.py, replicas/
+  slotgw/                      # gateway: api.py, config.py, admission.py, calibration.py, pacing.py, billing.py, prices.py, meter.py, clock.py, replicas/
   loadgen/                     # scenario.py, arrivals.py, plan.py, content.py, runner.py, main.py
   report/                      # metrics.py, charts.py (inline SVG), html.py, build.py
   scripts/calibrate.py

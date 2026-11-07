@@ -1,7 +1,19 @@
-# Reference per-token prices (placeholders, gpt-4o-mini-class) and provider cost.
+# Prices. The per-token reference comes from a market price point in price_references.yaml
+# (snapshotted from OpenRouter by `slotgw-fetch-prices`); shape prices derive from it unless
+# shapes.yaml sets price_per_second explicitly. Every number is a knob.
+reference: ${SLOTGW_PRICE_REFERENCE:-basket-3b}   # a name in price_references.yaml, or custom
 token:
+  batch_discount: 0.5          # applied to lazy requests under the per-token reference
+  # used only when reference is custom (or price_references.yaml is absent): the original
+  # gpt-4o-mini-class placeholder
   input_usd_per_million: 0.15
   output_usd_per_million: 0.60
-  batch_discount: 0.5          # applied to lazy requests under the per-token reference
 provider:
   gpu_usd_per_hour: 0.30       # placeholder rental price for a 2080 Ti-class GPU
+  target_utilization: 0.70     # the report also prices cost per token as if the plan ran at this utilisation
+  margin_targets: [0.0, 0.25, 0.5]   # gross margins (on revenue) the report lists our per-token prices at
+shape:
+  # Prefill charge on top of price_per_second, USD per million prompt tokens. auto = the reference's
+  # input price (parity with the market); a number overrides (0.10 was the milestone-3 value: measured
+  # prefill cost ~$0.057/1M at 6k context x 1.7); 0 = runtime-only shape bills (milestone-2 numbers).
+  prompt_usd_per_million: ${SLOTGW_PROMPT_USD_PER_MILLION:-auto}

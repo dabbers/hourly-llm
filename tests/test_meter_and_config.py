@@ -31,7 +31,7 @@ def test_config_rejects_dangling_references():
 
 def test_env_expansion_in_replicas(monkeypatch, tmp_path):
     src = REPO / "config"
-    for name in ("shapes.yaml", "tenants.yaml", "replicas.yaml", "pricing.yaml"):
+    for name in ("shapes.yaml", "tenants.yaml", "replicas.yaml", "pricing.yaml", "price_references.yaml"):
         (tmp_path / name).write_text((src / name).read_text(encoding="utf-8"), encoding="utf-8")
     monkeypatch.setenv("VLLM_URL", "http://replica-x:9999")
     cfg = load_config(tmp_path)

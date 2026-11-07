@@ -6,3 +6,8 @@ replicas:
     kind: vllm
     url: ${VLLM_URL:-http://localhost:8000}
     model: small
+    calibration: calibration/local-2080ti.yaml   # step-rate curve for the seat rule (longest context level)
+    slot_plan: {small.8k.30tps: 8}               # sellable capacity the provider counts fill rate against
+# The fake profile (compose --profile fake) points VLLM_URL at the fake replica, which emits tokens on
+# the same curve; keep FAKE_RATE_CURVE in compose.yaml and this calibration file consistent, or set
+# `curve:` here instead of `calibration:`.

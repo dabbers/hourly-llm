@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from report.build import build_report
+from slotgw.config import load_config
 from slotgw.meter import Meter, RequestRecord
 
 REPO = Path(__file__).resolve().parents[1]
@@ -17,7 +18,7 @@ def _row(i: int, load_run: str, seed: int, tenant: str, shape: str, delivery: st
          ttft: float, engine_rate: float, deliver_rate: float, status: str = "ok", lazy: bool = False) -> RequestRecord:
     rec = RequestRecord(
         request_id=f"chatcmpl-{load_run}-{i}", tenant=tenant, shape=shape, lazy=lazy, delivery=delivery, t_arrival=t,
-        replica="fake-0", load_run=load_run, scenario="synthetic", seed=seed, prompt_tokens=prompt,
+        replica="local-2080ti", load_run=load_run, scenario="synthetic", seed=seed, prompt_tokens=prompt,
     )
     rec.t_admitted = t + 0.001
     if status != "ok":
@@ -59,7 +60,7 @@ def _write_run(run_dir: Path) -> None:
             w = csv.writer(f)
             w.writerow(["t", "replica", "kv_usage", "running", "waiting", "preemptions", "client_inflight"])
             for s in range(0, 90, 2):
-                w.writerow([t0 + s, "fake-0", 0.1 + 0.005 * s, 3, 0, 0, 3])
+                w.writerow([t0 + s, "local-2080ti", 0.1 + 0.005 * s, 3, 0, 0, 3])
     meter.close()
 
 
@@ -68,7 +69,8 @@ def test_report_builds_csvs_and_html(tmp_path):
     _write_run(run_dir)
     out = build_report([run_dir], config_dir=REPO / "config")
     assert out == run_dir / "report"
-    for name in ("per_request.csv", "per_tenant.csv", "summary.csv", "across_seeds.csv", "interference.csv", "report.html"):
+    for name in ("per_request.csv", "per_tenant.csv", "summary.csv", "across_seeds.csv", "interference.csv",
+                 "per_replica.csv", "refusals.csv", "market.csv", "list_prices.csv", "report.html"):
         assert (out / name).is_file(), name
 
     pr = pd.read_csv(out / "per_request.csv")
@@ -100,8 +102,40 @@ def test_report_builds_csvs_and_html(tmp_path):
     inter = pd.read_csv(out / "interference.csv")
     assert inter["during_long_prefill"].any()
 
+    prp = pd.read_csv(out / "per_replica.csv")
+    assert len(prp) == 2 and set(prp["replica"]) == {"local-2080ti"}
+    assert (prp["fill_rate"] > 0).all() and (prp["breakeven_fill_rate"] > 0).all()
+    assert prp["slot_plan"].iloc[0] == "8xsmall.8k.30tps"
+    ref = pd.read_csv(out / "refusals.csv")
+    assert set(ref["reason"]) == {"context_exceeds_shape"} and ref["n"].sum() == 2
+
+    mk = pd.read_csv(out / "market.csv")
+    refs = {r.name for r in load_config(REPO / "config").pricing.references}
+    assert set(mk["reference"]) == refs and len(mk) == 2 * len(refs)
+    assert mk["active"].sum() == 2  # the active reference once per load run
+    assert (mk["revenue_usd"] > 0).all() and (mk["breakeven_gpu_usd_per_hour"] > 0).all()
+    active = mk[mk["active"]]
+    # the active reference prices the per-token bill, so its revenue is the run's per-token revenue
+    assert active.set_index("load_run")["revenue_usd"].to_dict() == pytest.approx(summary.set_index("load_run")["per_token_usd"].to_dict())
+    assert (mk["gross_margin_at_target"] >= mk["gross_margin"]).all()  # 70% target above the measured utilisation here
+    lp = pd.read_csv(out / "list_prices.csv")
+    margins = load_config(REPO / "config").pricing.provider.margin_targets
+    assert len(lp) == 2 * len(margins) and set(lp["margin_target"]) == set(margins)
+    assert (lp["output_usd_per_million"] > 0).all() and (lp["input_usd_per_million"] < lp["output_usd_per_million"]).all()
+    assert (lp.sort_values("margin_target").groupby("load_run")["output_usd_per_million"].diff().dropna() > 0).all()  # more margin, higher price
+    assert (lp["output_usd_per_million_at_target"] < lp["output_usd_per_million"]).all()
+    # a 0% margin list price earns back exactly the GPU cost on the run's traffic
+    zero = lp[lp["margin_target"] == 0].set_index("load_run")
+    tok = load_config(REPO / "config").pricing.token
+    for load_run, row in zero.iterrows():
+        sub = ok[ok["load_run"] == load_run]
+        disc = sub["lazy"].map({True: tok.batch_discount, False: 1.0})
+        earned = ((sub["prompt_tokens"] * row["input_usd_per_million"] + sub["output_tokens"] * row["output_usd_per_million"]) * disc).sum() / 1e6
+        assert earned == pytest.approx(summary.set_index("load_run").loc[load_run, "gpu_cost_usd"])
+
     page = (out / "report.html").read_text(encoding="utf-8")
-    assert page.count("<svg") >= 6
+    assert page.count("<svg") >= 7
+    assert "Market reference prices" in page and "basket-3b" in page
     for word in ("chat", "agent", "batch", "notetaker", "Bills", "Predictability", "Timeline", "Definitions"):
         assert word in page
     assert "<script" not in page  # self-contained, no JavaScript

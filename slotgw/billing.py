@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .config import Shape, TokenPricing
+from .config import Pricing, Shape, TokenPricing
 
 
 def per_token_usd(prompt_tokens: int, output_tokens: int, lazy: bool, pricing: TokenPricing) -> float:
@@ -40,6 +40,7 @@ class Bill:
     wall_s: float
     bound_s: float
     billed_s: float
+    prompt_usd: float  # prefill charge (pricing.shape.prompt_usd_per_million), included in the shape bills
     shape_usd: float
     bound_usd: float
     wall_usd: float
@@ -56,6 +57,7 @@ class Bill:
             "wall_s": round(self.wall_s, 4),
             "bound_s": round(self.bound_s, 4),
             "billed_s": round(self.billed_s, 4),
+            "prompt_usd": self.prompt_usd,
             "shape_usd": self.shape_usd,
             "bound_usd": self.bound_usd,
             "wall_usd": self.wall_usd,
@@ -66,24 +68,28 @@ class Bill:
 def bill_request(
     *,
     shape: Shape,
-    pricing: TokenPricing,
+    pricing: Pricing,
     prompt_tokens: int,
     output_tokens: int,
-    wasted_tokens: int,
+    delivered_tokens: int,
     t_admitted: float | None,
     t_first_token: float | None,
     t_last_token: float | None,
 ) -> Bill:
-    delivered = max(0, output_tokens - wasted_tokens)
+    """`output_tokens` is what the engine generated for the billed run; `delivered_tokens` what the
+    client received. Discarded (preempted) runs and undelivered tokens are never billed."""
+    delivered = max(0, delivered_tokens)
     wall_s, bound_s, billed_s = shape_seconds(t_admitted, t_first_token, t_last_token, delivered, shape.tps)
     p = shape.price_per_second
+    prompt_usd = prompt_tokens * pricing.shape.prompt_usd_per_million / 1e6 if delivered > 0 else 0.0
     return Bill(
         delivered_tokens=delivered,
         wall_s=wall_s,
         bound_s=bound_s,
         billed_s=billed_s,
-        shape_usd=billed_s * p,
-        bound_usd=bound_s * p,
-        wall_usd=wall_s * p,
-        per_token_usd=per_token_usd(prompt_tokens, output_tokens, shape.lazy, pricing),
+        prompt_usd=prompt_usd,
+        shape_usd=billed_s * p + prompt_usd,
+        bound_usd=bound_s * p + prompt_usd,
+        wall_usd=wall_s * p + prompt_usd,
+        per_token_usd=per_token_usd(prompt_tokens, output_tokens, shape.lazy, pricing.token),
     )

@@ -93,7 +93,7 @@ async def test_stream_response_and_meter(gateway, meter_rows):
             if choice["finish_reason"]:
                 final = obj
     assert saw_done
-    assert content_chunks == 15
+    assert 1 <= content_chunks <= 15  # a chunk may carry several tokens
     assert final is not None
     assert final["usage"]["completion_tokens"] == 15
     assert final["slotgw"]["request_id"] == rid
