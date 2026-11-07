@@ -574,6 +574,7 @@ per-request shape and per-token bills.
 | **M2** token bucket + loadgen + report v1 | per-request pacing with throttled-time accounting; 4 profiles + 3 arrival processes, seeded; report with per-token and shape bills (billed, uncapped, bound), variance across seeds, latency, throttle time | two runs with the same seed produce identical request sequences; pacing holds delivered tps within ±5% of the shape rate; report HTML renders from CSV |
 | **M3** admission + multi-replica scheduler | `Replica` interface, `VllmReplica`, `FakeReplica`; KV/seat ledgers with shape nesting; priority queues and `503`; lazy shapes with `lazy_max_share` and the `requeue` policy; shape-affinity scoring; overcommit knob; replica metrics, fill rate and break-even in report | tests with 1 real + 3 fake replicas: admission never exceeds a ledger; a small shape is placed into a larger free slot; fast and lazy shapes separate across replicas; lazy work never delays a waiting interactive request; vLLM preemptions stay 0 under guaranteed-only load |
 | **M4** burst manager | tps and context bursts, priority classes, revocation policies, bursting-on vs off runs in report; written answers to Q1–Q4 in `docs/RESULTS.md` | revocation under injected guaranteed load restores shape rates within one tick; report shows burst share, revocations, floor violations, utilization with/without bursting |
+| **M5** phase 2 on RunPod | three RTX 4090 replicas with a 7B AWQ model, re-calibrated shapes, re-scaled scenario, the two M4 fixes (cached tokens, context bursts at the slowest tps class), output capture, Q5–Q7 in `docs/RESULTS.md`; plan, decisions and budget in `docs/PHASE2.md` | gates G0–G3 of PHASE2.md section 4: every paid run error-free (loadgen errors 0, replicas healthy, preemptions 0, artifacts complete); spend within the $150 cap (planned ~$17) |
 
 Each milestone ends with: tests green, `docker compose up` works from a clean checkout, docs updated.
 
@@ -597,6 +598,9 @@ by the fake-replica tests only: on the GPU no context burst was ever revoked, be
 burst that keeps the 60 tps shape's rate could not be placed (34 of 37 timed out unserved). That
 result, the floor-violation cost of lending and the reservation lockout of the fast shape are
 recorded as post-M4 decisions in §12 and risks in §13; none of the three fixes is built.
+M5 (phase 2, three RunPod replicas) is planned in docs/PHASE2.md (2026-11-07) with a $150 budget cap,
+stage gates for error-free paid runs, and output capture for the write-up; nothing of it is built or
+started.
 
 ---
 

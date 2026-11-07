@@ -139,4 +139,6 @@ burst manager (tps and context bursts, revocation policies) and reservations as 
 with bursting on/off and reservation runs in the report. The answers to the design questions are in
 `docs/RESULTS.md`; the measurements behind them in `docs/ASSUMPTIONS.md` ("Milestone 4
 measurements"); what the runs showed should change next (context bursts at the slowest tps class, a
-lending reserve, a reservation price above parity) is in `docs/DESIGN.md` sections 11–13.
+lending reserve, a reservation price above parity) is in `docs/DESIGN.md` sections 11–13. Next:
+phase 2 on three RunPod replicas, planned in `docs/PHASE2.md` (budget cap $150, stage gates, output
+capture for the write-up); not started.
