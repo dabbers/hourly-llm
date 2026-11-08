@@ -1,13 +1,19 @@
 # Phase 2 plan: three replicas on RunPod (milestone 5)
 
-Status: plan, 2026-11-07; G0 (local work) built the same day, no pod created: the two M4 fixes, output
+Status: **done through G3, 2026-11-08.** G0 (local work) built 2026-11-07: the two M4 fixes, output
 capture, placement rules (pinned reservations, excluded shapes), the phase-2 configuration under
-`config/phase2/` with the 7B price basket, the sized-later scenario `mixed-4090.yaml`, the run matrix, the
-pod and chain scripts (docs/RUNBOOK.md), and a rehearsal of the stack on three fake replicas
-(`docker compose --profile fake3`). Stage A waits for the API key in `.env`. Budget cap for the whole
-phase: **$150**, set by the project owner; **$80 of prepaid credit loaded on 2026-11-07**, which is
-the hard cap until more is added. The owner has allowed the headroom above the planned ~$17 to be
-spent on the optional experiments in section 3. Every paid stage starts only on an explicit go.
+`config/phase2/` with the 7B price basket, the scenario `mixed-4090.yaml`, the run matrices, the pod
+and chain scripts (docs/RUNBOOK.md), and a rehearsal on three fake replicas. Stage A (one pod,
+calibration, smoke) and stage B (three pods behind the gateway on pod B) ran 2026-11-07/08; stage C
+ran all ten matrix runs 2026-11-08 01:03–05:57 UTC in two chains, every run error-free, and the pods
+were stopped by the chain. Results: ASSUMPTIONS.md "Phase 2 measurements" (stages A–C), RESULTS.md
+Q5–Q7, SAMPLES.md; the report over the ten runs is `runs/phase2/report/report.html` (not in git).
+Spend: **$17.61 of the $80 loaded** (section 3); the stopped pods still hold their 20 GB volumes
+($0.017 per hour for the three) until terminated. Budget cap for the whole phase: **$150**, set by
+the project owner. The optional experiments of section 3 remain affordable within the remaining
+credit and each needs the owner's go; the pods' model caches survive on their volumes, but their
+hosts may have no free GPU (RUNBOOK section C), so a rerun may mean new pods and a 10-minute
+model download each.
 
 ## 1. Why move, and what the 2080 Ti could not answer
 
@@ -45,7 +51,7 @@ Phase 2 therefore answers, on rented hardware with real replicas:
 | GPU cost knob | `provider.gpu_usd_per_hour` = the pod's actual price | Replaces the $0.30 placeholder |
 | Shapes | Re-derived from the new calibration; keep 15 / 30 / 60 tps at 8k and 16k, add 120 tps only if `n_max(120)` is at least 4 | Calibration decides sellable shapes (DESIGN.md section 5) |
 | Reservation price | `reservation_price_factor` 2.3 for the runs; the report also prints the bill at 1.0 and 3.2 | 2.3 covers the slice's cost share on the 2080 Ti; the bill is slots × seconds × price × factor, so other factors need no run |
-| Where the gateway runs | On pod 1 next to vLLM, with the load generator and the meter; replicas reached over RunPod global networking (internal DNS) or direct TCP ports, never the HTTP proxy | WAN latency must not land in TTFT or pacing; RunPod's HTTP proxy cuts requests at about 100 s, which would kill batch streams. Verified in stage A |
+| Where the gateway runs | On one pod next to its vLLM, with the load generator and the meter; replicas reached over RunPod global networking (internal DNS), never the HTTP proxy. It was pod B: pods A and C landed on one host and cannot reach each other (stage B) | WAN latency must not land in TTFT or pacing; RunPod's HTTP proxy cuts requests at about 100 s, which would kill batch streams. Verified in stages A and B |
 | Orchestration | From this machine over SSH: `scripts/pod.sh` (rsync the tree, start and stop services, pull artifacts) and `scripts/runchain.sh` (the matrix, inside tmux on pod 1) | No registry and no remote repository needed; a dropped WAN link does not kill a run |
 | Spend control | The owner loads exactly $150 of prepaid credit (the hard cap); pods are created per stage and stopped by the chain's watchdog when it finishes or when a wall-clock cap passes; `RUNPOD_API_KEY` lives in `.env` and is never printed | Idle pods are the only way to waste this budget |
 | Scenario | `config/scenarios/mixed-4090.yaml`: the mixed workload re-scaled after calibration so the peak phase targets about 70% fill of the three-replica plan; reservation slots re-sized from the on-demand run's p95 occupancy, as in the what-if | The current rates load 6–10 streams; three 4090s would sit near idle |
@@ -79,6 +85,15 @@ Spend log (RunPod credit; $80 loaded):
 | When (UTC) | What | Pod-hours | Cost |
 |---|---|---|---|
 | 2026-11-07 22:59–23:27 | stage A, first pod on the vLLM image with the bootstrap start command: container idle for 26 min (no sshd, no engine), terminated | 0.46 | $0.41 |
+| 2026-11-07 23:28 – 11-08 06:28 | pod A (PyTorch image, vLLM over SSH): stage A calibration, interference probe and smoke; stage B; stage C as replica A; stopped by the chain | 6.99 | $6.22 |
+| 2026-11-08 00:30–06:28 | pods B and C: stage B bring-up and cluster smoke; stage C (gateway, meter, load generator and chain on B); stopped by the chain 30 min after `DONE` | 2 × 5.96 | $10.61 |
+| 2026-11-08 20:30–20:56 | pod B CPU-only (`podResumeZeroGpu`, $0.445/h) to pull the runs: the host had no free GPU after the stop | 0.43 | $0.20 |
+| since 2026-11-08 06:28 | three stopped pods' 20 GB volumes, $0.20/GB/month | – | $0.017/h until terminated |
+| **total** | RunPod balance 2026-11-08 20:40 UTC: $62.39 of $80 | 19.4 | **$17.61** |
+
+Of the ~75 minutes of idle pods between the first chain's stop (02:18) and the continuation (03:45),
+about $3.30 was waste; the rest of the overrun against the ~$17 plan is the two stage-A/B hours the
+pods sat up between stages.
 
 Matrix settings (all on `mixed-4090.yaml`): (1) burst off, on demand; (2) burst on (`grace`), on
 demand; (3) burst on, reservations at factor 2.3, reservations placed on replica A and the 60 tps
@@ -126,7 +141,12 @@ Everything that can be tested without a GPU is tested before a pod exists.
   on all three; artifacts round-trip and the report builds from them; the watchdog stops the pods.
 
 **G3, stage C (the matrix).** Preflight before every run; the chain halts on the first failure
-rather than continuing unattended; one rerun per failed run comes out of the reserve.
+rather than continuing unattended; one rerun per failed run comes out of the reserve. Passed
+2026-11-08: ten runs, ten preflights OK, loadgen errors 0 in every run, vLLM preemptions 0 on every
+replica, artifacts pulled and the report built. The one halt was the first burst run exiting 1 on
+15 revoked context bursts the load generator still counted as errors; the run was complete, the
+classification was fixed, and the run was repeated in the continuation chain (its original is kept
+under `runs/phase2/aside/`).
 
 ## 5. Deliverables
 

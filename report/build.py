@@ -216,7 +216,7 @@ def _economics_section(pr: pd.DataFrame) -> str:
     chart = charts.bar_chart(
         "Revenue per run vs GPU cost", pr["load_run"].tolist(),
         {"per-token": pr["per_token_usd"].tolist(), "shape, billed": pr["shape_usd"].tolist(), "GPU cost": pr["gpu_cost_usd"].tolist()},
-        subtitle="GPU cost = gpu_usd_per_hour × run duration; fill and break-even in the replicas section, market prices in the next",
+        subtitle="GPU cost = gpu_usd_per_hour × replicas used × run duration; fill and break-even in the replicas section, market prices in the next",
         y_label="USD", fmt=charts.fmt_usd,
     )
     tbl = html.table(

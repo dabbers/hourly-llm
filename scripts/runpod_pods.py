@@ -37,6 +37,7 @@ import httpx
 
 REPO = Path(__file__).resolve().parents[1]
 API_URL = "https://rest.runpod.io/v1"
+GRAPHQL_URL = "https://api.runpod.io/graphql"  # for what the REST API lacks: zero-GPU resume, port edits
 RTX_4090 = "NVIDIA GeForce RTX 4090"
 VLLM_IMAGE = "vllm/vllm-openai:v0.32.0"  # the bootstrap path (experimental, see TEMPLATE_IMAGE)
 # RunPod's own PyTorch image: sshd and the PUBLIC_KEY handling are built in, so no start-command override is
@@ -152,6 +153,54 @@ class RunPod:
 
     def terminate_pod(self, pod_id: str) -> Any:
         return self.request("DELETE", f"/pods/{pod_id}")
+
+    def graphql(self, query: str) -> dict[str, Any]:
+        """RunPod's GraphQL API (same key); raises RunPodError on HTTP or GraphQL errors, redacted."""
+        headers = {"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"}
+        try:
+            r = self.client.post(GRAPHQL_URL, json={"query": query}, headers=headers)
+        except httpx.HTTPError as e:
+            raise RunPodError(f"POST graphql: {redact(str(e), self._key)}") from None
+        if r.status_code >= 400:
+            body = redact(r.text[:500], self._key)
+            raise RunPodError(f"POST graphql -> HTTP {r.status_code}: {body}", r.status_code, body)
+        data = r.json()
+        if data.get("errors"):
+            msg = "; ".join(str(e.get("message")) for e in data["errors"])
+            raise RunPodError(f"graphql: {redact(msg[:500], self._key)}")
+        return data.get("data") or {}
+
+    def resume_zero_gpu(self, pod_id: str) -> Any:
+        """Start a stopped pod with no GPU (CPU only): its volume is reachable over SSH when the host has
+        no free GPU for a normal start. vLLM cannot run in that state."""
+        q = 'mutation { podResumeZeroGpu(input: {podId: "' + pod_id + '"}) { id desiredStatus gpuCount } }'
+        return self.graphql(q)["podResumeZeroGpu"]
+
+    def edit_ports(self, pod_id: str, ports: str) -> Any:
+        """Set a pod's exposed ports ("8000/tcp,22/tcp") with podEditJob, keeping its other settings; the
+        pod's container restarts and the port mappings change."""
+        pod = self.graphql('query { pod(input: {podId: "' + pod_id + '"}) { imageName containerDiskInGb volumeInGb '
+                           'volumeMountPath dockerArgs env } }')["pod"]
+        env: list[tuple[str, str]] = []
+        for item in pod.get("env") or []:
+            if isinstance(item, str) and "=" in item:
+                k, v = item.split("=", 1)
+                env.append((k, v))
+            elif isinstance(item, dict):
+                env.append((str(item["key"]), str(item["value"])))
+        env_gql = "[" + ", ".join("{key: " + json.dumps(k) + ", value: " + json.dumps(v) + "}" for k, v in env) + "]"
+        fields = [
+            'podId: "' + pod_id + '"',
+            "imageName: " + json.dumps(pod["imageName"]),
+            "containerDiskInGb: " + str(int(pod.get("containerDiskInGb") or 30)),
+            "volumeInGb: " + str(int(pod.get("volumeInGb") or 20)),
+            "volumeMountPath: " + json.dumps(pod.get("volumeMountPath") or "/workspace"),
+            "dockerArgs: " + json.dumps(pod.get("dockerArgs") or ""),
+            "ports: " + json.dumps(ports),
+            "env: " + env_gql,
+        ]
+        q = "mutation { podEditJob(input: {" + ", ".join(fields) + "}) { id ports desiredStatus } }"
+        return self.graphql(q)["podEditJob"]
 
 
 # ---- pods.json -------------------------------------------------------------------------------
@@ -438,20 +487,37 @@ def cmd_stop(
     return stopped
 
 
-def cmd_start(rp: RunPod, *, pods_path: Path, only: str | None = None, out: Callable[[str], None] = print) -> list[str]:
+def cmd_start(rp: RunPod, *, pods_path: Path, only: str | None = None, zero_gpu: bool = False,
+              out: Callable[[str], None] = print) -> list[str]:
     started: list[str] = []
     for pod in select_pods(load_pods(pods_path), only):
         try:
-            rp.start_pod(pod["id"])
-            out(f"started {pod['name']} ({pod['id']}); run `status` to pick up the new port mappings")
+            if zero_gpu:
+                rp.resume_zero_gpu(pod["id"])
+                out(f"started {pod['name']} ({pod['id']}) with zero GPUs: CPU only, the volume is readable over ssh, "
+                    f"vLLM cannot run; run `status` to pick up the new port mappings (if 22/tcp is missing, `ports`)")
+            else:
+                rp.start_pod(pod["id"])
+                out(f"started {pod['name']} ({pod['id']}); run `status` to pick up the new port mappings")
             started.append(pod["id"])
         except RunPodError as e:
             if e.status == 404:
                 out(f"start {pod['name']}: the API has no start endpoint for this pod (HTTP 404); "
                     f"start it in the RunPod console, then run `status`")
+            elif "not enough free GPUs" in str(e):
+                out(f"start {pod['name']} failed: {e}\n  the pod's host has no free GPU; `start --zero-gpu` reaches "
+                    f"the volume (pull the runs), or migrate the pod in the RunPod console")
             else:
                 out(f"start {pod['name']} failed: {e}")
     return started
+
+
+def cmd_ports(rp: RunPod, *, pods_path: Path, ports: str, only: str | None = None,
+              out: Callable[[str], None] = print) -> None:
+    for pod in select_pods(load_pods(pods_path), only):
+        res = rp.edit_ports(pod["id"], ports)
+        out(f"{pod['name']} ({pod['id']}): ports now {res.get('ports')}; the container restarts, run `status` "
+            f"for the new mappings")
 
 
 def cmd_terminate(
@@ -547,6 +613,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sa = sub.add_parser("start", help="start stopped pods")
     sa.add_argument("--only", default=None)
+    sa.add_argument("--zero-gpu", action="store_true",
+                    help="start CPU-only (GraphQL podResumeZeroGpu) to reach the volume when the host has no free GPU")
+
+    pp = sub.add_parser("ports", help='set exposed ports, e.g. "8000/tcp,22/tcp" (GraphQL podEditJob; the pod restarts)')
+    pp.add_argument("ports")
+    pp.add_argument("--only", default=None)
 
     t = sub.add_parser("terminate", help="delete pods and their volumes")
     t.add_argument("--yes", action="store_true")
@@ -596,7 +668,9 @@ def main(
         elif args.cmd == "stop":
             cmd_stop(rp, pods_path=pods_path, all_pods=args.all, only=args.only)
         elif args.cmd == "start":
-            cmd_start(rp, pods_path=pods_path, only=args.only)
+            cmd_start(rp, pods_path=pods_path, only=args.only, zero_gpu=args.zero_gpu)
+        elif args.cmd == "ports":
+            cmd_ports(rp, pods_path=pods_path, ports=args.ports, only=args.only)
         elif args.cmd == "terminate":
             cmd_terminate(rp, pods_path=pods_path, yes=args.yes, only=args.only)
         return 0

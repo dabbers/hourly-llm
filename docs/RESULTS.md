@@ -1,14 +1,19 @@
 # Results: what the proof of concept measured
 
 Answers to the four questions of DESIGN.md §1, from the GPU runs of milestones 2–4 (2026-11-06 and
-2026-11-07). Setup for every number here: one RTX 2080 Ti serving Qwen2.5-3B-Instruct-AWQ through
-vLLM, the four-tenant `mixed.yaml` scenario (chat on `small.8k.30tps`, agent on `small.8k.60tps`,
-note-taker on `small.16k.30tps`, batch on `small.8k.15tps.lazy`), 18 minutes per run, seed 1 unless
-stated, GPU priced at $0.30 per hour, shape and per-token prices at parity with the `basket-3b`
-market reference (the median of four 3B-class OpenRouter listings: $0.0755 per 1M prompt tokens,
-$0.15 per 1M output tokens). The measurements, run ids and caveats are in ASSUMPTIONS.md; the
-reports in `runs/<run id>/report*`. Earlier milestones were billed at a gpt-4o-mini placeholder 4×
-higher; where a number comes from them it is marked.
+2026-11-07), and to the three phase-2 questions of PHASE2.md §1 (Q5–Q7, 2026-11-08). Setup for
+Q1–Q4: one RTX 2080 Ti serving Qwen2.5-3B-Instruct-AWQ through vLLM, the four-tenant `mixed.yaml`
+scenario (chat on `small.8k.30tps`, agent on `small.8k.60tps`, note-taker on `small.16k.30tps`,
+batch on `small.8k.15tps.lazy`), 18 minutes per run, seed 1 unless stated, GPU priced at $0.30 per
+hour, shape and per-token prices at parity with the `basket-3b` market reference (the median of
+four 3B-class OpenRouter listings: $0.0755 per 1M prompt tokens, $0.15 per 1M output tokens). Setup
+for Q5–Q7: three RunPod RTX 4090 pods ($0.89 per pod-hour) serving Qwen2.5-7B-Instruct-AWQ, the
+same four tenants in `mixed-4090.yaml` at 11× the arrival rates, ten runs over four settings, prices
+at parity with `basket-7b` ($0.08 / $0.175 / $0.015 cache read per 1M) with prefix-cache hits priced
+at the cache-read rate. The measurements, run ids and caveats are in ASSUMPTIONS.md; the reports in
+`runs/<run id>/report*` and `runs/phase2/report/`; what the output looked like is in SAMPLES.md.
+Earlier milestones were billed at a gpt-4o-mini placeholder 4× higher; where a number comes from
+them it is marked.
 
 The one-paragraph version: time-sliced shapes with admission control turn a card that broke its
 floors on 90% of fast streams into one that holds them 80–90% of the time, at the cost of queueing
@@ -19,6 +24,16 @@ response times, at a few points of floor compliance. Reservations deliver a genu
 product (no queue, 13 ms) and, at parity prices, lose money; the price they need is 2.3–3.2×
 parity. The 60 tps shape should not be sold on this card: it costs six of eight seats whenever it
 runs, and any reservation locks it out completely.
+
+The phase-2 paragraph (Q5–Q7, three RTX 4090s, a 7B model): the capacity findings were the small
+card talking. On 32-seat replicas the 60 tps shape places freely, context bursts run and get
+revoked, and reservations and the fast shape coexist. The floor findings were not: prompt tokens
+outnumber output 15 : 1, the engine is prefilling for someone almost all the time, and the 60 tps
+promise is missed on 59–83% of requests at 40–58% utilisation; bursting buys 32% more output per
+GPU-hour with twice the violations. A reservation sized below its tenant's peak caps the tenant.
+At the 7B market basket with cache hits priced as cache reads, the cluster earns 1.6× its cost
+with bursting off and 2.1× with it on (gross margin 36–53%, break-even near 26% utilisation), and
+a reservation at 2.3× cost share undercharges a well-used slot by a third.
 
 ## Q1. At what fill rate (and overcommit) does shape pricing break even for the provider?
 
@@ -175,21 +190,118 @@ What it means:
   idle reserved capacity resold to the lazy tenant, which recovered a quarter of the revenue the
   parity-priced reservation gave up, and the reserved tenant's own requests ran at 73 tok/s.
 
+## Q5. Which M4 findings were artifacts of the small replica?
+
+**The lockouts were; the floor findings were not. On three 4090s the 60 tps shape places freely,
+context bursts run (689–962 per run) and get revoked (6–19 per run), and reservations no longer
+shut the fast shape out. But the floors are broken by prefill on this card too, now by the
+aggregate prefill stream rather than one slow prompt: the 60 tps shape misses its floor on 59–83%
+of requests in every setting, and bursting still doubles the violations it buys its throughput
+with.**
+
+| M4 finding on the 2080 Ti | On three 4090s (ASSUMPTIONS.md, stage C) | Verdict |
+|---|---|---|
+| one 60 tps request idles six of eight seats | a 60 tps request costs about two of 32 seats; 1,628–2,675 agent steps per run served, 0 capacity refusals of guaranteed agent requests in any setting | artifact |
+| context bursts unplaceable (34 of 37 refused after 30 s, 0 revoked) | 689–962 bursts per run served as the 15 tps class, queued 0.95 s median, TTFT 1.1–2.0 s; 45–247 refused at the 5 s burst cap; 6–19 revoked under `grace` after 200–360 delivered tokens | artifact, plus the G0 fix (slowest class, short queue) |
+| five reserved slots lock the 60 tps shape out (38 / 38 refused) | reservations spread over the same replicas as the fast shape: 0 guaranteed agent refusals for capacity | artifact |
+| floor violations from one slow 6k prefill (4–5.5 s) | a 6k prompt prefills in 0.65 s, but prompt tokens outnumber output 15 : 1 and 98–99.7% of requests overlap someone's prefill; per-stream decode 62–78 tok/s during it (burst off) against 122–154 clear; chat violates on 12–38%, the agent on 59–70% | real, different mechanism |
+| burst on raises violations (57 → 67) via the emptied pacer buffer | 1,615 → 3,360 per run; chat 24% → 58% of requests, agent to 73–83%, note-taker to 50–67% | real, larger at scale |
+| reservations remove the queue (13 ms) | true only when slots cover the peak; sized below it (24 of a 39–46 p95) the reserved tenant queued 19–26 s at p50 and lost 7% of requests after 30 s | new finding (Q6) |
+
+What it means: the capacity story of M3/M4 (nesting, lockouts, unplaceable bursts) was the 8-seat
+replica talking, and goes away with 32 seats. The quality-of-service story does not: a wall-clock
+promise of 60 tokens per second cannot be kept on a prompt-heavy mix at 40–55% utilisation with a
+decode-only calibration, because the step-rate curve was measured without concurrent prefill and
+the engine spends most of its steps sharing the batch with 512 prefill tokens. The fixes are the
+same as before and now have numbers behind them: admit against a prefill-aware curve (or reserve a
+share of the batch for decode), and keep a lending reserve so that bursting does not spend the
+buffer that absorbs prefill stalls.
+
+## Q6. Do the scheduler's placement rules hold with real replicas?
+
+**Yes: pinned reservations and an excluded shape put the right traffic on the right replica,
+unpinned work spread within ±8%, no ledger was exceeded and vLLM never preempted. The new result
+is that a reservation sized below the tenant's peak is a cap, because a reserved tenant queues only
+on its own slots.**
+
+- Setting (3), chat 24 + note-taker 4 slots pinned to replica A with the 60 tps shape excluded from
+  A: A served 2,627–2,628 chat and all 184–188 note-taker requests and no guaranteed 60 tps request
+  (3–15 agent context bursts ran on A as the 15 tps class: the exclusion applies to the class a
+  request runs as, which is the intended reading); B and C took 1,143–1,601 agent steps and 676–987
+  batch jobs each. Fill rate 0.61–0.62 on A against 0.42–0.49 on B/C.
+- Setting (4), the same slots unpinned: the gateway placed 8 chat and 1–2 note-taker slots on each
+  replica; requests and output stayed within ±8% across replicas in every unpinned run.
+- Ledgers: engine streams peaked at 22–32 per replica against the 32-seat plan, KV at 29–60%,
+  gateway queues at 8–107 interactive and 7–11 burst requests; vLLM preemptions 0 in all 30
+  replica-runs; vLLM's own waiting queue peaked at 5–22, which is prefill backlog behind the
+  512-token chunk, not admission.
+- The cap: chat's what-if p95 occupancy was 39–46 streams and one replica holds 24 chat slots
+  beside the note-taker's, so the reservation covered the p50 (12–14) twice but not the peak. Pinned,
+  chat waited 19–26 s at p50 and 30 s at p95 and 197–202 requests per run timed out
+  (`capacity:reservation_busy`); spread, 13.6–18.4 s and 56–130. The note-taker lost 7–18 the same
+  way. The remedy is the existing `admission.reservation_spill` knob (overflow competes on demand),
+  which was not run; the design row is in DESIGN.md §12.
+
+## Q7. What are the economics of a sellable configuration?
+
+**At the 7B market basket with cache hits priced as cache reads, three 4090s at $0.89 each earn
+1.6× their cost with bursting off (41% utilisation) and 2.1× with it on (54%): gross margin 36% →
+53%, about 63% at a 70% utilisation, break-even near 26% utilisation. Prompt tokens still carry
+the revenue; the per-second price of a seat pays 0.68× its cost share. Reservations at 2.3× cost
+share undercharge a well-used slot: 3.5–4.9× would match per-request revenue.**
+
+| per run, mean over seeds | burst off | burst on | reservations pinned | reservations spread |
+|---|---|---|---|---|
+| per-token revenue (cache-aware) / uncached | $1.30 / $1.73 | $1.71 / $2.25 | $1.51 / $2.30 | $1.70 / $2.21 |
+| shape revenue; what tenants paid | $1.34; $1.34 | $1.76; $1.76 | $1.55; $1.36 | $1.74; $1.35 |
+| GPU cost (3 × $0.89/h × 1,110 s) | $0.83 | $0.80 | $0.81 | $0.81 |
+| revenue ÷ GPU cost; gross margin; at 70% utilisation | 1.58×; 36%; 62% | 2.12×; 53%; 63% | 1.86×; 46%; 56% | 2.11×; 53%; 64% |
+| output tokens per GPU-hour | 1.43M | 1.88M | 1.99M | 1.86M |
+| list price for a 0 / 25 / 50% margin, $ per 1M output tokens, measured utilisation | 0.111 / 0.148 / 0.222 | 0.083 / 0.110 / 0.165 | 0.094 / 0.125 / 0.188 | 0.083 / 0.111 / 0.166 |
+| the same at 70% utilisation | 0.066 / 0.088 / 0.131 | 0.064 / 0.086 / 0.128 | 0.077 / 0.103 / 0.155 | 0.064 / 0.085 / 0.128 |
+
+What it means:
+
+- A 7B AWQ model on a rented 4090 is a sellable configuration at today's open-model prices: the
+  break-even list price is 0.47–0.64× the basket's $0.175 per 1M output tokens, and a 50% margin
+  needs 0.94–1.27× at the measured utilisation or 0.73–0.88× at 70%. On the 2080 Ti the same
+  comparison needed everything charged in full to reach 1.6× cost; here cache-read pricing is
+  already in (it removes 23–34% of the per-token revenue) and the margin survives it.
+- Bursting is the single largest lever on the economics: +32% output per GPU-hour and +31% revenue
+  for a 3–6% discount, because the closed-loop tenants (agent, batch) do more work when their
+  requests finish sooner. Its cost is the floor (Q5), so the honest version of this margin is
+  "with a lending reserve", which is unbuilt.
+- The seat's per-second price alone ($0.0189 per 30 tps slot-hour) is below the seat's cost share
+  ($0.0278); the prompt charge at the basket's input price is what makes shapes revenue-neutral
+  against per-token billing (1.0× for the interactive tenants, 1.3–1.6× for batch, whose per-token
+  reference carries a 50% discount the shape does not).
+- Reservations priced at 2.3× cost share ($0.0435 per slot-hour) are a good deal for a tenant whose
+  slots are 73–78% used: chat paid 0.67× (pinned) and 0.44–0.51× (spread) of its per-request bill,
+  and the provider earned $0.19–0.39 less per run than per-request billing of the same tenants.
+  The bill is linear in the factor, so 3.5× (pinned) to 4.9× (spread), $0.065–0.092 per slot-hour,
+  is revenue parity; the M4 window of 2.3–3.2× covered the cost share, not the opportunity cost.
+- Cached share depends on placement: 46% with the agent's growing contexts concentrated on two
+  replicas (pinned setting) against 32–35% spread. A scheduler that keeps a session's turns on one
+  replica raises cache hits and lowers prefill load and, under cache-read pricing, revenue per
+  prompt token at the same time.
+
 ## What was not measured, and what to do next
 
-- Two seeds at most per setting (one for the M4 runs); the direction of every finding is
-  consistent across the M3 and M4 runs but the small-sample tenants (note-taker, 15 requests) are
-  noise at the tenant level.
-- Revocation of context bursts on hardware (see Q4); the `grace` and `abort` runs are identical
-  because nothing was ever revoked.
-- Prefix-cache hits are charged in full (Q1); every margin here is an upper bound for prompt-heavy
-  traffic until `cached_tokens` is metered.
-- A single real replica; the multi-replica scheduler and the "reservations on their own replica"
-  answer to Q3 are exercised by fake replicas only.
-- Whole-run reservations straddle quiet and peak phases, which is most of their idle share;
-  phase-length reservations (`reservation.phases`) exist in the load generator and were run only in
-  the smoke test.
+- Two to three seeds per setting; direction is consistent across seeds everywhere, but the
+  note-taker (180–202 requests per run) and the reservation bills are two-sample numbers.
+- `admission.reservation_spill`: the fix for the reservation cap (Q6) exists as a knob and has not
+  run on hardware.
+- A prefill-aware seat curve or a decode share of the batch (Q5): the calibration still measures
+  decode alone, so admission admits more fast streams than the engine can hold at a 15 : 1 prompt
+  mix. The lending reserve for bursting is likewise unbuilt.
+- The `abort` revocation policy on hardware (the `grace` runs revoked 6–19 bursts; `abort` would
+  cancel them within a tick and was skipped for budget), the fp16 model, a 120 tps shape and an
+  A100 cross-check: the optional experiments of PHASE2.md §3, affordable within the remaining
+  credit.
+- Whole-run reservations straddle quiet and peak phases; phase-length reservations
+  (`reservation.phases`) exist in the load generator and ran only in the smoke tests.
+- One GPU model and one model size; the Q7 margins are for a 4090 at $0.89 and a 7B AWQ model at
+  the 7B basket. The report recomputes them for any `gpu_usd_per_hour` and price reference.
 
-In order of value: meter cached tokens and price cache reads; context bursts at the slowest tps
-class with a short queue; a lending reserve; a reservation price factor of 2.3–3.2 and a second
-replica (fake is enough to show placement) for the 60 tps shape; then more seeds.
+In order of value: reservation spill (a run, not a feature); a prefill-aware curve or decode share;
+a lending reserve; session affinity for cache hits; then the optional experiments.

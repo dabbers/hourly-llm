@@ -97,8 +97,9 @@ Stop with `docker compose --profile gpu down` (or `--profile fake`).
 The plan, decisions, budget and gates are in `docs/PHASE2.md`; the operator's commands in
 `docs/RUNBOOK.md`. The phase-2 configuration lives in `config/phase2/` (three pod replicas, the 7B
 price basket, text capture on) with the scenario `config/scenarios/mixed-4090.yaml` and the run
-matrices `config/phase2/matrix-ondemand.yaml` and `matrix-resv.yaml`. Everything can be rehearsed without a pod on three fake
-replicas with a 4090-like curve:
+matrices `config/phase2/matrix-ondemand.yaml` and `matrix-resv.yaml` (`matrix-continue.yaml` is
+what ran second, after the first chain stopped). Everything can be rehearsed without a pod on three
+fake replicas with a 4090-like curve:
 
 ```bash
 docker compose --profile fake3 up --build -d
@@ -162,8 +163,12 @@ seeded load generator + report, admission control + multi-replica scheduler + pr
 mitigation (measured defaults: 128-token prefill chunks, overcommit 1.0, lazy requeue off), the
 burst manager (tps and context bursts, revocation policies) and reservations as standing holds,
 with bursting on/off and reservation runs in the report. The answers to the design questions are in
-`docs/RESULTS.md`; the measurements behind them in `docs/ASSUMPTIONS.md` ("Milestone 4
-measurements"); what the runs showed should change next (context bursts at the slowest tps class, a
-lending reserve, a reservation price above parity) is in `docs/DESIGN.md` sections 11–13. Next:
-phase 2 on three RunPod replicas, planned in `docs/PHASE2.md` (budget cap $150, stage gates, output
-capture for the write-up); not started.
+`docs/RESULTS.md`; the measurements behind them in `docs/ASSUMPTIONS.md`. Phase 2 (milestone 5) ran
+2026-11-08 on three RunPod RTX 4090 pods with a 7B AWQ model: ten matrix runs over four settings,
+every run error-free, $17.61 of the $150 cap spent (`docs/PHASE2.md`). Findings (RESULTS.md Q5–Q7):
+the M4 lockouts were artifacts of the 8-seat card; the floor problem is not (prompt-heavy traffic
+keeps the engine prefilling, and 60 tps is missed on 59–83% of requests); bursting adds 32% output
+per GPU-hour for twice the floor violations; a reservation below its tenant's peak is a cap; at the
+7B basket with cache-read pricing the cluster earns 1.6–2.1× its cost. What the output looked like
+is in `docs/SAMPLES.md`. Next, in order: run `reservation_spill`, a prefill-aware seat curve, a
+lending reserve (`docs/DESIGN.md` sections 11–13).

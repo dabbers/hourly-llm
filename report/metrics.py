@@ -312,8 +312,9 @@ def per_run(df: pd.DataFrame, loads: list[LoadRun], config: Config, reservations
             "shape_usd": float(ok["shape_usd"].sum()),
             "bound_usd": float(ok["bound_usd"].sum()),
             "wall_usd": float(ok["wall_usd"].sum()),
-            "gpu_cost_usd": config.pricing.provider.gpu_usd_per_hour * duration / 3600.0,
-            "output_tokens_per_gpu_hour": (ok["output_tokens"].sum() / duration * 3600.0) if duration > 0 else np.nan,
+            "replicas_used": _gpus_used(ok),
+            "gpu_cost_usd": config.pricing.provider.gpu_usd_per_hour * _gpus_used(ok) * duration / 3600.0,
+            "output_tokens_per_gpu_hour": (ok["output_tokens"].sum() / (_gpus_used(ok) * duration) * 3600.0) if duration > 0 else np.nan,
             "concurrency_mean": float(conc.mean()),
             "concurrency_p95": float(np.percentile(conc, 95)),
             "concurrency_max": float(conc.max()),
@@ -489,6 +490,13 @@ def _slot_plans(config: Config, fallback: Config | None) -> dict[str, dict[str, 
     return plans
 
 
+def _gpus_used(ok: pd.DataFrame) -> int:
+    """Replicas that served the run's requests: the GPU count behind the run's cost and its tokens per
+    GPU-hour (1 when the meter has no replica ids, as in the single-replica milestones)."""
+    n = int(ok["replica"].dropna().nunique()) if "replica" in ok.columns else 0
+    return max(1, n)
+
+
 def _run_traffic(df: pd.DataFrame, config: Config, fallback: Config | None) -> pd.DataFrame:
     """Per load run: token sums split interactive / lazy, GPU cost, both revenues and the measured
     utilisation against the slot plans of the replicas the run used."""
@@ -519,7 +527,8 @@ def _run_traffic(df: pd.DataFrame, config: Config, fallback: Config | None) -> p
             "prompt_tokens_lazy": int(ok.loc[lazy, "prompt_tokens"].sum()),
             "cached_tokens_lazy": int(ok.loc[lazy, "cached_tokens"].sum()),
             "output_tokens_lazy": int(ok.loc[lazy, "output_tokens"].sum()),
-            "gpu_cost_usd": gpu_h * duration / 3600.0,
+            "replicas_used": _gpus_used(ok),
+            "gpu_cost_usd": gpu_h * _gpus_used(ok) * duration / 3600.0,
             "shape_usd": float(ok["shape_usd"].sum()),
             "per_token_usd": float(ok["per_token_usd"].sum()),
             "utilization": output_total / (plan_tps * duration) if plan_tps and duration else np.nan,
@@ -685,6 +694,7 @@ def reservations(df: pd.DataFrame, config: Config, fallback: Config | None = Non
         n_sec = int(np.ceil(duration)) + 1
         used_replicas = run.loc[run["ok"], "replica"].dropna().unique()
         plan_slots = sum(sum(plans.get(rep, {}).values()) for rep in used_replicas)
+        gpu_run_h = gpu_h * max(1, len(used_replicas))  # the plan spans every replica the run used, so does the cost
         for (tenant, shape_name), sub in run.groupby(["tenant", "shape"], sort=False):
             shape = shapes.get(shape_name)
             if shape is None:
@@ -710,7 +720,7 @@ def reservations(df: pd.DataFrame, config: Config, fallback: Config | None = Non
                 reserved_s = n_slots * duration
                 used_s = float(np.minimum(occ, n_slots).sum())
                 bill = reserved_s * shape.price_per_second
-                cost_share = gpu_h * duration / 3600.0 * n_slots * weight / plan_slots if plan_slots and not np.isnan(weight) else np.nan
+                cost_share = gpu_run_h * duration / 3600.0 * n_slots * weight / plan_slots if plan_slots and not np.isnan(weight) else np.nan
                 per_token = float(ok["per_token_usd"].sum())
                 rows.append({
                     "scenario": run["scenario"].iloc[0],
@@ -738,7 +748,7 @@ def reservations(df: pd.DataFrame, config: Config, fallback: Config | None = Non
                     "cost_share_usd": cost_share,
                     "reservation_vs_cost": bill / cost_share if cost_share else np.nan,
                     "slot_usd_per_hour": shape.price_per_second * 3600.0,
-                    "breakeven_slot_usd_per_hour": gpu_h * weight / plan_slots if plan_slots and not np.isnan(weight) else np.nan,
+                    "breakeven_slot_usd_per_hour": gpu_run_h * weight / plan_slots if plan_slots and not np.isnan(weight) else np.nan,
                     "revenue_parity_slot_usd_per_hour": per_token / (reserved_s / 3600.0) if reserved_s else np.nan,
                 })
     return pd.DataFrame(rows)

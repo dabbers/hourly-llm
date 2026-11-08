@@ -7,7 +7,7 @@ over SSH, `runpod_pods.py` to the RunPod REST API.
 
 | Script | Runs where | Does |
 |---|---|---|
-| `scripts/runpod_pods.py` | here | create / status / wait-ready / env-file / stop / start / terminate pods through the REST API |
+| `scripts/runpod_pods.py` | here | create / status / wait-ready / env-file / stop / start / terminate pods through the REST API; `start --zero-gpu` and `ports` through the GraphQL API (recovery when a stopped pod's host has no free GPU) |
 | `scripts/pod.sh` | here | SSH wrapper: push the tree, set up uv, drive vLLM, the gateway, calibration, smoke, the chain; pull artifacts |
 | `scripts/pod-bootstrap.sh` | in every pod (experimental `create --bootstrap` path only) | container start command for the vLLM image: sshd, HF cache on the volume, vLLM in tmux; did not run on RunPod in stage A |
 | `scripts/runchain.sh` | the gateway pod (B in this cluster), in tmux | the matrix: fresh gateway per run, preflight, loadgen, report; stops the pods when done, itself last |
@@ -289,11 +289,29 @@ the grace period is then a no-op:
 bash scripts/pod.sh pull b && bash scripts/pod.sh stop
 ```
 
-A stopped pod's volume is readable only after a `start` (new port mappings, `env-file` again):
+A stopped pod's volume is readable only after a `start` (new port mappings, `env-file` again). A
+stopped pod stays bound to its host; if another tenant took the GPU meanwhile, `start` fails with
+"not enough free GPUs on the host machine" (it did on 2026-11-08, for every retry). Then
+`start --zero-gpu` resumes the pod CPU-only (RunPod's `podResumeZeroGpu`, $0.445/h here) with the
+volume mounted; vLLM cannot run, ssh can. The zero-GPU pod came back with only its 8000/tcp mapping,
+so `ports 8000/tcp,22/tcp` (GraphQL `podEditJob`, the container restarts, about a minute) gave it an
+ssh port again; RunPod's ssh proxy (`ssh.runpod.io`) refused the key, so it is no fallback here:
 
 ```bash
 bash scripts/pod.sh start --only b && bash scripts/pod.sh wait-ready --timeout 600 && bash scripts/pod.sh pull b && bash scripts/pod.sh stop
 ```
+
+```bash
+py -3.11 -m uv run python scripts/runpod_pods.py start --zero-gpu --only b && sleep 60 && bash scripts/pod.sh status
+```
+
+```bash
+py -3.11 -m uv run python scripts/runpod_pods.py ports 8000/tcp,22/tcp --only b && sleep 60 && bash scripts/pod.sh status && bash scripts/pod.sh pull b && bash scripts/pod.sh stop --only b
+```
+
+The lesson for the next cluster is in PHASE2.md section 3: pull the runs before the pods stop (the
+chain's `--stop-grace-min` exists for that), or put `/workspace` on a network volume, which any new
+pod in the datacenter can mount.
 
 `pull b` brings `runs/<run id>/` for every run and `runs/phase2/{chain.log,chain.status,chain.runs,logs,report}`
 (and `runs/phase2/aside/`, where a run that was set aside is kept). Rebuild the report here over the
@@ -350,5 +368,7 @@ RunPod's settings anyway (PHASE2.md section 7) and delete `.env`.
 | `preflight` fails on `tokenizer` | the served model's tokenizer differs from the Qwen2.5 family the load generator sizes against (loadgen/content.py VOCAB) |
 | chain `FAILED ... loadgen exit 1` | `runs/phase2/logs/<label>-s<seed>.log` on the pod (`pod.sh pull b` fetches it): the error counter was non-zero (refusals and `revoked` context bursts are not errors; connection failures and unexpected stream errors are) |
 | report build failed in the chain | logged in `chain.log`, not fatal; rebuild here after `pull b` |
+| `start` fails: "There are not enough free GPUs on the host machine" (REST and GraphQL `podResume` alike, even with `gpuCount: 0`) | the host's GPU went to someone else while the pod was stopped; `runpod_pods.py start --zero-gpu --only <pod>` resumes it CPU-only to pull the volume; or migrate the pod from the RunPod console (new id and ip); or wait and retry |
+| a zero-GPU pod shows one port mapping (8000) and `pod.sh ssh` says no ssh port | the resume dropped 22/tcp from the pod's ports; `runpod_pods.py ports 8000/tcp,22/tcp --only <pod>` re-adds it (the container restarts, mappings appear after about a minute), then `status`, `pull`, `stop` |
 | chain session dies at once, `chain log` shows nothing new; `bash -n scripts/runchain.sh` on the pod says `syntax error near unexpected token $'in\r'` | a script reached the pod with CRLF line endings (a Windows editor, or Python's `pathlib.write_text`, which writes CRLF on Windows); `sed -i 's/\r$//' scripts/*.sh` here, push again. `.gitattributes` keeps `.sh`/`.py`/`.yaml` LF in git, not in files written outside git |
 | chain `FAILED burst s1 loadgen exit 1` with `errors=15` and every error `context burst revoked` | fixed 2026-11-08 (loadgen counts them as `revoked`); on an older tree the run itself is complete and only misclassified: set it aside and rerun it, or keep it (the report reads the meter, where the status is `revoked`) |

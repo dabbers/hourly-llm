@@ -543,6 +543,124 @@ served 22 requests with 0 timeouts, cached share 47%. TTFT p50 89 ms on the gate
 and 175 / 251 ms on the two remote ones: the overlay hop and the remote prefill add about 100–160 ms
 to first-token latency, nothing to the paced stream.
 
+## Phase 2 measurements: stage C, the matrix (2026-11-08)
+
+Ten runs of `mixed-4090.yaml` (rate multiplier 11, 18 minutes of timeline plus a 90 s drain, about
+1,110 s each) through the gateway on pod B against the three 4090 replicas, one fresh gateway and
+one preflight per run, in two chains (`matrix-ondemand.yaml`, then `matrix-continue.yaml`): (1)
+`burstoff` seeds 1–3, (2) `burst` (`grace`) seeds 1–3, (3) `resv-split` seeds 1–2 (chat 24 slots and
+note-taker 4 slots pinned to replica A, the 60 tps shape excluded from A), (4) `resv-shared` seeds
+1–2 (the same slots spread by the gateway, 8 + 1–2 per replica). Report: `runs/phase2/report/`
+(`summary.csv`, `per_tenant.csv`, `per_replica.csv`, `interference.csv`, `market.csv`,
+`reservations.csv`, `reservation_bills.csv`, `samples.*`), built with the GPU cost counting the
+three replicas (see the note at the end). Every run passed its gate: loadgen errors 0, vLLM
+preemptions 0 on every replica, all three replicas healthy and idle at every preflight.
+
+| mean over seeds | (1) burst off | (2) burst on | (3) reservations pinned | (4) reservations spread |
+|---|---|---|---|---|
+| requests ok / refused | 6,090 / 287 | 7,211 / 206 | 7,048 / 330 | 6,948 / 243 |
+| context bursts served; refused after the 5 s burst queue; revoked | 0 | 689; 177; 11 | 962; 65; 13 | 779; 108; 9 |
+| streams in flight, mean | 48.8 | 60.0 | 55.3 | 56.3 |
+| utilisation (output ÷ plan tps) | 41% | 54% | 58% | 54% |
+| output tokens per GPU-hour | 1.43M | 1.88M | 1.99M | 1.86M |
+| floor violations (delivered < 95% of the shape's tps) | 1,615 | 3,360 | 2,760 | 2,517 |
+| shape revenue / per-token revenue (cache-aware) | $1.34 / $1.30 | $1.76 / $1.71 | $1.55 / $1.51 | $1.74 / $1.70 |
+| what tenants paid (reservations at factor 2.3) | $1.34 | $1.76 | $1.36 ($0.38 reservations) | $1.35 ($0.38) |
+| GPU cost, 3 × $0.89/h | $0.83 | $0.80 | $0.81 | $0.81 |
+| per-token revenue ÷ GPU cost; gross margin; margin at 70% utilisation | 1.58×; 36%; 62% | 2.12×; 53%; 63% | 1.86×; 46%; 56% | 2.11×; 53%; 64% |
+| cached prompt tokens; revenue cut by cache-read pricing | 35%; −25% | 33%; −24% | 46%; −34% | 32%; −23% |
+| burst share of output; burst discount | – | 27%; $0.058 (3.3%) | 38%; $0.089 (5.8%) | 30%; $0.068 (3.9%) |
+
+**Prompt-heavy traffic breaks the fast floor on this card too.** Prompt tokens outnumber output
+tokens 15 : 1 in every run (19–26M against 1.3–1.7M; a third to a half of them prefix-cache hits).
+With 512-token prefill chunks the engine is prefilling for someone almost always: 98–99.7% of
+requests overlapped a long prefill. While it does, per-stream decode runs at 62–78 tok/s (burst off)
+or 35–46 tok/s (burst on) against 122–154 when nothing is prefilling, and the calibration curve
+(decode only, 82 tok/s at 16 streams) overstates the rate the seats actually get. Consequence by
+tenant, bursting off: chat (30 tps) delivered 34 tok/s on average and violated on 12–38% of its
+requests; the agent (60 tps) delivered 53–59 on average, its guaranteed requests at p50 56–62 and
+p10 24–31 tok/s, violating on 59–70%; note-taker 9–50%; batch 0. The M3/M4 finding that one slow
+prefill stalls the neighbours was a 2080 Ti artifact; the finding that floors are at the mercy of
+prefill is not. It is now the aggregate prefill stream, and the fast shape cannot be honoured on a
+15 : 1 mix at 40–55% utilisation.
+
+**Bursting: +32% output per GPU-hour, twice the floor violations.** Lending the spare step rate
+(tps burst) and admitting over-context requests as the 15 tps class (context burst) raised the
+streams in flight from 49 to 60, output per GPU-hour from 1.43M to 1.88M and revenue 31%, for a
+burst discount of 3.3% of the bill. The closed-loop tenants explain the extra load: batch finished
+923–1,194 jobs instead of 361–487 (delivered 67–84 tok/s on a 15 tps shape, e2e p50 5.5–9.4 s
+instead of 26–27 s) and the agent 2,143–2,675 steps instead of 1,628–2,228. The price is the floor:
+violations 1,615 → 3,360, chat 24% → 58% of requests, agent 59–70% → 73–83%, note-taker 50–67%,
+and the agent's guaranteed requests fell to p50 28–31 tok/s. The M4 mechanism is confirmed at scale
+(lent surplus is delivered instead of banked, so the prefill-slowed engine lands on an empty
+bucket), and so is the remedy still unbuilt: a lending reserve.
+
+**Context bursts work on this card.** 689–962 agent requests per run outgrew the 8k shape and ran
+as bursts (median prompt 10.2–11k tokens, queued 0.95 s median, TTFT 1.1–2.0 s, 33–53 tok/s on the
+15 tps class, billed as `small.8k.15tps`); 45–247 per run found no seat within the 5 s burst queue
+and were refused (`503 capacity:seat`), and the agent's `429 context_exceeds_shape` refusals fell
+from 244–343 (burst off) to 26–60 (requests past the 16k burst cap). Revocation happened: 6–19
+bursts per run were revoked under `grace` after 200–360 delivered tokens, on the replica where a
+guaranteed admission needed the capacity. The load generator first recorded the 15 revocations of
+the first burst run as errors and the chain stopped on them; they are `revoked` results now
+(`loadgen/runner.py`, RUNBOOK section E).
+
+**A reservation sized below the tenant's peak is a ceiling, not a floor.** Chat's what-if p95
+occupancy is 39–46 streams; one replica holds 24 chat slots beside the note-taker's 4 × 16k, so
+that is what settings (3) and (4) reserved. A reserved tenant queues only on its own slots: chat
+waited 19–26 s at p50 (30 s at p95) pinned and 13.6–18.4 s spread, 197–202 / 56–130 of its requests
+timed out after 30 s (`503 capacity:reservation_busy`), its e2e p50 went from 8 s to 29–33 s, and
+the note-taker lost 7–18 requests the same way. M4's "reservations remove the queue" held because
+its slots covered the peak. The remedy exists as a knob and was not run: `admission.reservation_spill`
+lets a reserved tenant's overflow compete on demand. Slots were 73–78% used (chat) and 42–52%
+(note-taker); the pinned replica showed the placement rule working (below).
+
+**Placement (Q6).** Pinned setting: replica A served 2,627–2,628 chat and 184–188 note-taker
+requests and no guaranteed 60 tps request (3–15 agent context bursts ran on A as the 15 tps class:
+`exclude_shapes` applies to the class a request runs as); B and C served 1,143–1,601 agent steps and
+676–987 batch jobs each; A's fill rate 0.61–0.62 against 0.42–0.49 on B/C. Spread settings: the
+scheduler's load scoring kept the three replicas within ±8% of each other on requests and output,
+and the unpinned reservations landed 8 chat + 1–2 note-taker slots per replica. Ledgers: engine
+streams peaked at 22–32 per replica against the 32-seat plan (30–32 only in the burst runs), KV
+usage peaked at 29–60%, vLLM's own waiting queue at 5–22 (prefill backlog, not admission), gateway
+queue depth at 8–107 interactive and 7–11 burst requests, and preemptions stayed 0 in all 30
+replica-runs. Setting (4) also answers the M4 lockout: with reservations and the 60 tps shape on
+the same replicas, 0 guaranteed agent requests were refused for capacity (the 92–123 `capacity:seat`
+refusals there are context bursts at the 5 s cap).
+
+**Economics (Q7), 7B basket, cache-read pricing, $0.89 per pod-hour.** Per-token revenue at the
+basket (input $0.08, output $0.175, cache read $0.015 per 1M) was 1.58× the three pods' cost with
+bursting off (41% utilisation) and 2.12× with it on (54%): gross margin 36% → 53%, 62–64% at a 70%
+utilisation. Break-even utilisation is about 26% in either case. Shape revenue tracks per-token
+revenue within 3% by construction (parity-derived prices) and the shape bills were 1.0× the
+per-token bills for chat, agent and note-taker and 1.3–1.6× for batch (the per-token reference's
+batch discount). Prompt tokens carry the revenue as before: the runtime price of a 30 tps seat,
+$0.0189 per hour, is 0.68× the seat's cost share ($0.0278 = 3 × $0.89 ÷ 96 seats). List prices this
+cluster would need at the measured utilisation: $0.083–0.111 per 1M output tokens at a 0% margin,
+$0.110–0.148 at 25%, $0.165–0.222 at 50% (input at the basket's 0.457 ratio), i.e. 0.47–0.64× the
+basket's output price to break even and 0.94–1.27× for a 50% margin; at 70% utilisation
+$0.064–0.066 / $0.086–0.088 / $0.128–0.131. Reservations at `reservation_price_factor` 2.3 ($0.0435
+per 30 tps slot-hour, $0.0543 for the 16k shape; 1.56× the seat's cost share): the reserved tenants
+paid 0.67× (pinned) and 0.44–0.51× (spread) of what the same requests cost per request, and the
+provider took $0.19–0.39 less per run than per-request billing of the same tenants; matching that
+revenue needs a factor of 3.5 (pinned) to 4.9 (spread), $0.065–0.092 per slot-hour. Cache-read
+pricing cut per-token revenue 23–34% against charging every prompt token in full (the M3/M4
+basis); pinned reservations had the highest cached share (46%) because the agent's growing
+contexts were concentrated on B and C.
+
+**Report correction.** `gpu_cost_usd`, `revenue_vs_gpu`, the gross margins, the list prices and the
+reservations' cost share counted one GPU per run; they now count the replicas the run used
+(`replicas_used` in `summary.csv`). Single-replica runs (M1–M4) are unchanged; every phase-2 number
+above is after the fix, and `output_tokens_per_gpu_hour` is per GPU.
+
+**Operations and spend.** The first chain stopped after three runs when the load generator counted
+the 15 mid-stream revocations as errors (75 min of idle pods, about $3.30); the continuation chain
+ran the other seven unattended and its `--stop-grace-min 30` stopped all three pods on time while
+this machine was off (a power cut). RunPod then had no free GPU on pod B's host for 14 hours, so
+the runs were pulled from a CPU-only start (`podResumeZeroGpu`, which came back without its ssh
+port until `podEditJob` re-added 22/tcp; RUNBOOK section E). Spend for the phase: $17.61 of the
+$80 loaded (PHASE2.md section 3), the stopped pods' volumes $0.017 per hour until terminated.
+
 ## Environment the numbers depend on
 
 - Docker Desktop 4.2.0 with the WSL driver-store workaround (`scripts/vllm-entrypoint.sh`); WSL kernel

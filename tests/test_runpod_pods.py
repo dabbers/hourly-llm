@@ -41,6 +41,8 @@ class FakeApi:
         self.requests.append((request.method, request.url.path, body))
         if request.headers.get("Authorization") != f"Bearer {KEY}":
             return httpx.Response(401, json={"error": "unauthorized"})
+        if request.url.path == "/graphql":
+            return self._graphql(body["query"])
         parts = request.url.path.strip("/").split("/")  # v1/pods[/id[/action]]
         if request.method == "POST" and parts == ["v1", "pods"]:
             self.counter += 1
@@ -64,6 +66,24 @@ class FakeApi:
             self.pods.pop(parts[2])
             return httpx.Response(204)
         return httpx.Response(404, json={"error": f"no route {request.method} {request.url.path}"})
+
+    def _graphql(self, query: str) -> httpx.Response:
+        import re
+
+        pod_id = re.search(r'podId: "(\w+)"', query).group(1)
+        pod = self.pods[pod_id]
+        if "podResumeZeroGpu" in query:
+            pod["desiredStatus"] = "RUNNING"
+            pod["gpuCount"] = 0
+            return httpx.Response(200, json={"data": {"podResumeZeroGpu": {"id": pod_id, "desiredStatus": "RUNNING", "gpuCount": 0}}})
+        if "podEditJob" in query:
+            pod["ports"] = re.search(r'ports: "([^"]+)"', query).group(1)
+            return httpx.Response(200, json={"data": {"podEditJob": {"id": pod_id, "ports": pod["ports"], "desiredStatus": "RUNNING"}}})
+        if query.lstrip().startswith("query"):
+            return httpx.Response(200, json={"data": {"pod": {"imageName": "runpod/pytorch:test", "containerDiskInGb": 30, "volumeInGb": 20,
+                                                            "volumeMountPath": "/workspace", "dockerArgs": None,
+                                                            "env": ["PUBLIC_KEY=ssh-ed25519 AAAA test", "MODEL=m"]}}})
+        return httpx.Response(200, json={"errors": [{"message": f"unknown query {query[:40]}"}]})
 
     def client(self) -> httpx.Client:
         return httpx.Client(transport=httpx.MockTransport(self.handler), base_url=rpods.API_URL)
@@ -276,3 +296,58 @@ def test_bootstrap_path_overrides_the_start_command(phase2):
     assert body["dockerEntrypoint"] == ["bash", "-lc"]
     assert body["dockerStartCmd"] == [(REPO / "scripts" / "pod-bootstrap.sh").read_text(encoding="utf-8")]
     assert "sleep infinity" in body["dockerStartCmd"][0]
+
+
+def test_zero_gpu_start_and_ports_edit_go_through_graphql(phase2, capsys):
+    """A stopped pod whose host has no free GPU: `start --zero-gpu` resumes it CPU-only to reach the volume;
+    `ports` re-adds 22/tcp when the zero-GPU pod came back without its ssh mapping (seen 2026-11-08)."""
+    api = FakeApi()
+    rpods.main(["create", "--count", "1"], client=api.client(), env=_env_with_key())
+    rpods.main(["stop"], client=api.client(), env=_env_with_key())
+    api.requests.clear()
+    capsys.readouterr()
+    assert rpods.main(["start", "--zero-gpu", "--only", "a"], client=api.client(), env=_env_with_key()) == 0
+    assert [p for _, p, _ in api.requests] == ["/graphql"]
+    assert "podResumeZeroGpu" in api.requests[0][2]["query"]
+    assert api.pods["pod1"]["desiredStatus"] == "RUNNING" and api.pods["pod1"]["gpuCount"] == 0
+    out = capsys.readouterr().out
+    assert "zero GPUs" in out and KEY not in out
+    api.requests.clear()
+    assert rpods.main(["ports", "8000/tcp,22/tcp", "--only", "a"], client=api.client(), env=_env_with_key()) == 0
+    queries = [b["query"] for _, _, b in api.requests]
+    assert queries[0].lstrip().startswith("query") and "podEditJob" in queries[1]
+    assert 'ports: "8000/tcp,22/tcp"' in queries[1] and 'imageName: "runpod/pytorch:test"' in queries[1]
+    assert '{key: "PUBLIC_KEY", value: "ssh-ed25519 AAAA test"}' in queries[1]
+    assert api.pods["pod1"]["ports"] == "8000/tcp,22/tcp"
+    assert "8000/tcp,22/tcp" in capsys.readouterr().out
+
+
+def test_start_without_free_gpu_points_to_zero_gpu(phase2, capsys):
+    api = FakeApi()
+    rpods.main(["create", "--count", "1"], client=api.client(), env=_env_with_key())
+
+    def no_gpu(request):
+        if request.url.path.endswith("/start"):
+            return httpx.Response(500, json={"error": "start pod: There are not enough free GPUs on the host machine to start this pod.", "status": 500})
+        return api.handler(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(no_gpu), base_url=rpods.API_URL)
+    capsys.readouterr()
+    assert rpods.main(["start"], client=client, env=_env_with_key()) == 0
+    out = capsys.readouterr().out
+    assert "--zero-gpu" in out and KEY not in out
+
+
+def test_graphql_errors_are_redacted(phase2):
+    api = FakeApi()
+    rpods.main(["create", "--count", "1"], client=api.client(), env=_env_with_key())
+
+    def gql_error(request):
+        if request.url.path == "/graphql":
+            return httpx.Response(200, json={"errors": [{"message": f"There are not enough free GPUs (key {KEY})"}]})
+        return api.handler(request)
+
+    rp = rpods.RunPod(KEY, client=httpx.Client(transport=httpx.MockTransport(gql_error), base_url=rpods.API_URL))
+    with pytest.raises(rpods.RunPodError) as e:
+        rp.resume_zero_gpu("pod1")
+    assert KEY not in str(e.value) and "not enough free GPUs" in str(e.value)
