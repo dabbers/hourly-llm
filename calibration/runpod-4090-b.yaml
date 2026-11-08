@@ -1,0 +1,311 @@
+replica: runpod-4090-b
+measured_at: '2026-11-08T00:46:17+00:00'
+url: http://127.0.0.1:8000
+model: Qwen/Qwen2.5-7B-Instruct-AWQ
+vllm_version: 0.32.0
+max_model_len: 16384
+gpu:
+  name: NVIDIA GeForce RTX 4090
+  memory_total_mib: 24564
+  memory_used_mib: 21084
+  memory_free_mib: 3000
+  driver: 595.91.07
+cache:
+  num_gpu_blocks: 16947
+  block_size: 16
+  kv_tokens_total: 271152
+  raw:
+    block_size: '16'
+    cache_dtype: auto
+    enable_prefix_caching: 'True'
+    gpu_memory_utilization: '0.9'
+    kv_cache_max_concurrency: '16.5498046875'
+    num_gpu_blocks: '16947'
+output_tokens_per_stream: 256
+tps_margin: 0.1
+method: pure = per-stream tokens/s inside the window where all N streams are decoding;
+  mixed = over each stream's whole decode phase (includes neighbours' prefill)
+levels:
+  context_2048:
+    1:
+      n: 1
+      step_rate_pure_mean: 159.47
+      step_rate_pure_min: 159.47
+      pure_window_s: 1.29
+      step_rate_mixed_mean: 160.21
+      step_rate_mixed_min: 160.21
+      aggregate_tps: 143.87
+      ttft_p50_s: 0.208
+      ttft_max_s: 0.208
+      wall_s: 1.78
+      gpu_util_mean: 50.0
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.0084
+    2:
+      n: 2
+      step_rate_pure_mean: 159.4
+      step_rate_pure_min: 157.86
+      pure_window_s: 1.3
+      step_rate_mixed_mean: 153.13
+      step_rate_mixed_min: 144.73
+      aggregate_tps: 277.85
+      ttft_p50_s: 0.141
+      ttft_max_s: 0.227
+      wall_s: 1.84
+      gpu_util_mean: 75.0
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.0166
+    4:
+      n: 4
+      step_rate_pure_mean: 151.91
+      step_rate_pure_min: 149.7
+      pure_window_s: 1.36
+      step_rate_mixed_mean: 138.24
+      step_rate_mixed_min: 127.52
+      aggregate_tps: 477.97
+      ttft_p50_s: 0.186
+      ttft_max_s: 0.444
+      wall_s: 2.14
+      gpu_util_mean: 87.5
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.0325
+    8:
+      n: 8
+      step_rate_pure_mean: 145.32
+      step_rate_pure_min: 140.98
+      pure_window_s: 1.41
+      step_rate_mixed_mean: 116.45
+      step_rate_mixed_min: 101.86
+      aggregate_tps: 775.33
+      ttft_p50_s: 0.205
+      ttft_max_s: 0.841
+      wall_s: 2.64
+      gpu_util_mean: 100.0
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.0655
+    16:
+      n: 16
+      step_rate_pure_mean: 122.94
+      step_rate_pure_min: 120.58
+      pure_window_s: 1.53
+      step_rate_mixed_mean: 88.01
+      step_rate_mixed_min: 73.17
+      aggregate_tps: 1076.85
+      ttft_p50_s: 0.341
+      ttft_max_s: 1.758
+      wall_s: 3.8
+      gpu_util_mean: 93.6
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.1313
+    24:
+      n: 24
+      step_rate_pure_mean: 102.07
+      step_rate_pure_min: 99.29
+      pure_window_s: 1.87
+      step_rate_mixed_mean: 71.51
+      step_rate_mixed_min: 63.14
+      aggregate_tps: 1427.9
+      ttft_p50_s: 0.156
+      ttft_max_s: 1.896
+      wall_s: 4.3
+      gpu_util_mean: 100.0
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.1979
+    32:
+      n: 32
+      step_rate_pure_mean: 92.09
+      step_rate_pure_min: 89.69
+      pure_window_s: 2.11
+      step_rate_mixed_mean: 69.09
+      step_rate_mixed_min: 58.94
+      aggregate_tps: 1705.94
+      ttft_p50_s: 0.285
+      ttft_max_s: 2.112
+      wall_s: 4.8
+      gpu_util_mean: 95.1
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.2612
+    48:
+      n: 48
+      step_rate_pure_mean: 71.79
+      step_rate_pure_min: 68.96
+      pure_window_s: 2.31
+      step_rate_mixed_mean: 42.92
+      step_rate_mixed_min: 35.59
+      aggregate_tps: 1607.87
+      ttft_p50_s: 0.257
+      ttft_max_s: 4.498
+      wall_s: 7.64
+      gpu_util_mean: 91.8
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.3922
+  context_6144:
+    1:
+      n: 1
+      step_rate_pure_mean: 158.2
+      step_rate_pure_min: 158.2
+      pure_window_s: 1.36
+      step_rate_mixed_mean: 158.48
+      step_rate_mixed_min: 158.48
+      aggregate_tps: 111.37
+      ttft_p50_s: 0.654
+      ttft_max_s: 0.654
+      wall_s: 2.3
+      gpu_util_mean: 80.0
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.0235
+    2:
+      n: 2
+      step_rate_pure_mean: 148.83
+      step_rate_pure_min: 148.47
+      pure_window_s: 1.37
+      step_rate_mixed_mean: 132.24
+      step_rate_mixed_min: 114.1
+      aggregate_tps: 209.26
+      ttft_p50_s: 0.414
+      ttft_max_s: 0.719
+      wall_s: 2.45
+      gpu_util_mean: 80.0
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.0469
+    4:
+      n: 4
+      step_rate_pure_mean: 134.74
+      step_rate_pure_min: 134.56
+      pure_window_s: 1.45
+      step_rate_mixed_mean: 102.04
+      step_rate_mixed_min: 84.16
+      aggregate_tps: 307.21
+      ttft_p50_s: 0.429
+      ttft_max_s: 1.415
+      wall_s: 3.33
+      gpu_util_mean: 99.6
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.0932
+    8:
+      n: 8
+      step_rate_pure_mean: 111.68
+      step_rate_pure_min: 111.28
+      pure_window_s: 1.56
+      step_rate_mixed_mean: 70.81
+      step_rate_mixed_min: 54.55
+      aggregate_tps: 396.35
+      ttft_p50_s: 0.526
+      ttft_max_s: 2.962
+      wall_s: 5.17
+      gpu_util_mean: 90.0
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.1862
+    16:
+      n: 16
+      step_rate_pure_mean: 81.64
+      step_rate_pure_min: 81.26
+      pure_window_s: 1.65
+      step_rate_mixed_mean: 43.43
+      step_rate_mixed_min: 31.0
+      aggregate_tps: 446.36
+      ttft_p50_s: 0.888
+      ttft_max_s: 6.436
+      wall_s: 9.18
+      gpu_util_mean: 94.1
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.3732
+    24:
+      n: 24
+      step_rate_pure_mean: 63.29
+      step_rate_pure_min: 63.27
+      pure_window_s: 2.05
+      step_rate_mixed_mean: 32.54
+      step_rate_mixed_min: 25.74
+      aggregate_tps: 561.85
+      ttft_p50_s: 0.233
+      ttft_max_s: 7.707
+      wall_s: 10.94
+      gpu_util_mean: 100.0
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.5607
+    32:
+      n: 32
+      step_rate_pure_mean: 53.11
+      step_rate_pure_min: 53.09
+      pure_window_s: 2.49
+      step_rate_mixed_mean: 26.35
+      step_rate_mixed_min: 21.8
+      aggregate_tps: 641.32
+      ttft_p50_s: 0.27
+      ttft_max_s: 9.076
+      wall_s: 12.77
+      gpu_util_mean: 100.0
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.7479
+    48:
+      n: 48
+      step_rate_pure_mean: null
+      step_rate_pure_min: null
+      pure_window_s: 0.0
+      step_rate_mixed_mean: 22.0
+      step_rate_mixed_min: 13.86
+      aggregate_tps: 498.57
+      ttft_p50_s: 0.425
+      ttft_max_s: 22.437
+      wall_s: 24.65
+      gpu_util_mean: 95.9
+      gpu_mem_peak_mib: 21164
+      kv_usage_peak: 0.9996
+interference:
+  aggressor_prefill_s: 0.639
+  victim_tps_before: 163.22
+  victim_tps_during_prefill: 26.59
+  victim_tps_after: 163.5
+  victim_tokens: 1200
+  victim_context: 2048
+  aggressor_context: 6144
+shapes:
+  small.8k.15tps:
+    tps: 15.0
+    max_context: 8192
+    n_max_by_step_rate:
+      context_2048: 48
+      context_6144: 48
+    n_max_by_kv: 33
+    sellable: true
+  small.8k.30tps:
+    tps: 30.0
+    max_context: 8192
+    n_max_by_step_rate:
+      context_2048: 48
+      context_6144: 32
+    n_max_by_kv: 33
+    sellable: true
+  small.8k.60tps:
+    tps: 60.0
+    max_context: 8192
+    n_max_by_step_rate:
+      context_2048: 48
+      context_6144: 16
+    n_max_by_kv: 33
+    sellable: true
+  small.16k.30tps:
+    tps: 30.0
+    max_context: 16384
+    n_max_by_step_rate:
+      context_2048: 48
+      context_6144: 32
+    n_max_by_kv: 16
+    sellable: true
+  small.8k.15tps.lazy:
+    tps: 15.0
+    max_context: 8192
+    n_max_by_step_rate:
+      context_2048: 48
+      context_6144: 48
+    n_max_by_kv: 33
+    sellable: true
+  small.16k.30tps.lazy:
+    tps: 30.0
+    max_context: 16384
+    n_max_by_step_rate:
+      context_2048: 48
+      context_6144: 32
+    n_max_by_kv: 16
+    sellable: true

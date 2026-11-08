@@ -174,14 +174,19 @@ bash scripts/pod.sh create --count 2
 bash scripts/pod.sh wait-ready --timeout 1200
 ```
 
-Write the replica URLs the gateway on pod A uses: `REPLICA_A_URL=http://127.0.0.1:8000`,
-`REPLICA_B_URL=http://<idB>.runpod.internal:8000`, `REPLICA_C_URL=...` plus `REPLICA_<X>_ID`.
+First pick the gateway pod. On RunPod two pods that land on the same physical host (same public ip
+in `status`) cannot reach each other at all, neither over global networking nor through the public
+port mapping, while pods on different hosts talk fine. Stage B hit this: pods `a` and `c` shared a
+host, so the gateway runs on `b`, which reaches both. Choose a pod whose public ip is unique among
+the three and pass it as `--gateway`; the rest of this runbook writes `b` where the gateway runs.
+Write the replica URLs the gateway uses: the gateway pod's own engine as `http://127.0.0.1:8000`,
+the others as `http://<id>.runpod.internal:8000`, plus `REPLICA_<X>_ID`.
 `config/phase2/replicas.yaml` reads them as `${REPLICA_B_URL}`; the gateway sources
 `runs/phase2/phase2.env` at start. Replica traffic goes over RunPod global networking, never the
 HTTP proxy (it cuts requests at 100 s):
 
 ```bash
-bash scripts/pod.sh env-file
+bash scripts/pod.sh env-file --gateway b
 ```
 
 Push and set up all three pods (`b` and `c` only need the tree for a local calibration or a
@@ -317,6 +322,7 @@ After phase 2 the API key on pod A is gone with the pod; rotate it in RunPod's s
 | `wait-ready` stuck on "waiting for ip/ports" | the pod is still being scheduled; RunPod console shows the reason (no 4090 in that data centre: create in another with `--datacenter`) |
 | `wait-ready` stuck on "vLLM not ready" for > 15 min | `pod.sh vllm a log` (engine log at /root/vllm.log on the pod): image pull, model download, or an engine argument the card rejects |
 | ssh refused | `pod.sh status` (port mappings changed after a restart); the key in RunPod settings must match `RUNPOD_SSH_KEY` |
+| the gateway cannot reach one replica (`unhealthy`, startup fails with "KV budget unknown") while another pod can | the two pods share a physical host (same public ip in `status`): run the gateway on a pod with a unique public ip (`env-file --gateway <pod>`), or terminate and recreate the pod in another data centre |
 | `preflight` fails on `model[...]` | the pod serves another model: `pod.sh vllm <pod> status`; fix `/workspace/vllm.args` and `pod.sh vllm <pod> restart` |
 | `preflight` fails on `replica_idle` / `ledger_idle` | a previous run is still streaming or the gateway was not restarted; `pod.sh gateway a stop`, wait, start again |
 | `preflight` fails on `tokenizer` | the served model's tokenizer differs from the Qwen2.5 family the load generator sizes against (loadgen/content.py VOCAB) |

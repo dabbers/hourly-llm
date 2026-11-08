@@ -214,6 +214,10 @@ def test_env_file_lists_local_a_and_internal_dns_for_the_rest(phase2, capsys):
         "REPLICA_C_URL=http://pod3.runpod.internal:8000", "REPLICA_C_ID=pod3",
     ]
     assert KEY not in text
+    assert rpods.main(["env-file", "--out", str(out_path), "--gateway", "b"], env={}) == 0
+    lines = [ln for ln in out_path.read_text(encoding="utf-8").splitlines() if not ln.startswith("#")]
+    assert lines[:4] == ["REPLICA_A_URL=http://pod1.runpod.internal:8000", "REPLICA_A_ID=pod1",
+                         "REPLICA_B_URL=http://127.0.0.1:8000", "REPLICA_B_ID=pod2"]
 
 
 def test_api_errors_are_redacted(phase2):

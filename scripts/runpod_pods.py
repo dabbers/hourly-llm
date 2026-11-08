@@ -476,23 +476,30 @@ def cmd_terminate(
     return gone
 
 
-def env_file_text(pods: list[dict[str, Any]]) -> str:
-    """REPLICA_<X>_URL / REPLICA_<X>_ID lines for config/phase2/replicas.yaml (${REPLICA_B_URL})."""
+def env_file_text(pods: list[dict[str, Any]], gateway: str = GATEWAY_LETTER) -> str:
+    """REPLICA_<X>_URL / REPLICA_<X>_ID lines for config/phase2/replicas.yaml (${REPLICA_B_URL}), as seen
+    from the pod that runs the gateway (`gateway` letter): its own engine on localhost, the others over
+    global networking. Pick a gateway pod whose public ip differs from every other pod's: two pods on
+    one physical host cannot reach each other on RunPod (stage B, 2026-11-08)."""
     by_letter = {pod_letter(p): p for p in pods}
-    if GATEWAY_LETTER not in by_letter:
-        raise RunPodError("pods.json has no pod `a` (the gateway host)")
-    lines = ["# written by scripts/runpod_pods.py env-file; the gateway on pod a sources this"]
+    gateway = gateway.lower()
+    if gateway not in by_letter:
+        raise RunPodError(f"pods.json has no pod `{gateway}` (the gateway host)")
+    lines = [f"# written by scripts/runpod_pods.py env-file; the gateway on pod {gateway} sources this"]
+    shared = {p.get("public_ip") for p in pods if p.get("public_ip") and p is not by_letter[gateway] and p.get("public_ip") == by_letter[gateway].get("public_ip")}
+    if shared:
+        lines.append(f"# WARNING: another pod shares pod {gateway}'s public ip (same host): it will be unreachable from the gateway")
     for letter in sorted(by_letter):
         pod = by_letter[letter]
         upper = letter.upper()
-        url = "http://127.0.0.1:8000" if letter == GATEWAY_LETTER else f"http://{pod['id']}.runpod.internal:8000"
+        url = "http://127.0.0.1:8000" if letter == gateway else f"http://{pod['id']}.runpod.internal:8000"
         lines.append(f"REPLICA_{upper}_URL={url}")
         lines.append(f"REPLICA_{upper}_ID={pod['id']}")
     return "\n".join(lines) + "\n"
 
 
-def cmd_env_file(*, pods_path: Path, out_path: Path, out: Callable[[str], None] = print) -> Path:
-    text = env_file_text(load_pods(pods_path))
+def cmd_env_file(*, pods_path: Path, out_path: Path, out: Callable[[str], None] = print, gateway: str = GATEWAY_LETTER) -> Path:
+    text = env_file_text(load_pods(pods_path), gateway)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(text, encoding="utf-8")
     out(text.rstrip())
@@ -545,7 +552,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--yes", action="store_true")
     t.add_argument("--only", default=None)
 
-    e = sub.add_parser("env-file", help="write REPLICA_*_URL/ID for the gateway on pod a")
+    e = sub.add_parser("env-file", help="write REPLICA_*_URL/ID as seen from the gateway pod")
+    e.add_argument("--gateway", default=GATEWAY_LETTER, help="letter of the pod that runs the gateway (default a); pick one with a unique public ip")
     e.add_argument("--out", default=None, help="default: <phase2-dir>/phase2.env")
     return p
 
@@ -563,7 +571,7 @@ def main(
     pods_path = pods_file(directory)
     try:
         if args.cmd == "env-file":
-            cmd_env_file(pods_path=pods_path, out_path=Path(args.out) if args.out else directory / "phase2.env")
+            cmd_env_file(pods_path=pods_path, out_path=Path(args.out) if args.out else directory / "phase2.env", gateway=args.gateway)
             return 0
         if args.cmd == "create" and args.dry_run:
             has_key = bool(env.get("RUNPOD_API_KEY") or read_dotenv(dotenv).get("RUNPOD_API_KEY"))
