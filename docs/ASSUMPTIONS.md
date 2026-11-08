@@ -455,6 +455,73 @@ not findings.
   the post-M4 design change, verified by the fake-replica tests (tests/test_phase2.py) and not yet
   on hardware.
 
+## Phase 2 measurements: stage A, one RTX 4090 (2026-11-08)
+
+Pod: RunPod Secure Cloud, EUR-IS-2, RTX 4090 24 GB, 36 vCPU, RunPod PyTorch image with vLLM 0.32.0
+installed into a venv on the 20 GB volume; `Qwen/Qwen2.5-7B-Instruct-AWQ`, fp16 activations, Marlin
+AWQ kernels, FlashAttention 2, `--max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90
+--max-num-batched-tokens 512`, prefix caching on. KV cache **271,152 tokens** (16,947 blocks of 16),
+21.1 GB of the 24 GB in use. `scripts/calibrate.py`, 256 output tokens per stream, concurrency
+1–48 at 2k and 6k context, margin 0.10; the whole calibration took two minutes.
+
+| streams | 2k pure tok/s | 2k mixed | 2k aggregate | 6k pure | 6k mixed | 6k aggregate | 6k TTFT p50 |
+|---|---|---|---|---|---|---|---|
+| 1 | 162 | 163 | 143 | 154 | 155 | 109 | 0.66 s |
+| 2 | 158 | 154 | 274 | 144 | 133 | 210 | 0.42 |
+| 4 | 152 | 138 | 480 | 136 | 104 | 309 | 0.47 |
+| 8 | 146 | 117 | 766 | 113 | 72 | 400 | 0.56 |
+| 16 | 121 | 88 | 1,089 | 82 | 44 | 454 | 0.90 |
+| 24 | 101 | 71 | 1,413 | 64 | 33 | 565 | 0.38 |
+| 32 | 90 | 63 | 1,702 | 54 | 27 | 644 | 0.36 |
+| 48 | 71 | 65 | 1,778 | – (does not fit the KV) | 22 | 498 | 0.63 |
+
+Against the 2080 Ti (105 → 35 tok/s from 1 to 8 streams at 6k, aggregate peak 131 tok/s): single
+stream 1.5× faster, eight streams 3.2× faster, aggregate 4.9× higher, and the card stays
+compute-rich much deeper into the batch (the 2080 Ti halved its per-stream rate by 4 streams, the
+4090 by 24).
+
+**Seat ceilings** (`n_max`, pure rate × 0.9 ≥ tps, at the 6k level the gateway uses; KV bound for
+the shape's whole context):
+
+| shape tps | n_max by step rate at 6k | n_max by KV (8k / 16k) | seats sold per replica |
+|---|---|---|---|
+| 15 | ≥ 48 (every tested level) | 33 / 16 | 33 / 16 |
+| 30 | 32 (interpolated ≈ 48) | 33 / 16 | 32 / 16 |
+| 60 | 16 (interpolated ≈ 21) | 33 / 16 | 16–21 |
+| 120 | 1–2 | | not sold |
+
+The KV budget, not the step rate, is what caps an 8k-context replica at 33 seats; the 2080 Ti's
+8-seat plan becomes **32 per replica, 96 across three**. A 60 tps request costs about two 30 tps
+seats of ceiling here, not six as on the 2080 Ti, so the nesting penalty that drove the M4 lockouts
+shrinks by a factor of three.
+
+**Prefill interference (A4):** a 6,144-token prompt prefills in **0.65 s** (4.2–5.5 s on the 2080
+Ti). The decoding neighbour drops from 164 to 32 tok/s for that time and recovers to 165. A 30 tps
+stream with its one-second bucket (30 tokens banked) rides out a 0.65 s stall at 32 tok/s without a
+floor violation; at 2080 Ti prefill times it could not.
+
+**Gateway smoke on the one replica** (`smoke-4090.yaml`, two minutes, burst on, text capture on,
+runs `20261108-003551`): 150 requests, 148 ok, 2 refused (the two long agent showcase prompts whose
+late turns exceed even the 16k burst cap: `429 context_exceeds_shape`, as designed), 0 errors, 6
+context bursts admitted as the 15 tps class, 0 floor violations, 792k output tokens per GPU-hour.
+With the card otherwise idle every stream was delivered at 139–153 tok/s on top of its shape: burst
+share 68%. TTFT p50 59 ms (chat), 115 ms (agent), 328 ms (note-taker, 3–4k prompts). **Prefix-cache
+hits: 48% of all prompt tokens** (agent 71%, chat 68%, batch 2%, note-taker 0.4%; vLLM's own
+counters showed 61% over the earlier smoke), which the meter only sees with
+`--enable-prompt-tokens-details`. Priced at the 7B basket's cache-read rate ($0.015 against $0.08
+per 1M input), the traffic's per-token revenue is $0.0123 instead of $0.0194 uncached: **the M3 and
+M4 margins, computed with every prompt token at full price, were 36% too high for this
+multi-turn mix**. The 36 showcase requests kept prompt and completion; the 7B's answers follow the
+instructions (a four-day itinerary revised under new constraints, a JSON classification with the
+right fields) and are the first entries for the write-up's samples.
+
+Stage A also settled three operational facts recorded in RUNBOOK.md: the vLLM image's start
+command never ran on RunPod (container idle 26 min), so pods run RunPod's PyTorch image and vLLM is
+installed over SSH; the 20 GB volume is too small for the 18 GB venv plus the 5.3 GB model cache, so
+the cache and the engine log live on the container disk; and vLLM 0.32's FlashInfer sampler needs
+`ninja`/`nvcc` the image lacks, so `VLLM_USE_FLASHINFER_SAMPLER=0` (attention stays on
+FlashAttention). Spend for stage A: see PHASE2.md section 3.
+
 ## Environment the numbers depend on
 
 - Docker Desktop 4.2.0 with the WSL driver-store workaround (`scripts/vllm-entrypoint.sh`); WSL kernel

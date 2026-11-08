@@ -2,7 +2,7 @@
 # The phase-2 matrix, run ON pod A inside tmux (docs/PHASE2.md sections 3-4; started with
 # `pod.sh chain a start`, which copies pods.json and, for --stop-pods, .env to the pod first).
 #
-#   bash scripts/runchain.sh config/phase2/matrix.yaml [--max-hours 5] [--stop-pods]
+#   bash scripts/runchain.sh config/phase2/matrix-ondemand.yaml [--max-hours 5] [--stop-pods]
 #
 # Matrix file:
 #   scenario: config/scenarios/mixed-4090.yaml     # loadgen scenario

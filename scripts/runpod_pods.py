@@ -38,7 +38,12 @@ import httpx
 REPO = Path(__file__).resolve().parents[1]
 API_URL = "https://rest.runpod.io/v1"
 RTX_4090 = "NVIDIA GeForce RTX 4090"
-DEFAULT_IMAGE = "vllm/vllm-openai:v0.32.0"
+VLLM_IMAGE = "vllm/vllm-openai:v0.32.0"  # the bootstrap path (experimental, see TEMPLATE_IMAGE)
+# RunPod's own PyTorch image: sshd and the PUBLIC_KEY handling are built in, so no start-command override is
+# needed; vLLM is then installed over SSH (`pod.sh vllm <pod> install`). Stage A on 2026-11-07 showed the
+# custom start command on the vLLM image never ran (container idle for 26 min), so this is the working path.
+TEMPLATE_IMAGE = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
+DEFAULT_IMAGE = TEMPLATE_IMAGE
 DEFAULT_MODEL = "Qwen/Qwen2.5-7B-Instruct-AWQ"
 DEFAULT_BATCHED_TOKENS = "512"
 BOOTSTRAP = REPO / "scripts" / "pod-bootstrap.sh"
@@ -216,8 +221,10 @@ def pod_body(
     env: dict[str, str] | None = None,
     global_networking: bool = True,
     start_script: str | None = None,
+    bootstrap: bool = False,
 ) -> dict[str, Any]:
-    script = BOOTSTRAP.read_text(encoding="utf-8") if start_script is None else start_script
+    """The POST /pods body. With `bootstrap` the vLLM image's entrypoint is replaced by pod-bootstrap.sh;
+    without it the image starts as it is (the template path: RunPod's PyTorch image with sshd built in)."""
     body: dict[str, Any] = {
         "name": name,
         "imageName": image,
@@ -231,9 +238,11 @@ def pod_body(
         "supportPublicIp": True,
         "globalNetworking": global_networking,
         "env": dict(env or {}),
-        "dockerEntrypoint": ["bash", "-lc"],
-        "dockerStartCmd": [script],
     }
+    if bootstrap:
+        script = BOOTSTRAP.read_text(encoding="utf-8") if start_script is None else start_script
+        body["dockerEntrypoint"] = ["bash", "-lc"]
+        body["dockerStartCmd"] = [script]
     dcs = [d for d in datacenters if d]
     if dcs:
         body["dataCenterIds"] = dcs
@@ -264,6 +273,7 @@ def cmd_create(
     model: str = DEFAULT_MODEL,
     batched_tokens: str = DEFAULT_BATCHED_TOKENS,
     global_networking: bool = True,
+    bootstrap: bool = False,
     dry_run: bool = False,
     pods_path: Path,
     out: Callable[[str], None] = print,
@@ -277,7 +287,7 @@ def cmd_create(
     env = {"MODEL": model, "VLLM_MAX_NUM_BATCHED_TOKENS": batched_tokens, **(extra_env or {})}
     bodies = [
         pod_body(f"{name_prefix}-{letter}", gpu=gpu, image=image, disk_gb=disk_gb, volume_gb=volume_gb,
-                 datacenters=datacenters, env=env, global_networking=global_networking)
+                 datacenters=datacenters, env=env, global_networking=global_networking, bootstrap=bootstrap)
         for letter in free[:count]
     ]
     if dry_run:
@@ -352,8 +362,10 @@ def cmd_wait_ready(
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
     out: Callable[[str], None] = print,
+    ports_only: bool = False,
 ) -> bool:
-    """True once every pod has an ip, both port mappings and a 200 from vLLM's /health."""
+    """True once every pod has an ip, both port mappings and a 200 from vLLM's /health (or just the
+    ip and ports with `ports_only`, when vLLM is installed over SSH afterwards)."""
     pods = load_pods(pods_path)
     if not pods:
         raise RunPodError(f"{pods_path} has no pods; run `create` first")
@@ -369,7 +381,7 @@ def cmd_wait_ready(
             if not (pod.get("public_ip") and pod.get("ssh_port") and pod.get("vllm_port")):
                 pending.append(f"{pod['name']}: waiting for ip/ports ({pod.get('status')})")
                 continue
-            if pod.get("vllm_ready"):
+            if pod.get("vllm_ready") or ports_only:
                 continue
             url = f"http://{pod['public_ip']}:{pod['vllm_port']}/health"
             try:
@@ -500,7 +512,10 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--count", type=int, default=1)
     c.add_argument("--name-prefix", default="slotgw")
     c.add_argument("--gpu", default=RTX_4090)
-    c.add_argument("--image", default=DEFAULT_IMAGE)
+    c.add_argument("--image", default=DEFAULT_IMAGE, help=f"container image (default {TEMPLATE_IMAGE}; the bootstrap path uses {VLLM_IMAGE})")
+    c.add_argument("--bootstrap", action="store_true",
+                   help="experimental: override the image's start command with pod-bootstrap.sh (meant for the vLLM image); "
+                        "on 2026-11-07 the container stayed idle, so the default installs vLLM over SSH instead")
     c.add_argument("--disk", type=int, default=30, help="container disk GB (erased on stop)")
     c.add_argument("--volume", type=int, default=20, help="persistent volume GB at /workspace (HF cache)")
     c.add_argument("--datacenter", action="append", default=[], help="dataCenterId, repeatable")
@@ -517,6 +532,7 @@ def build_parser() -> argparse.ArgumentParser:
     w = sub.add_parser("wait-ready", help="wait for ips, ports and vLLM /health on every pod")
     w.add_argument("--timeout", type=float, default=900)
     w.add_argument("--poll", type=float, default=10)
+    w.add_argument("--ports-only", action="store_true", help="ready once ip and port mappings exist (no vLLM yet: template path)")
 
     st = sub.add_parser("stop", help="stop pods (container disk erased, volume kept, no GPU charge)")
     st.add_argument("--all", action="store_true", help="every pod on the account")
@@ -555,18 +571,19 @@ def main(
             cmd_create(None, count=args.count, name_prefix=args.name_prefix, gpu=args.gpu, image=args.image,
                        disk_gb=args.disk, volume_gb=args.volume, datacenters=args.datacenter,
                        extra_env=parse_env_args(args.env), model=args.model, batched_tokens=args.batched_tokens,
-                       global_networking=not args.no_global_networking, dry_run=True, pods_path=pods_path)
+                       global_networking=not args.no_global_networking, bootstrap=args.bootstrap, dry_run=True,
+                       pods_path=pods_path)
             return 0
         rp = RunPod(load_api_key(env, dotenv), client=client)
         if args.cmd == "create":
             cmd_create(rp, count=args.count, name_prefix=args.name_prefix, gpu=args.gpu, image=args.image,
                        disk_gb=args.disk, volume_gb=args.volume, datacenters=args.datacenter,
                        extra_env=parse_env_args(args.env), model=args.model, batched_tokens=args.batched_tokens,
-                       global_networking=not args.no_global_networking, pods_path=pods_path)
+                       global_networking=not args.no_global_networking, bootstrap=args.bootstrap, pods_path=pods_path)
         elif args.cmd == "status":
             cmd_status(rp, pods_path=pods_path, all_pods=args.all, as_json=args.json)
         elif args.cmd == "wait-ready":
-            if not cmd_wait_ready(rp, pods_path=pods_path, timeout_s=args.timeout, poll_s=args.poll):
+            if not cmd_wait_ready(rp, pods_path=pods_path, timeout_s=args.timeout, poll_s=args.poll, ports_only=args.ports_only):
                 return 1
         elif args.cmd == "stop":
             cmd_stop(rp, pods_path=pods_path, all_pods=args.all, only=args.only)

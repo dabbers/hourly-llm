@@ -1,16 +1,18 @@
 # Phase 2 workload (docs/PHASE2.md): the milestone-2 mixed scenario re-scaled for three RTX 4090
 # replicas, plus the showcase lane of real prompts whose completions the report shows.
 #   uv run slotgw-loadgen --scenario config/scenarios/mixed-4090.yaml --seed 1 --config-dir config/phase2
-# rate_multiplier is the sizing knob: set after stage A's calibration so the peak phase targets ~70%
-# fill of the three-replica slot plan (1.0 is the 2080 Ti's load: 6-10 streams, far too little here).
-# Reservation slots are re-sized from the on-demand runs' p95 occupancy (the what-if method) before
-# the reservation settings run; `replica:` pins them (matrix setting 3) and --reservation-replica
-# overrides it per run.
+# rate_multiplier is the sizing knob. Stage A's calibration gives each 4090 replica 32 seats at 30 tps
+# (KV-bound at 33), so the three-replica plan is 96 seats; the 2080 Ti scenario offered 8-10 streams
+# at peak with pacing holding every stream at its shape's rate; a plan replay at 11x gives a peak-phase
+# occupancy of about 61 streams mean and 76 at p95 (64% / 79% of the plan) with bursting off. Batch runs 12 closed-loop workers so the lazy filler can show
+# on idle seats (lazy_max_share caps it at 16 per replica). Reservation slots are re-sized from the
+# on-demand runs' p95 occupancy (the what-if method) before the reservation settings run
+# (matrix-resv.yaml); `replica:` pins them (setting 3) and --reservation-replica overrides it per run.
 name: mixed-4090
 hour_length_s: 600
 drain_s: 90
 sample_interval_s: 2
-rate_multiplier: 1.0
+rate_multiplier: 11
 phases:
   - {name: quiet, duration_s: 180, rate_scale: 0.25}
   - {name: ramp, duration_s: 120, rate_scale: 0.6}
@@ -22,7 +24,7 @@ tenants:
     shape: small.8k.30tps
     profile: {kind: chat, turns: [3, 10], first_user_tokens: [200, 800], user_tokens_per_turn: [200, 800], output_tokens: [50, 300], think_s: [5, 30]}
     arrivals: {kind: diurnal, rate_per_min: 4.5}
-    reservation: {slots: 4, replica: runpod-4090-a}
+    reservation: {slots: 24, replica: runpod-4090-a}   # placeholder: set from the on-demand runs' p95 occupancy
     showcase: {prompts: config/prompts/chat.yaml, every_s: 180, offset_s: 30}
   - name: agent
     api_key: sk-local-agent
@@ -35,10 +37,10 @@ tenants:
     shape: small.16k.30tps
     profile: {kind: notetaker, prompt_tokens: [3000, 8000], output_tokens: [150, 400]}
     arrivals: {kind: hourmark, per_mark: 8, sigma_s: 120, background_per_min: 0.5}
-    reservation: {slots: 1, replica: runpod-4090-a}
+    reservation: {slots: 4, replica: runpod-4090-a}    # placeholder: set from the on-demand runs' p95 occupancy
     showcase: {prompts: config/prompts/notetaker.yaml, every_s: 300, offset_s: 90}
   - name: batch
     api_key: sk-local-batch
     shape: small.8k.15tps.lazy
-    profile: {kind: batch, prompt_tokens: [500, 2000], output_tokens: [200, 600], concurrency: 2}
+    profile: {kind: batch, prompt_tokens: [500, 2000], output_tokens: [200, 600], concurrency: 12}
     showcase: {prompts: config/prompts/batch.yaml, every_s: 240, offset_s: 120}

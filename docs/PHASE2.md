@@ -74,6 +74,12 @@ Optional experiments, each only after the planned matrix is complete and committ
 | 120 tps shape and 32k note-taker | 3 × 1.5 h | ~$4 | only if `n_max(120)` is at least 4 on the 4090: one on-demand run with the agent tenant on 120 tps and the note-taker on a 32k shape |
 | `abort` revocation policy | 3 × 0.75 h | ~$2 | only if the `grace` run shows revocations: the same seed under `abort` |
 
+Spend log (RunPod credit; $80 loaded):
+
+| When (UTC) | What | Pod-hours | Cost |
+|---|---|---|---|
+| 2026-11-07 22:59–23:27 | stage A, first pod on the vLLM image with the bootstrap start command: container idle for 26 min (no sshd, no engine), terminated | 0.46 | $0.41 |
+
 Matrix settings (all on `mixed-4090.yaml`): (1) burst off, on demand; (2) burst on (`grace`), on
 demand; (3) burst on, reservations at factor 2.3, reservations placed on replica A and the 60 tps
 shape kept off it; (4) burst on, reservations with no placement rule, to measure the lockout on a

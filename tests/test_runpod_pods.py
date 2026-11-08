@@ -109,12 +109,10 @@ def test_create_builds_the_body_and_writes_pods_json(phase2, capsys):
     assert body["gpuTypeIds"] == ["NVIDIA GeForce RTX 4090"] and body["gpuCount"] == 1
     assert body["cloudType"] == "SECURE" and body["globalNetworking"] is True
     assert body["ports"] == ["8000/tcp", "22/tcp"] and body["supportPublicIp"] is True
-    assert body["imageName"] == "vllm/vllm-openai:v0.32.0"
+    assert body["imageName"] == rpods.TEMPLATE_IMAGE  # the template path: the image's own sshd, vLLM installed over SSH
     assert body["containerDiskInGb"] == 30 and body["volumeInGb"] == 20 and body["volumeMountPath"] == "/workspace"
     assert body["dataCenterIds"] == ["US-TX-3"]
-    assert body["dockerEntrypoint"] == ["bash", "-lc"]
-    assert body["dockerStartCmd"] == [(REPO / "scripts" / "pod-bootstrap.sh").read_text(encoding="utf-8")]
-    assert "sleep infinity" in body["dockerStartCmd"][0]
+    assert "dockerEntrypoint" not in body and "dockerStartCmd" not in body
     assert body["env"] == {"MODEL": "Qwen/Qwen2.5-7B-Instruct-AWQ", "VLLM_MAX_NUM_BATCHED_TOKENS": "512", "FOO": "bar"}
     saved = json.loads((phase2 / "pods.json").read_text(encoding="utf-8"))["pods"]
     assert [(p["name"], p["id"], p["gpu"]) for p in saved] == [
@@ -263,3 +261,14 @@ def test_start_404_points_to_the_console(phase2, capsys):
     capsys.readouterr()
     assert rpods.main(["start"], client=client, env=_env_with_key()) == 0
     assert "RunPod console" in capsys.readouterr().out
+
+
+def test_bootstrap_path_overrides_the_start_command(phase2):
+    api = FakeApi()
+    rc = rpods.main(["create", "--count", "1", "--bootstrap", "--image", rpods.VLLM_IMAGE], client=api.client(), env=_env_with_key())
+    assert rc == 0
+    body = next(b for m, p, b in api.requests if m == "POST" and p == "/v1/pods")
+    assert body["imageName"] == rpods.VLLM_IMAGE
+    assert body["dockerEntrypoint"] == ["bash", "-lc"]
+    assert body["dockerStartCmd"] == [(REPO / "scripts" / "pod-bootstrap.sh").read_text(encoding="utf-8")]
+    assert "sleep infinity" in body["dockerStartCmd"][0]

@@ -1,5 +1,6 @@
-# Phase 2 run matrix (docs/PHASE2.md section 3), executed on pod A by scripts/runchain.sh:
-#   bash scripts/runchain.sh config/phase2/matrix.yaml --max-hours 5 --stop-pods
+# Phase 2 run matrix, part 2: the reservation settings, after mixed-4090.yaml's reservation slots are
+# set from part 1's p95 occupancy (docs/PHASE2.md section 3):
+#   bash scripts/runchain.sh config/phase2/matrix-resv.yaml --max-hours 2 --stop-pods
 # Each entry runs once per seed with a fresh gateway (own run id), preflight first; the chain stops
 # at the first run that fails any check. `env` is the gateway's environment for that setting, on top
 # of runs/phase2/phase2.env (replica URLs); `loadgen_args` go to slotgw-loadgen.
@@ -10,14 +11,6 @@ expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
 expect_calibration: runpod-4090     # preflight: every ledger's calibration source must contain this
 report_out: runs/phase2/report
 runs:
-  - label: burstoff                      # (1) no bursting, on demand
-    seeds: [1, 2, 3]
-    env: {SLOTGW_BURST: "false"}
-    loadgen_args: ["--no-reservations"]
-  - label: burst                         # (2) tps + context bursts (grace), on demand
-    seeds: [1, 2, 3]
-    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
-    loadgen_args: ["--no-reservations"]
   - label: resv-split                    # (3) reservations pinned to replica A, the 60 tps shape kept off A
     seeds: [1, 2]
     env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, REPLICA_A_EXCLUDE: small.8k.60tps}

@@ -33,23 +33,23 @@ fi
 chmod 600 /root/.ssh/authorized_keys
 if service ssh start >>"$LOG" 2>&1; then log "sshd up"; else log "sshd did not start; see $LOG"; fi
 
-export HF_HOME=/workspace/hf
+export HF_HOME=/root/hf  # container disk: the volume is too small for venv + model cache (stage A)
 mkdir -p "$HF_HOME"
-grep -q 'HF_HOME=' /root/.bashrc 2>/dev/null || echo 'export HF_HOME=/workspace/hf' >>/root/.bashrc
+grep -q 'HF_HOME=' /root/.bashrc 2>/dev/null || echo 'export HF_HOME=/root/hf' >>/root/.bashrc
 
 if [ ! -f /workspace/vllm.args ]; then
   cat >/workspace/vllm.args <<ARGS
---model ${MODEL:-Qwen/Qwen2.5-7B-Instruct-AWQ} --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens ${VLLM_MAX_NUM_BATCHED_TOKENS:-512} --enable-prefix-caching --port 8000 --host 0.0.0.0
+--model ${MODEL:-Qwen/Qwen2.5-7B-Instruct-AWQ} --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens ${VLLM_MAX_NUM_BATCHED_TOKENS:-512} --enable-prefix-caching --enable-prompt-tokens-details --port 8000 --host 0.0.0.0
 ARGS
   log "wrote /workspace/vllm.args"
 fi
 
 cat >/workspace/run-vllm.sh <<'RUN'
 #!/usr/bin/env bash
-export HF_HOME=/workspace/hf
+export HF_HOME=/root/hf  # container disk: the volume is too small for venv + model cache (stage A)
 cd /workspace || exit 1
 # shellcheck disable=SC2046  # vllm.args is a whitespace-separated argv on purpose
-exec python3 -m vllm.entrypoints.openai.api_server $(cat /workspace/vllm.args) >>/workspace/vllm.log 2>&1
+exec python3 -m vllm.entrypoints.openai.api_server $(cat /workspace/vllm.args) >>/root/vllm.log 2>&1
 RUN
 chmod +x /workspace/run-vllm.sh
 

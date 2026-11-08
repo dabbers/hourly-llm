@@ -9,7 +9,7 @@ over SSH, `runpod_pods.py` to the RunPod REST API.
 |---|---|---|
 | `scripts/runpod_pods.py` | here | create / status / wait-ready / env-file / stop / start / terminate pods through the REST API |
 | `scripts/pod.sh` | here | SSH wrapper: push the tree, set up uv, drive vLLM, the gateway, calibration, smoke, the chain; pull artifacts |
-| `scripts/pod-bootstrap.sh` | in every pod | container start command: sshd, HF cache on the volume, vLLM in tmux |
+| `scripts/pod-bootstrap.sh` | in every pod (experimental `create --bootstrap` path only) | container start command for the vLLM image: sshd, HF cache on the volume, vLLM in tmux; did not run on RunPod in stage A |
 | `scripts/runchain.sh` | pod A, in tmux | the matrix: fresh gateway per run, preflight, loadgen, report; stops the pods when done |
 | `scripts/preflight.py` | pod A | refuses a run unless every replica is healthy, idle and the expected one |
 
@@ -53,28 +53,39 @@ print every ssh command it runs.
 ## A. Stage A: one pod (gate G1)
 
 Create pod `slotgw-a` (RTX 4090, Secure Cloud, global networking, 30 GB container disk, 20 GB
-volume at `/workspace`, ports 8000/tcp and 22/tcp, `vllm/vllm-openai:v0.32.0`, start command =
-`pod-bootstrap.sh`). Letters continue from what `pods.json` already holds, so a later
-`create --count 2` makes `b` and `c`. Global networking only exists in some data centres (PHASE2.md
-section 2); pin one with `--datacenter US-TX-3` if creation is refused.
+volume at `/workspace`, ports 8000/tcp and 22/tcp). The pod runs RunPod's own PyTorch image, which
+has sshd and the `PUBLIC_KEY` handling built in; vLLM is installed afterwards over SSH into a venv on
+the volume (`pod.sh vllm a install`). The first attempt on 2026-11-07 used the vLLM image with
+`pod-bootstrap.sh` as the start command and the container sat idle for 26 minutes with neither sshd
+nor vLLM running, so that path (`create --bootstrap`) is kept only as an experiment. Letters continue
+from what `pods.json` already holds, so a later `create --count 2` makes `b` and `c`. Global
+networking only exists in some data centres (PHASE2.md section 2); pin one with
+`--datacenter EU-CZ-1` if creation is refused.
 
 ```bash
 bash scripts/pod.sh create --count 1
 ```
 
-Wait for the public ip and port mappings, then for vLLM's `/health`. The first wait includes the
-image pull and the model download (~5.5 GB of AWQ weights into the volume), typically 5–10 minutes;
-progress is printed every 30 s.
+Wait for the public ip and the port mappings (a few minutes: the image pull), then show ip, ssh
+port, vLLM port, price and internal DNS. `status` also refreshes `pods.json`; run it again after any
+restart, the port mappings change:
 
 ```bash
-bash scripts/pod.sh wait-ready --timeout 1200
+bash scripts/pod.sh wait-ready --ports-only --timeout 900
 ```
-
-Show ip, ssh port, vLLM port, price and internal DNS (this also refreshes `pods.json`; run it again
-after any restart, the port mappings change):
 
 ```bash
 bash scripts/pod.sh status
+```
+
+Install vLLM on the pod and start it in tmux (pip install of vLLM into `/workspace/venv`, then the
+model download of ~5.3 GB into `/root/hf` on the container disk; 15–20 minutes the first time, a restart afterwards). The venv (18 GB) fills most of the 20 GB volume, so the model cache and the engine log live on the container disk and the model re-downloads after a stop. `VLLM_USE_FLASHINFER_SAMPLER=0` is set because the image has no ninja/nvcc to JIT-build FlashInfer sampling kernels. `--enable-prompt-tokens-details` makes vLLM report `prompt_tokens_details.cached_tokens` per request (off by default in 0.32: without it the meter's cached share reads 0 while the engine's metrics show 60% prefix-cache hits).
+The venv and the model cache live on the volume, so a stopped and restarted pod only needs the same
+command again, which then just restarts the engine. `VLLM_VERSION`, `MODEL` and
+`VLLM_MAX_NUM_BATCHED_TOKENS` in the environment override the defaults (0.32.0, the 7B AWQ model, 512):
+
+```bash
+bash scripts/pod.sh vllm a install
 ```
 
 Copy the tree (everything except `.git`, `.venv`, `runs/`, caches, `calibration/interference`,
@@ -103,7 +114,7 @@ To change engine arguments, pass the whole new argument line; it is written to
 `/workspace/vllm.args` and the engine restarted:
 
 ```bash
-bash scripts/pod.sh vllm a restart --model Qwen/Qwen2.5-7B-Instruct-AWQ --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens 512 --enable-prefix-caching --port 8000 --host 0.0.0.0
+bash scripts/pod.sh vllm a restart --model Qwen/Qwen2.5-7B-Instruct-AWQ --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens 512 --enable-prefix-caching --enable-prompt-tokens-details --port 8000 --host 0.0.0.0
 ```
 
 Calibrate (concurrency 1–48 at 2k and 6k context, plus the interference probe; 10–20 minutes) and
@@ -223,14 +234,14 @@ bash scripts/pod.sh stop
 Start the pods, refresh `pods.json`, make sure every pod serves the model, and start the chain on
 pod A. `pod.sh chain a start` copies `pods.json` to the pod and, because of `--stop-pods`, the
 local `.env` (mode 600) so the chain can stop the pods when it ends. The matrix format is in the
-header of `scripts/runchain.sh`; the default file is `config/phase2/matrix.yaml`:
+header of `scripts/runchain.sh`. The matrix comes in two parts: `config/phase2/matrix-ondemand.yaml` (burst off and on, three seeds) first, then, once `mixed-4090.yaml`'s reservation slots are set from those runs' p95 occupancy, `config/phase2/matrix-resv.yaml` (the two reservation settings, two seeds):
 
 ```bash
 bash scripts/pod.sh start && bash scripts/pod.sh wait-ready && bash scripts/pod.sh push a
 ```
 
 ```bash
-bash scripts/pod.sh chain a start config/phase2/matrix.yaml --max-hours 5 --stop-pods
+bash scripts/pod.sh chain a start config/phase2/matrix-ondemand.yaml --max-hours 3
 ```
 
 The chain runs unattended: per (run, seed) it starts a fresh gateway with the run's environment
@@ -304,7 +315,7 @@ After phase 2 the API key on pod A is gone with the pod; rotate it in RunPod's s
 | Symptom | Where to look |
 |---|---|
 | `wait-ready` stuck on "waiting for ip/ports" | the pod is still being scheduled; RunPod console shows the reason (no 4090 in that data centre: create in another with `--datacenter`) |
-| `wait-ready` stuck on "vLLM not ready" for > 15 min | `pod.sh ssh a 'tail -50 /workspace/bootstrap.log /workspace/vllm.log'`: image pull, model download, or an engine argument the card rejects |
+| `wait-ready` stuck on "vLLM not ready" for > 15 min | `pod.sh vllm a log` (engine log at /root/vllm.log on the pod): image pull, model download, or an engine argument the card rejects |
 | ssh refused | `pod.sh status` (port mappings changed after a restart); the key in RunPod settings must match `RUNPOD_SSH_KEY` |
 | `preflight` fails on `model[...]` | the pod serves another model: `pod.sh vllm <pod> status`; fix `/workspace/vllm.args` and `pod.sh vllm <pod> restart` |
 | `preflight` fails on `replica_idle` / `ledger_idle` | a previous run is still streaming or the gateway was not restarted; `pod.sh gateway a stop`, wait, start again |

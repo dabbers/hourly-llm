@@ -12,7 +12,7 @@ replicas:
     model: small
     calibration: calibration/runpod-4090-a.yaml
     curve: ${REPLICA_CURVE:-}
-    slot_plan: {small.8k.30tps: 24}       # placeholder until stage A's calibration sets the sellable seats
+    slot_plan: {small.8k.30tps: 32}       # stage A calibration: KV caps 8k seats at 33, the 6k step rate allows 32+ at 30 tps
     exclude_shapes: ${REPLICA_A_EXCLUDE:-}  # matrix setting 3: "small.8k.60tps" keeps the fast shape off the reservation replica
   - id: runpod-4090-b
     kind: vllm
@@ -20,11 +20,11 @@ replicas:
     model: small
     calibration: calibration/runpod-4090-b.yaml
     curve: ${REPLICA_CURVE:-}
-    slot_plan: {small.8k.30tps: 24}
+    slot_plan: {small.8k.30tps: 32}
   - id: runpod-4090-c
     kind: vllm
     url: ${REPLICA_C_URL:-http://runpod-c.runpod.internal:8000}
     model: small
     calibration: calibration/runpod-4090-c.yaml
     curve: ${REPLICA_CURVE:-}
-    slot_plan: {small.8k.30tps: 24}
+    slot_plan: {small.8k.30tps: 32}

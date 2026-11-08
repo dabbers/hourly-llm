@@ -97,7 +97,7 @@ Stop with `docker compose --profile gpu down` (or `--profile fake`).
 The plan, decisions, budget and gates are in `docs/PHASE2.md`; the operator's commands in
 `docs/RUNBOOK.md`. The phase-2 configuration lives in `config/phase2/` (three pod replicas, the 7B
 price basket, text capture on) with the scenario `config/scenarios/mixed-4090.yaml` and the run
-matrix `config/phase2/matrix.yaml`. Everything can be rehearsed without a pod on three fake
+matrices `config/phase2/matrix-ondemand.yaml` and `matrix-resv.yaml`. Everything can be rehearsed without a pod on three fake
 replicas with a 4090-like curve:
 
 ```bash

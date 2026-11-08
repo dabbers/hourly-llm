@@ -18,13 +18,13 @@
 # SLOTGW_PHASE2_DIR (default runs/phase2), LINES for log tails (default 60).
 set -euo pipefail
 
-REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && (pwd -W 2>/dev/null || pwd))  # pwd -W: a Windows path Git Bash and Windows Python both accept
 P2="${SLOTGW_PHASE2_DIR:-$REPO/runs/phase2}"
 PODS="$P2/pods.json"
 SSH_KEY="${RUNPOD_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 REMOTE=/workspace/slotgw
 # ssh commands do not read .bashrc: put uv (installer: ~/.local/bin, older: ~/.cargo/bin) on PATH
-PRE='export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" HF_HOME=/workspace/hf'
+PRE='export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" HF_HOME=/root/hf'
 
 usage() { sed -n '2,/^set -euo/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'; }
 die() { echo "pod.sh: $*" >&2; exit 1; }
@@ -69,7 +69,7 @@ cmd_push() {
   echo "pushing $REPO -> $1:$REMOTE"
   tar -C "$REPO" --exclude=.git --exclude=.venv --exclude=runs --exclude=.pytest_cache --exclude=.ruff_cache \
       --exclude=__pycache__ --exclude=calibration/interference --exclude=.env -cf - . \
-    | rssh "$1" "mkdir -p $REMOTE && tar -C $REMOTE -xf - && echo 'pushed to $REMOTE'"
+    | rssh "$1" "mkdir -p $REMOTE && tar -C $REMOTE --no-same-owner -xf - && echo 'pushed to $REMOTE'"
   if [ -f "$P2/phase2.env" ]; then  # the gateway on the pod sources it; runs/ itself is not pushed
     rssh "$1" "mkdir -p $REMOTE/runs/phase2 && cat > $REMOTE/runs/phase2/phase2.env && echo 'pushed runs/phase2/phase2.env'" <"$P2/phase2.env"
   fi
@@ -101,7 +101,7 @@ cmd_vllm() {
   case "$action" in
     status)
       rssh "$pod" "curl -s -m 5 localhost:8000/health && echo ' <- /health'; curl -s -m 5 localhost:8000/v1/models; echo; tmux ls 2>/dev/null || echo 'no tmux sessions'; nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null || true" ;;
-    log) rssh "$pod" "tail -n ${LINES:-60} /workspace/vllm.log" ;;
+    log) rssh "$pod" "grep -v 'it/s\]' /root/vllm.log | tail -n ${LINES:-60}" ;;
     restart)
       if [ $# -gt 0 ]; then
         printf '%s\n' "$*" | rssh "$pod" "cat > /workspace/vllm.args && echo 'wrote /workspace/vllm.args'"
@@ -116,11 +116,63 @@ for _ in $(seq 1 180); do
   if curl -sf -m 3 localhost:8000/health >/dev/null; then echo "vllm healthy"; exit 0; fi
   sleep 5
 done
-echo "vllm did not become healthy in 15 min; see /workspace/vllm.log" >&2
+echo "vllm did not become healthy in 15 min; see /root/vllm.log" >&2
 exit 1
 EOF
       ;;
-    *) die "vllm <pod> status|log|restart [args...]" ;;
+    install)
+      # The template path (RUNBOOK stage A): the pod runs RunPod's own PyTorch image, which already
+      # has sshd, so vLLM is installed here into a venv on the persistent volume and run in tmux
+      # exactly as pod-bootstrap.sh would. Idempotent: a second call only restarts the engine.
+      local version=${VLLM_VERSION:-0.32.0} model=${MODEL:-Qwen/Qwen2.5-7B-Instruct-AWQ} chunk=${VLLM_MAX_NUM_BATCHED_TOKENS:-512}
+      rssh "$pod" "VLLM_VERSION='$version' MODEL='$model' CHUNK='$chunk' bash -s" <<'EOF'
+set -u
+# Layout learned in stage A: the venv lives on the 20 GB volume (18 GB, persists across restarts); the
+# model cache and the log live on the container disk (/root), because the volume ran out of space with
+# the 5.3 GB cache on it and the engine died writing. The model re-downloads in about a minute after a
+# restart. VLLM_USE_FLASHINFER_SAMPLER=0: the image has no ninja/nvcc and vLLM 0.32 would JIT-build
+# FlashInfer sampling kernels at start-up and die; attention stays on FlashAttention.
+export DEBIAN_FRONTEND=noninteractive HF_HOME=/root/hf
+mkdir -p /root/hf
+command -v tmux >/dev/null || (apt-get update -qq && apt-get install -y -qq tmux >/dev/null) || echo "tmux install failed" >&2
+if [ ! -x /workspace/venv/bin/python ]; then python3 -m venv /workspace/venv && echo "venv created"; fi
+if ! /workspace/venv/bin/python -c "import vllm" 2>/dev/null; then
+  echo "installing vllm==$VLLM_VERSION (several minutes)"
+  /workspace/venv/bin/pip install -q --upgrade pip >/dev/null
+  /workspace/venv/bin/pip install -q "vllm==$VLLM_VERSION" 2>&1 | tail -3
+fi
+/workspace/venv/bin/python -c "import vllm, torch; print('vllm', vllm.__version__, 'torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+if [ ! -f /workspace/vllm.args ]; then
+  echo "--model $MODEL --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens $CHUNK --enable-prefix-caching --enable-prompt-tokens-details --port 8000 --host 0.0.0.0" > /workspace/vllm.args
+  echo "wrote /workspace/vllm.args"
+fi
+cat > /workspace/run-vllm.sh <<'RUN'
+#!/usr/bin/env bash
+# model cache and log on the container disk; FlashInfer sampler off (see pod.sh vllm install)
+export HF_HOME=/root/hf VLLM_USE_FLASHINFER_SAMPLER=0
+mkdir -p /root/hf
+cd /root || exit 1
+# shellcheck disable=SC2046  # vllm.args is a whitespace-separated argv on purpose
+exec /workspace/venv/bin/python -m vllm.entrypoints.openai.api_server $(cat /workspace/vllm.args) >>/root/vllm.log 2>&1
+RUN
+chmod +x /workspace/run-vllm.sh
+grep -q 'HF_HOME=' /root/.bashrc 2>/dev/null || echo 'export HF_HOME=/root/hf' >>/root/.bashrc
+df -h /workspace / | tail -2
+tmux kill-session -t vllm 2>/dev/null || true
+pkill -f vllm.entrypoints 2>/dev/null || true
+sleep 2
+tmux new-session -d -s vllm /workspace/run-vllm.sh
+echo "vllm started: $(cat /workspace/vllm.args)"
+for _ in $(seq 1 240); do
+  if curl -sf -m 3 localhost:8000/health >/dev/null; then echo "vllm healthy"; curl -s localhost:8000/v1/models | head -c 300; echo; exit 0; fi
+  sleep 5
+done
+echo "vllm did not become healthy in 20 min; see /root/vllm.log" >&2
+grep -v "it/s\]" /root/vllm.log | tail -20 >&2
+exit 1
+EOF
+      ;;
+    *) die "vllm <pod> status|log|restart [args...]|install" ;;
   esac
 }
 
