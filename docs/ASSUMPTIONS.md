@@ -522,6 +522,27 @@ the cache and the engine log live on the container disk; and vLLM 0.32's FlashIn
 `ninja`/`nvcc` the image lacks, so `VLLM_USE_FLASHINFER_SAMPLER=0` (attention stays on
 FlashAttention). Spend for stage A: see PHASE2.md section 3.
 
+## Phase 2 measurements: stage B, the three-replica cluster (2026-11-08)
+
+Pods B and C (same image, venv and arguments) calibrated within 1–3% of A: 158 / 156 tok/s per
+stream alone, 112 / 112 at eight streams and 53 / 53 at thirty-two at 6k context, aggregate peaks 641
+/ 628 tok/s, 6k prefill 0.64 / 0.66 s (`calibration/runpod-4090-b.yaml`, `-c.yaml`). One curve
+describes the hardware; each replica still carries its own file.
+
+**Pods on one host cannot talk to each other.** Pods A and C were placed on the same physical
+machine (identical public ip); from A, C's internal name resolved but every connection timed out,
+and so did a hairpin through C's public TCP mapping, while B reached both A and C in 0.3–0.4 s over
+global networking. RunPod does not route between two pods of one host. The gateway, meter and load
+generator therefore run on pod B (`env-file --gateway b`), and the rule for any later cluster is
+to put the gateway on a pod whose public ip is unique.
+
+**Cluster smoke through the gateway on B** (`smoke-4090.yaml`, runs `20261108-005957`): 148 / 150
+ok, the same two context refusals, 0 errors, 0 floor violations, requests placed on all three
+replicas (64 / 55 / 29 by the scheduler's load scoring), the chat reservation pinned to replica A
+served 22 requests with 0 timeouts, cached share 47%. TTFT p50 89 ms on the gateway's own engine
+and 175 / 251 ms on the two remote ones: the overlay hop and the remote prefill add about 100–160 ms
+to first-token latency, nothing to the paced stream.
+
 ## Environment the numbers depend on
 
 - Docker Desktop 4.2.0 with the WSL driver-store workaround (`scripts/vllm-entrypoint.sh`); WSL kernel

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The phase-2 matrix, run ON pod A inside tmux (docs/PHASE2.md sections 3-4; started with
-# `pod.sh chain a start`, which copies pods.json and, for --stop-pods, .env to the pod first).
+# The phase-2 matrix, run ON the gateway pod inside tmux (docs/PHASE2.md sections 3-4; started with
+# `pod.sh chain <pod> start`, which copies pods.json and, for --stop-pods, .env to the pod first).
 #
-#   bash scripts/runchain.sh config/phase2/matrix-ondemand.yaml [--max-hours 5] [--stop-pods]
+#   bash scripts/runchain.sh config/phase2/matrix-ondemand.yaml [--max-hours 5] [--stop-pods] [--stop-grace-min 30] [--self b]
 #
 # Matrix file:
 #   scenario: config/scenarios/mixed-4090.yaml     # loadgen scenario
@@ -27,8 +27,11 @@
 # far (a report failure is logged, not fatal). The first failed preflight or loadgen writes FAILED
 # and stops the chain. A watchdog ends the chain after --max-hours. With --stop-pods and
 # RUNPOD_API_KEY available (environment or .env), pods are stopped when the chain ends with DONE,
-# FAILED or the watchdog: the other pods first, this one (a) last. A manual kill (pod.sh chain stop)
-# stops the gateway only and leaves the pods running.
+# FAILED or the watchdog: the other pods first, this one last (--self <letter>, which pod.sh chain
+# passes; else the pods.json entry matching RUNPOD_POD_ID or the hostname; else a). With --stop-grace-min N
+# the stop waits N minutes first (the chain session stays alive, chain.status already says DONE/FAILED)
+# so the operator can `pod.sh pull` the runs while the pods are up; `pod.sh chain <pod> stop` during the
+# wait cancels the stop. A manual kill (pod.sh chain stop) stops the gateway only and leaves the pods running.
 #
 # Files under runs/phase2: chain.log (everything, UTC timestamps), chain.status (one line:
 # RUNNING <label> s<seed> <run id> | DONE <n runs> | FAILED <label> s<seed> <reason>), chain.runs
@@ -37,11 +40,13 @@ set -euo pipefail
 
 usage() { sed -n '2,/^set -euo/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'; }
 
-MATRIX=""; MAX_HOURS=5; STOP_PODS=0
+MATRIX=""; MAX_HOURS=5; STOP_PODS=0; SELF=""; STOP_GRACE_MIN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --max-hours) MAX_HOURS=${2:?--max-hours needs a number}; shift 2 ;;
     --stop-pods) STOP_PODS=1; shift ;;
+    --self) SELF=${2:?--self needs a pod letter}; shift 2 ;;
+    --stop-grace-min) STOP_GRACE_MIN=${2:?--stop-grace-min needs a number}; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "runchain.sh: unknown option $1" >&2; usage; exit 2 ;;
     *) MATRIX=$1; shift ;;
@@ -137,8 +142,18 @@ build_report() {
   fi
 }
 
-other_letters() {  # every pod letter in pods.json except a
-  uv run python -c 'import json; print(",".join(sorted(p["name"].rsplit("-", 1)[-1] for p in json.load(open("runs/phase2/pods.json"))["pods"] if not p["name"].endswith("-a"))))' 2>/dev/null || true
+self_letter() {  # this pod's letter: --self, else the pods.json entry whose id is RUNPOD_POD_ID or the hostname; a if unknown
+  if [ -n "$SELF" ]; then echo "$SELF"; return; fi
+  uv run python -c 'import json, os, socket
+pods = json.load(open("runs/phase2/pods.json"))["pods"]
+ids = {os.environ.get("RUNPOD_POD_ID", ""), socket.gethostname()}
+me = [p["name"].rsplit("-", 1)[-1] for p in pods if p["id"] in ids]
+print(me[0] if me else "a")' 2>/dev/null || echo a
+}
+
+other_letters() {  # every pod letter in pods.json except this pod's
+  local me=$1
+  uv run python -c 'import json, sys; me = sys.argv[1]; print(",".join(sorted(p["name"].rsplit("-", 1)[-1] for p in json.load(open("runs/phase2/pods.json"))["pods"] if p["name"].rsplit("-", 1)[-1] != me)))' "$me" 2>/dev/null || true
 }
 
 stop_pods() {
@@ -150,13 +165,13 @@ stop_pods() {
     log "--stop-pods: $P2/pods.json missing on this pod; pods left running"
     return 0
   fi
-  local others; others=$(other_letters)
+  local me others; me=$(self_letter); others=$(other_letters "$me")
   if [ -n "$others" ]; then
     log "stopping pods $others"
     uv run python scripts/runpod_pods.py stop --only "$others" 2>&1 | tee -a "$LOG" || log "stopping $others failed"
   fi
-  log "stopping pod a (this one) last"
-  uv run python scripts/runpod_pods.py stop --only a 2>&1 | tee -a "$LOG" || log "stopping a failed"
+  log "stopping pod $me (this one) last"
+  uv run python scripts/runpod_pods.py stop --only "$me" 2>&1 | tee -a "$LOG" || log "stopping $me failed"
 }
 
 fail() {  # <label> <seed> <reason>
@@ -170,7 +185,15 @@ finish() {
   trap - EXIT
   if [ -n "${WATCHDOG_PID:-}" ]; then pkill -P "$WATCHDOG_PID" 2>/dev/null || true; kill "$WATCHDOG_PID" 2>/dev/null || true; fi
   stop_gateway
-  if [ "$STOP_PODS" = 1 ] && [ -n "$END_REASON" ]; then stop_pods; fi
+  if [ "$STOP_PODS" = 1 ] && [ -n "$END_REASON" ]; then
+    if [ "$STOP_GRACE_MIN" -gt 0 ] 2>/dev/null; then
+      log "pods stop in $STOP_GRACE_MIN min (pull the runs now; pod.sh chain stop cancels the stop)"
+      trap 'log "pod stop cancelled"; exit "$rc"' INT TERM HUP
+      sleep "$((STOP_GRACE_MIN * 60))"
+      trap - INT TERM HUP
+    fi
+    stop_pods
+  fi
   log "chain exit $rc (${END_REASON:-interrupted})"
   exit "$rc"
 }

@@ -326,5 +326,5 @@ After phase 2 the API key on pod A is gone with the pod; rotate it in RunPod's s
 | `preflight` fails on `model[...]` | the pod serves another model: `pod.sh vllm <pod> status`; fix `/workspace/vllm.args` and `pod.sh vllm <pod> restart` |
 | `preflight` fails on `replica_idle` / `ledger_idle` | a previous run is still streaming or the gateway was not restarted; `pod.sh gateway a stop`, wait, start again |
 | `preflight` fails on `tokenizer` | the served model's tokenizer differs from the Qwen2.5 family the load generator sizes against (loadgen/content.py VOCAB) |
-| chain `FAILED ... loadgen exit 1` | `runs/phase2/logs/<label>-s<seed>.log` on the pod (`pod.sh pull a` fetches it): the error counter was non-zero |
+| chain `FAILED ... loadgen exit 1` | `runs/phase2/logs/<label>-s<seed>.log` on the pod (`pod.sh pull a` fetches it): the error counter was non-zero (refusals and `revoked` context bursts are not errors; connection failures and unexpected stream errors are) |
 | report build failed in the chain | logged in `chain.log`, not fatal; rebuild here after `pull a` |

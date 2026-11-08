@@ -41,7 +41,7 @@ class ClientRecord:
     t_first_byte: float | None = None
     t_first_token: float | None = None
     t_done: float | None = None
-    status: str = "ok"  # ok | refused | error | cancelled
+    status: str = "ok"  # ok | refused | revoked | error | cancelled
     http_status: int | None = None
     request_id: str | None = None
     user_tokens: int = 0
@@ -98,6 +98,7 @@ class Counters:
     sent: int = 0
     ok: int = 0
     refused: int = 0
+    revoked: int = 0  # context bursts the gateway aborted mid-stream for a guaranteed request: a result, not an error
     errors: int = 0
     cancelled: int = 0
     inflight: int = 0
@@ -471,7 +472,7 @@ class LoadRunner:
                     break
                 obj = json.loads(data)
                 if "error" in obj:
-                    rec.status, rec.error = "error", str(obj["error"].get("message"))[:200]
+                    self._stream_error(rec, obj["error"])
                     break
                 choices = obj.get("choices") or []
                 text = (choices[0].get("delta") or {}).get("content") if choices else None
@@ -515,6 +516,13 @@ class LoadRunner:
         rec.per_token_usd = bill.get("per_token_usd")
 
     @staticmethod
+    def _stream_error(rec: ClientRecord, err: dict[str, Any]) -> None:
+        """An error event inside a 200 stream: the gateway revoking a context burst (code burst_revoked) is
+        an expected outcome under the grace policy and is recorded as `revoked`; anything else is an error."""
+        rec.status = "revoked" if err.get("code") == "burst_revoked" else "error"
+        rec.error = str(err.get("message"))[:200]
+
+    @staticmethod
     def _fail(rec: ClientRecord, status: int, text: str) -> None:
         code = None
         try:
@@ -537,6 +545,8 @@ class LoadRunner:
             c.prompt_tokens += rec.prompt_tokens or 0
         elif rec.status == "refused":
             c.refused += 1
+        elif rec.status == "revoked":
+            c.revoked += 1
         elif rec.status == "cancelled":
             c.cancelled += 1
         else:
@@ -595,6 +605,6 @@ class LoadRunner:
             await asyncio.sleep(self.progress_every_s)
             c = self.counters
             log.info(
-                "t=%5.0fs sent=%d ok=%d refused=%d errors=%d inflight=%d out_tokens=%d",
-                self.elapsed(), c.sent, c.ok, c.refused, c.errors, c.inflight, c.output_tokens,
+                "t=%5.0fs sent=%d ok=%d refused=%d revoked=%d errors=%d inflight=%d out_tokens=%d",
+                self.elapsed(), c.sent, c.ok, c.refused, c.revoked, c.errors, c.inflight, c.output_tokens,
             )

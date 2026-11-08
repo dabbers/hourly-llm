@@ -11,7 +11,7 @@
 #   pod.sh gateway <pod> start [KEY=VALUE...]|stop|log
 #   pod.sh calibrate <pod> [calibrate.py args...]
 #   pod.sh smoke <pod> [scenario]        smoke-4090.yaml (or smoke.yaml) through the pod's gateway; exit code + last 20 lines
-#   pod.sh chain <pod> start [matrix.yaml] [--max-hours N] [--stop-pods] | status | log | stop
+#   pod.sh chain <pod> start [matrix.yaml] [--max-hours N] [--stop-pods] [--stop-grace-min N] | status | log | stop
 #   pod.sh key <pod>                     copy the local .env to the pod, mode 600 (`chain start --stop-pods` needs it)
 #
 # Environment: RUNPOD_SSH_KEY (default ~/.ssh/id_ed25519), VERBOSE=1 prints every ssh command,
@@ -258,14 +258,14 @@ cmd_chain() {
         if [ -f "$REPO/.env" ]; then cmd_key "$pod"; else echo "warning: no $REPO/.env; without RUNPOD_API_KEY on the pod the chain cannot stop the pods" >&2; fi
       fi
       local q
-      printf -v q '%q ' "$matrix" "$@"
+      printf -v q '%q ' "$matrix" "$@" --self "$pod"   # the chain stops this pod last
       rssh "$pod" "$PRE; cd $REMOTE && (tmux kill-session -t chain 2>/dev/null || true) && tmux new-session -d -s chain \"bash scripts/runchain.sh $q\" && echo 'chain started in tmux session chain (pod.sh chain $pod status|log)'"
       ;;
     status)
       rssh "$pod" "cat $REMOTE/runs/phase2/chain.status 2>/dev/null || echo 'no chain.status yet'; echo '--- runs so far:'; cat $REMOTE/runs/phase2/chain.runs 2>/dev/null || true; tmux has-session -t chain 2>/dev/null && echo '--- chain session: running' || echo '--- chain session: none'" ;;
     log) rssh "$pod" "tail -n ${LINES:-60} $REMOTE/runs/phase2/chain.log" ;;
     stop) rssh "$pod" "tmux kill-session -t chain 2>/dev/null && echo 'chain session killed (pods left running)' || echo 'no chain session'; tmux kill-session -t gateway 2>/dev/null && echo 'gateway stopped' || true" ;;
-    *) die "chain <pod> start [matrix] [--max-hours N] [--stop-pods]|status|log|stop" ;;
+    *) die "chain <pod> start [matrix] [--max-hours N] [--stop-pods] [--stop-grace-min N]|status|log|stop" ;;
   esac
 }
 

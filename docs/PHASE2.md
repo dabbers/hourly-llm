@@ -87,7 +87,7 @@ large replica. The `abort` policy is skipped unless setting (2) shows revocation
 
 ## 4. What "error-free" means, and the gates that enforce it
 
-A run counts only if the load generator reports `errors=0` (refusals are results, errors are not),
+A run counts only if the load generator reports `errors=0` (refusals and revoked context bursts are results, errors are not),
 the gateway and all replicas stayed healthy for the whole run, vLLM preemptions stayed 0 under
 guaranteed load, and the artifacts (meter rows, load samples, plan) are complete and copied back.
 Everything that can be tested without a GPU is tested before a pod exists.

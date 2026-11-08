@@ -5,9 +5,9 @@
 # (KV-bound at 33), so the three-replica plan is 96 seats; the 2080 Ti scenario offered 8-10 streams
 # at peak with pacing holding every stream at its shape's rate; a plan replay at 11x gives a peak-phase
 # occupancy of about 61 streams mean and 76 at p95 (64% / 79% of the plan) with bursting off. Batch runs 12 closed-loop workers so the lazy filler can show
-# on idle seats (lazy_max_share caps it at 16 per replica). Reservation slots are re-sized from the
-# on-demand runs' p95 occupancy (the what-if method) before the reservation settings run
-# (matrix-resv.yaml); `replica:` pins them (setting 3) and --reservation-replica overrides it per run.
+# on idle seats (lazy_max_share caps it at 16 per replica). Reservation slots were sized after the
+# burstoff runs from the report's what-if occupancy, capped by what one replica holds (see the two
+# reservation lines); `replica:` pins them (setting 3) and --reservation-replica overrides it per run.
 name: mixed-4090
 hour_length_s: 600
 drain_s: 90
@@ -24,7 +24,7 @@ tenants:
     shape: small.8k.30tps
     profile: {kind: chat, turns: [3, 10], first_user_tokens: [200, 800], user_tokens_per_turn: [200, 800], output_tokens: [50, 300], think_s: [5, 30]}
     arrivals: {kind: diurnal, rate_per_min: 4.5}
-    reservation: {slots: 24, replica: runpod-4090-a}   # placeholder: set from the on-demand runs' p95 occupancy
+    reservation: {slots: 24, replica: runpod-4090-a}   # sized after the burstoff runs: chat's p95 occupancy is 39-46 streams, more than one replica holds; 24 + notetaker's 4x16k fill replica A's 32 seats (262k of 274.6k KV), the rest runs on demand
     showcase: {prompts: config/prompts/chat.yaml, every_s: 180, offset_s: 30}
   - name: agent
     api_key: sk-local-agent
@@ -37,7 +37,7 @@ tenants:
     shape: small.16k.30tps
     profile: {kind: notetaker, prompt_tokens: [3000, 8000], output_tokens: [150, 400]}
     arrivals: {kind: hourmark, per_mark: 8, sigma_s: 120, background_per_min: 0.5}
-    reservation: {slots: 4, replica: runpod-4090-a}    # placeholder: set from the on-demand runs' p95 occupancy
+    reservation: {slots: 4, replica: runpod-4090-a}    # burstoff p95 occupancy 4-7; 4 is what fits replica A beside chat's 24
     showcase: {prompts: config/prompts/notetaker.yaml, every_s: 300, offset_s: 90}
   - name: batch
     api_key: sk-local-batch

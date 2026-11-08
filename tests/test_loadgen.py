@@ -9,7 +9,7 @@ import pytest
 from loadgen.arrivals import diurnal_times, hourmark_times, poisson_times
 from loadgen.content import count_tokens_estimate, words
 from loadgen.plan import build_plan
-from loadgen.runner import LoadRunner
+from loadgen.runner import ClientRecord, Counters, LoadRunner
 from loadgen.scenario import HourmarkArrivals, Phase, Scenario
 
 
@@ -165,3 +165,23 @@ def test_reservation_windows_follow_phases():
     with pytest.raises(ValueError, match="not a phase"):
         Scenario(name="w", phases=[Phase(name="a", duration_s=10)],
                  tenants=[{**sc.tenants[0].model_dump(), "reservation": {"slots": 1, "phases": ["zz"]}}])
+
+
+def test_stream_error_events_classify_revocations_as_results():
+    """The gateway revokes a context burst inside a 200 stream with an error event (code burst_revoked).
+    That is a designed outcome under the grace policy, so loadgen records it as `revoked`; the run's
+    exit code (errors == 0) must not trip on it. Any other in-stream error stays an error."""
+    def rec():
+        return ClientRecord(load_run="r", scenario="s", seed=1, tenant="agent", session="a-1", step=0,
+                            shape="small.8k.60tps", stream=True, t_send=0.0)
+    r = rec()
+    LoadRunner._stream_error(r, {"code": "burst_revoked", "message": "context burst revoked: a guaranteed request needed the capacity"})
+    assert r.status == "revoked"
+    assert r.error.startswith("context burst revoked")
+    r = rec()
+    LoadRunner._stream_error(r, {"code": "upstream_error", "message": "boom"})
+    assert r.status == "error"
+    r = rec()
+    LoadRunner._stream_error(r, {"message": "no code at all"})
+    assert r.status == "error"
+    assert "revoked" in Counters().as_dict()

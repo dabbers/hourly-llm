@@ -1,0 +1,25 @@
+# Phase 2 run matrix, continuation: what was left after the first on-demand chain stopped at burst
+# seed 1 (its loadgen counted the gateway's mid-stream context-burst revocations as errors; fixed, they
+# are `revoked` results). The three burst runs of matrix-ondemand.yaml, then matrix-resv.yaml's two
+# reservation settings, in one chain so the pods never sit idle between parts:
+#   bash scripts/pod.sh chain b start config/phase2/matrix-continue.yaml --max-hours 3 --stop-pods
+# chain.runs keeps the burstoff runs already done, so the report covers all ten runs.
+scenario: config/scenarios/mixed-4090.yaml
+config_dir: config/phase2
+expect_replicas: 3
+expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
+expect_calibration: runpod-4090
+report_out: runs/phase2/report
+runs:
+  - label: burst                         # (2) tps + context bursts (grace), on demand
+    seeds: [1, 2, 3]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
+    loadgen_args: ["--no-reservations"]
+  - label: resv-split                    # (3) reservations pinned to replica A, the 60 tps shape kept off A
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, REPLICA_A_EXCLUDE: small.8k.60tps}
+    loadgen_args: ["--reservation-replica", "runpod-4090-a"]
+  - label: resv-shared                   # (4) the same reservations with no placement rule: the lockout on a large replica
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
+    loadgen_args: ["--reservation-replica", "none"]
