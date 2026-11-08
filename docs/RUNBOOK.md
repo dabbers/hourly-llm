@@ -10,11 +10,11 @@ over SSH, `runpod_pods.py` to the RunPod REST API.
 | `scripts/runpod_pods.py` | here | create / status / wait-ready / env-file / stop / start / terminate pods through the REST API |
 | `scripts/pod.sh` | here | SSH wrapper: push the tree, set up uv, drive vLLM, the gateway, calibration, smoke, the chain; pull artifacts |
 | `scripts/pod-bootstrap.sh` | in every pod (experimental `create --bootstrap` path only) | container start command for the vLLM image: sshd, HF cache on the volume, vLLM in tmux; did not run on RunPod in stage A |
-| `scripts/runchain.sh` | pod A, in tmux | the matrix: fresh gateway per run, preflight, loadgen, report; stops the pods when done |
-| `scripts/preflight.py` | pod A | refuses a run unless every replica is healthy, idle and the expected one |
+| `scripts/runchain.sh` | the gateway pod (B in this cluster), in tmux | the matrix: fresh gateway per run, preflight, loadgen, report; stops the pods when done, itself last |
+| `scripts/preflight.py` | the gateway pod | refuses a run unless every replica is healthy, idle and the expected one |
 
 State lives under `runs/phase2/` (gitignored): `pods.json` (pod ids, public ips, port mappings;
-no secrets), `phase2.env` (replica URLs for the gateway), `known_hosts`, and, pulled from pod A,
+no secrets), `phase2.env` (replica URLs for the gateway), `known_hosts`, and, pulled from the gateway pod,
 `chain.log`, `chain.status`, `chain.runs`, `logs/`, `report/`.
 
 ## 0. Prerequisites (once)
@@ -29,8 +29,8 @@ export RUNPOD_SSH_KEY=~/.ssh/id_ed25519
 ```
 
 3. The API key in `.env` at the repository root (gitignored), nothing else prints or copies it
-   except `pod.sh key` / `pod.sh chain a start --stop-pods`, which put it on pod A so the chain can
-   stop the pods:
+   except `pod.sh key` / `pod.sh chain <pod> start --stop-pods`, which put it on the gateway pod so the
+   chain can stop the pods:
 
 ```bash
 echo 'RUNPOD_API_KEY=...' > .env
@@ -237,16 +237,22 @@ bash scripts/pod.sh stop
 ## C. Stage C: the matrix (gate G3)
 
 Start the pods, refresh `pods.json`, make sure every pod serves the model, and start the chain on
-pod A. `pod.sh chain a start` copies `pods.json` to the pod and, because of `--stop-pods`, the
-local `.env` (mode 600) so the chain can stop the pods when it ends. The matrix format is in the
-header of `scripts/runchain.sh`. The matrix comes in two parts: `config/phase2/matrix-ondemand.yaml` (burst off and on, three seeds) first, then, once `mixed-4090.yaml`'s reservation slots are set from those runs' p95 occupancy, `config/phase2/matrix-resv.yaml` (the two reservation settings, two seeds):
+the gateway pod: B in this cluster, because pods A and C share a host and cannot reach each other
+(stage B). `pod.sh chain b start` copies `pods.json` to the pod and, because of `--stop-pods`, the
+local `.env` so the chain can stop the pods when it ends; it also passes `--self b` so the chain
+stops its own pod last. The matrix format is in the header of `scripts/runchain.sh`. The matrix
+comes in two parts: `config/phase2/matrix-ondemand.yaml` (burst off and on, three seeds) first,
+then, once `mixed-4090.yaml`'s reservation slots are set from those runs' what-if occupancy,
+`config/phase2/matrix-resv.yaml` (the two reservation settings, two seeds). `matrix-continue.yaml`
+is what actually ran second: the three burst runs and the two reservation settings in one chain,
+after the first chain stopped at burst seed 1 (section E):
 
 ```bash
-bash scripts/pod.sh start && bash scripts/pod.sh wait-ready && bash scripts/pod.sh push a
+bash scripts/pod.sh start && bash scripts/pod.sh wait-ready && bash scripts/pod.sh env-file --gateway b && bash scripts/pod.sh push b
 ```
 
 ```bash
-bash scripts/pod.sh chain a start config/phase2/matrix-ondemand.yaml --max-hours 3
+bash scripts/pod.sh chain b start config/phase2/matrix-ondemand.yaml --max-hours 3 --stop-pods --stop-grace-min 30
 ```
 
 The chain runs unattended: per (run, seed) it starts a fresh gateway with the run's environment
@@ -254,33 +260,44 @@ and a fresh run id, runs `preflight.py` (3 healthy idle replicas, the expected m
 calibration, empty queues, tokenizer within 2%, free disk), runs the load generator, then rebuilds
 the report over every run so far. The first failed preflight or loadgen stops the chain with
 `FAILED`; the watchdog ends it after `--max-hours`; in both cases and on `DONE` the pods are
-stopped (B and C first, A last). Watch it:
+stopped (the other pods first, the gateway pod last), after `--stop-grace-min` minutes if given,
+so the runs can be pulled while the pods are up. Watch it:
 
 ```bash
-bash scripts/pod.sh chain a status
+bash scripts/pod.sh chain b status
 ```
 
 ```bash
-bash scripts/pod.sh chain a log
+bash scripts/pod.sh chain b log
 ```
 
 `chain.status` holds one line: `RUNNING <label> s<seed> <run id>`, `DONE <n>` or `FAILED <label>
-s<seed> <reason>`. Killing the chain by hand stops the gateway but leaves the pods running:
+s<seed> <reason>`; `chain b status` prints it first, then the finished run ids, then whether the
+tmux session is alive (a script that polls it reads the first line, not the last). A run takes
+about 19.5 minutes (18 minutes of timeline plus the drain) and a gateway restart, preflight and
+report build about 40 s. Killing the chain by hand stops the gateway but leaves the pods running;
+during the grace wait it cancels the pod stop:
 
 ```bash
-bash scripts/pod.sh chain a stop
+bash scripts/pod.sh chain b stop
 ```
 
-When the chain is done the pods are already stopped (if `--stop-pods` was given), but a stopped
-pod's volume is still readable only after a start. Pulling therefore happens while the pods run,
-or after a short `start`:
+Pull while the pods run (inside the grace period), then stop them yourself; the chain's stop after
+the grace period is then a no-op:
 
 ```bash
-bash scripts/pod.sh start --only a && bash scripts/pod.sh wait-ready --timeout 600 && bash scripts/pod.sh pull a && bash scripts/pod.sh stop
+bash scripts/pod.sh pull b && bash scripts/pod.sh stop
 ```
 
-`pull a` brings `runs/<run id>/` for every run and `runs/phase2/{chain.log,chain.status,chain.runs,logs,report}`.
-Rebuild the report here over the run ids in `runs/phase2/chain.runs`:
+A stopped pod's volume is readable only after a `start` (new port mappings, `env-file` again):
+
+```bash
+bash scripts/pod.sh start --only b && bash scripts/pod.sh wait-ready --timeout 600 && bash scripts/pod.sh pull b && bash scripts/pod.sh stop
+```
+
+`pull b` brings `runs/<run id>/` for every run and `runs/phase2/{chain.log,chain.status,chain.runs,logs,report}`
+(and `runs/phase2/aside/`, where a run that was set aside is kept). Rebuild the report here over the
+run ids in `runs/phase2/chain.runs`:
 
 ```bash
 py -3.11 -m uv run slotgw-report $(sed 's#^#runs/#' runs/phase2/chain.runs) --out runs/phase2/report --config-dir config/phase2
@@ -288,7 +305,11 @@ py -3.11 -m uv run slotgw-report $(sed 's#^#runs/#' runs/phase2/chain.runs) --ou
 
 A failed run is rerun from the reserve: fix the cause, remove the run's label/seed from the matrix
 (or make a one-run matrix), and start the chain again; `chain.runs` keeps the earlier run ids, so
-the report keeps covering them.
+the report keeps covering them. Before a reservation setting runs, check that the scenario's
+reservations fit: start a gateway (`pod.sh gateway b start`), `POST /admin/reservations` with the
+scenario's tenant, shape, slots and `replica`, expect 201 (409 `reservation_capacity` means the
+slots do not fit that replica's KV), delete it, stop the gateway. A reservation the gateway refuses
+during a run is logged by the load generator as a warning and the run continues without it.
 
 ## D. Teardown
 
@@ -312,8 +333,9 @@ stops them all:
 py -3.11 -m uv run python scripts/runpod_pods.py status --all
 ```
 
-After phase 2 the API key on pod A is gone with the pod; rotate it in RunPod's settings anyway
-(PHASE2.md section 7) and delete `.env`.
+After phase 2 the API key copied to the gateway pod is gone with the pod (`stop` erases the
+container disk, but `/workspace/slotgw/.env` sits on the volume until `terminate`); rotate it in
+RunPod's settings anyway (PHASE2.md section 7) and delete `.env`.
 
 ## E. When something is off
 
@@ -326,5 +348,7 @@ After phase 2 the API key on pod A is gone with the pod; rotate it in RunPod's s
 | `preflight` fails on `model[...]` | the pod serves another model: `pod.sh vllm <pod> status`; fix `/workspace/vllm.args` and `pod.sh vllm <pod> restart` |
 | `preflight` fails on `replica_idle` / `ledger_idle` | a previous run is still streaming or the gateway was not restarted; `pod.sh gateway a stop`, wait, start again |
 | `preflight` fails on `tokenizer` | the served model's tokenizer differs from the Qwen2.5 family the load generator sizes against (loadgen/content.py VOCAB) |
-| chain `FAILED ... loadgen exit 1` | `runs/phase2/logs/<label>-s<seed>.log` on the pod (`pod.sh pull a` fetches it): the error counter was non-zero (refusals and `revoked` context bursts are not errors; connection failures and unexpected stream errors are) |
-| report build failed in the chain | logged in `chain.log`, not fatal; rebuild here after `pull a` |
+| chain `FAILED ... loadgen exit 1` | `runs/phase2/logs/<label>-s<seed>.log` on the pod (`pod.sh pull b` fetches it): the error counter was non-zero (refusals and `revoked` context bursts are not errors; connection failures and unexpected stream errors are) |
+| report build failed in the chain | logged in `chain.log`, not fatal; rebuild here after `pull b` |
+| chain session dies at once, `chain log` shows nothing new; `bash -n scripts/runchain.sh` on the pod says `syntax error near unexpected token $'in'` | a script reached the pod with CRLF line endings (a Windows editor, or Python's `pathlib.write_text`, which writes CRLF on Windows); `sed -i 's/$//' scripts/*.sh` here, push again. `.gitattributes` keeps `.sh`/`.py`/`.yaml` LF in git, not in files written outside git |
+| chain `FAILED burst s1 loadgen exit 1` with `errors=15` and every error `context burst revoked` | fixed 2026-11-08 (loadgen counts them as `revoked`); on an older tree the run itself is complete and only misclassified: set it aside and rerun it, or keep it (the report reads the meter, where the status is `revoked`) |
