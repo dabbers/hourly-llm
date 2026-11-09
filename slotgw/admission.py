@@ -408,6 +408,7 @@ class Scheduler:
         self.reservations: dict[str, Reservation] = {}
         self.preemptions = 0
         self.timeouts = 0
+        self.abandoned = 0  # waiters whose client went away while queued (never served, never billed)
         self.revocations = 0
         self.bursts_admitted = 0
 
@@ -610,7 +611,11 @@ class Scheduler:
         loop = asyncio.get_running_loop()
         w = Waiter(request_id, shape, prompt_tokens, None, False, False, now(), loop.create_future())
         res.queue.append(w)
-        await asyncio.wait([w.future], timeout=timeout)
+        try:
+            await asyncio.wait([w.future], timeout=timeout)
+        except asyncio.CancelledError:
+            self._abandon(res.queue, w)
+            raise
         if w.future.done():
             return w.future.result()
         try:
@@ -623,6 +628,21 @@ class Scheduler:
         res.timeouts += 1
         self.timeouts += 1
         raise QueueTimeout("reservation_busy", now() - w.t_enqueued)
+
+    def _abandon(self, queue: deque[Waiter], w: Waiter) -> None:
+        """The caller stopped waiting (its client went away while queued, DESIGN 4.1 step 5): take the
+        waiter out of its queue so it is never dispatched, served and billed; a slot that dispatch
+        handed it in the same instant goes back, and the next waiter gets it."""
+        try:
+            queue.remove(w)
+        except ValueError:
+            pass
+        if w.future.done() and not w.future.cancelled():
+            self.release(w.future.result())
+        else:
+            w.future.cancel()
+            self.dispatch()
+        self.abandoned += 1
 
     # ---- public API ---------------------------------------------------------------------------
 
@@ -678,7 +698,11 @@ class Scheduler:
         else:
             queue.append(w)
         self.dispatch()  # may resolve immediately (e.g. requeue preemption)
-        await asyncio.wait([w.future], timeout=timeout)
+        try:
+            await asyncio.wait([w.future], timeout=timeout)
+        except asyncio.CancelledError:
+            self._abandon(queue, w)
+            raise
         if w.future.done():
             return w.future.result()
         try:
@@ -717,6 +741,7 @@ class Scheduler:
             "queues": self.queue_lengths(),
             "preemptions": self.preemptions,
             "timeouts": self.timeouts,
+            "abandoned": self.abandoned,
             "revocations": self.revocations,
             "bursts_admitted": self.bursts_admitted,
             "burst": self.burst.model_dump(),

@@ -256,9 +256,12 @@ workers plus a showcase) stood at 12–14 from about t = 330 s to t = 1,030 s; l
 (s1) and 624 s (s2) before admission, inside the shape's 3,600 s contract, and those past the load generator's
 blanket 600 s read timeout were counted as errors. The gateway served and billed them regardless: in s2 eight
 batch requests were admitted after their client had gone (2,789 output tokens delivered to a closed socket),
-because a request waiting in the queue is not watched for a disconnect; that is a finding for the write-up and
-a small gateway fix for after the campaign, and it touches no paid run once the load generator stops giving
-up. The chain was stopped at 11:18 UTC with `load1.5-burst` s1 twelve minutes in (killed; run again later):
+because a request waiting in the queue is not watched for a disconnect; that is a finding for the write-up.
+The gateway fix was built the same afternoon while the sweep ran (DESIGN.md 4.1 step 5 and section 12,
+"Abandoned queued requests": a queued request whose client disconnects leaves the queue unserved and
+unbilled, metered as `client_disconnect` with reason `client_disconnect_queued`), but it was not pushed to
+the pod: the campaign runs on the gateway without it, and no paid run is affected once the load generator
+waits out the shape's queue contract. The chain was stopped at 11:18 UTC with `load1.5-burst` s1 twelve minutes in (killed; run again later):
 every later load-1.5 and load-2 run would have failed the same way, and a timeout that does not match the
 contract is a flaw in the measuring instrument, not a result. Fix: `/v1/models` now lists each shape's
 `max_queue_s`, and the load generator sets every request's read timeout to that plus a 600 s generation

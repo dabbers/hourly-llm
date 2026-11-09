@@ -5,10 +5,11 @@ queues), pacing with burst, billing, meter; admin endpoints for replicas and res
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -34,6 +35,40 @@ RETRY_AFTER_S = 5
 
 class BurstRevoked(Exception):
     """The burst manager aborted this context burst for a guaranteed admission."""
+
+
+class ClientGone(Exception):
+    """The client closed its connection while the request was still queued for admission."""
+
+    def __init__(self, waited_s: float):
+        super().__init__(f"client gone after {waited_s:.1f}s in the queue")
+        self.waited_s = waited_s
+
+
+DISCONNECT_POLL_S = 1.0  # how often a queued request checks that its client is still there
+
+
+async def _admit_unless_gone(request: Request, admit: Awaitable[Hold]) -> Hold:
+    """Await the scheduler's admission, but stop waiting (and leave the queue) the moment the client
+    disconnects. The admission coroutine runs as a task; cancelling it makes the scheduler drop the
+    waiter (`Scheduler._abandon`), so a request nobody is listening to is never served or billed."""
+    task = asyncio.ensure_future(admit)
+    t0 = now()
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=DISCONNECT_POLL_S)
+            if done:
+                return task.result()
+            if await request.is_disconnected():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                raise ClientGone(now() - t0)
+    except asyncio.CancelledError:  # the handler itself is being cancelled: do not leave a waiter behind
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        raise
 
 
 class GatewayState:
@@ -392,10 +427,22 @@ def build_router() -> APIRouter:
             admission = state.config.gateway.admission
             preemptable = shape.lazy and not stream and admission.lazy_preempt == "requeue"
             try:
-                hold = await state.scheduler.admit(
-                    request_id, billed_shape, prompt_tokens, tenant=tenant.name, preemptable=preemptable,
-                    kv_tokens=need if burst_ctx else None, burst_ctx=burst_ctx,
+                hold = await _admit_unless_gone(
+                    request,
+                    state.scheduler.admit(
+                        request_id, billed_shape, prompt_tokens, tenant=tenant.name, preemptable=preemptable,
+                        kv_tokens=need if burst_ctx else None, burst_ctx=burst_ctx,
+                    ),
                 )
+            except ClientGone as e:
+                # The client closed the connection while the request was queued: it leaves the queue
+                # unserved and unbilled (DESIGN 4.1 step 5). Found in phase 3: a load generator that gave
+                # up after 600 s had 2,789 tokens generated and billed to a closed socket.
+                rec.status, rec.http_status, rec.abort_reason = "client_disconnect", 499, "client_disconnect_queued"
+                rec.queued_ms = e.waited_s * 1000.0
+                state.meter.record(rec)
+                return JSONResponse({"error": {"message": "client closed the connection while queued",
+                                               "type": "client_error", "code": "client_disconnect"}}, status_code=499)
             except Unsellable:
                 rec.status, rec.http_status, rec.abort_reason = "refused", 503, "shape_unsellable"
                 state.meter.record(rec)
