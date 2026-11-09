@@ -15,7 +15,7 @@ import yaml
 
 from loadgen.content import words
 from loadgen.plan import build_plan
-from loadgen.runner import LoadRunner
+from loadgen.runner import LoadRunner, ReservationRefused
 from loadgen.scenario import Scenario
 from report.build import build_report
 from slotgw.billing import per_token_usd
@@ -252,6 +252,26 @@ async def test_showcase_requests_carry_real_text_and_the_header(gateway, meter_r
     metered = {r["request_id"]: r for r in meter_rows(load_run="show-s7")}
     assert all(metered[r["request_id"]]["showcase"] == r["showcase"] for r in shows)
     assert all(metered[r["request_id"]]["showcase"] is None for r in rows if not r["showcase"] and r["status"] == "ok")
+
+
+async def test_reservations_required_stops_the_run_before_any_load(gateway, meter_rows, tmp_path):
+    """--reservations-required: a reservation the gateway refuses (999 slots against fake-0's 8-seat plan)
+    ends the run with ReservationRefused before a single request is sent, and leaves nothing reserved;
+    without the flag the same run goes on as on demand with a warning (the phase-3 incident)."""
+    sc = tiny_scenario(["chat"], duration_s=3.0)
+    sc = Scenario(**{**sc.model_dump(), "tenants": [{**sc.tenants[0].model_dump(), "reservation": {"slots": 999}}]})
+    plan = build_plan(sc, 3)
+    runner = LoadRunner(sc, plan, gateway.url, runs_dir=tmp_path / "runs", load_run_id="req-s3", reservations=True,
+                        reservations_required=True)
+    with pytest.raises(ReservationRefused, match="chat: 409"):
+        await runner.run()
+    assert runner.reservation_log[0]["status"] == 409 and runner.counters.sent == 0
+    assert not meter_rows(load_run="req-s3")
+    async with httpx.AsyncClient(base_url=gateway.url, timeout=10) as c:
+        assert "req-s3" not in (await c.get("/admin/reservations")).text  # nothing left behind
+    lenient = LoadRunner(sc, plan, gateway.url, runs_dir=tmp_path / "runs", load_run_id="lenient-s3", reservations=True)
+    meta = await lenient.run()
+    assert meta["reservations"][0]["status"] == 409 and meta["counters"]["sent"] > 0  # the old behaviour: warn and go on
 
 
 # ---- the report -----------------------------------------------------------------------------------

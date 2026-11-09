@@ -395,6 +395,35 @@ bash scripts/pod.sh chain a switch resv-shared-s6 config/phase3/matrix-campaign-
 `chain a status` shows `--- switch pending:` with the watcher's last lines until it fires; the
 watcher logs to `runs/phase2/chain-switch.log` on the pod.
 
+**Stage I: re-running the pinned-reservation runs (PHASE3.md section 6).** When the second chain is DONE
+(within its 60-minute stop grace): cancel the pod stop, restart the engines with the same argument line
+(GPU 0's engine profiled 6 % less KV at bring-up, which is what refused the note-taker's reservation), check
+them, start the re-run matrix, and confirm replica A's KV in the first run's gateway log:
+
+```bash
+bash scripts/pod.sh chain a stop
+```
+
+```bash
+bash scripts/pod.sh vllm a restart --model Qwen/Qwen2.5-7B-Instruct-AWQ --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens 512 --enable-prefix-caching --enable-prompt-tokens-details
+```
+
+```bash
+bash scripts/pod.sh vllm a status
+```
+
+```bash
+bash scripts/pod.sh chain a start config/phase3/matrix-rerun-resv.yaml --max-hours 3
+```
+
+```bash
+bash scripts/pod.sh ssh a 'cd /workspace/slotgw && grep -h "ledger runpod-4090-a" runs/phase2/logs/gateway-resv-split-s3-*.log | tail -n 1'
+```
+
+`--reservations-required` (loadgen) makes a refused reservation exit 3 before any load, so if GPU 0 still
+comes up short the run fails in seconds and `chain.failed` says so; the fallback is then a documented
+configuration change, not a silent on-demand run. Stage H (the chunk sweep) follows as described above.
+
 **The chain.** 19 hours of watchdog for about 17 hours of runs; the pods stop an hour after the
 chain ends, so a failure can be caught and the stop cancelled (`chain <gw> stop`):
 

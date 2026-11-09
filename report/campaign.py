@@ -12,8 +12,15 @@ tenants.csv (the same per label and tenant), paired.csv (seed-paired differences
 Wilcoxon p-values, Hedges' g, Holm-corrected p for the headline rows), predictability.csv (CV of
 each tenant's bill across seeds per scheme, and the per-request bill ÷ quote distribution),
 sweep.csv (the manifest's families: mean and CI per x), margin_curve.csv (revenue ÷ GPU cost
-against utilisation: raw points and the fitted line with its break-even utilisation) and
-campaign.html, one page over all of it.
+against utilisation: raw points and the fitted line with its break-even utilisation),
+reserved_bills.csv (the headline: for every tenant holding a reservation under a label, its bill's
+CV across seeds under slot billing against the same tenant under per-token pricing, with the
+on-demand baseline the manifest pairs the label with), reservations.csv (every reservation the load
+generator asked for, with the gateway's answer: a label whose tenant was granted in some seeds and
+refused in others is flagged at the top of the page, since its runs mix two configurations) and
+campaign.html, one page over all of it,
+which leads with the reserved tenants' CV, break-even utilisation and output per GPU-hour: the
+outputs that do not depend on the configured prices come before the revenue ÷ cost ratios.
 """
 
 from __future__ import annotations
@@ -118,7 +125,8 @@ PLAN_METRICS: dict[str, tuple[str, Callable]] = {
 }
 
 HEADLINE_METRICS = ["tenant_usd", "per_token_usd", "output_tokens_per_gpu_hour", "gross_margin_shape",
-                    "floor_violation_rate", "refusal_rate"]
+                    "floor_violation_rate", "start_violation_rate", "refusal_rate"]
+UNIT_ECONOMICS = ["output_tokens_per_gpu_hour", "utilisation"]  # the headline's price-free run metrics
 SWEEP_METRICS = ["tenant_usd", "per_token_usd", "gpu_cost_usd", "shape_rev_over_cost", "token_rev_over_cost",
                  "output_tokens_per_gpu_hour", "floor_violation_rate", "refusal_rate", "utilisation"]
 SWEEP_TENANT_METRIC = f"{SWEEP_TENANT}_queued_p95_ms"
@@ -192,6 +200,7 @@ class Campaign:
     unassigned: pd.DataFrame = field(default_factory=pd.DataFrame)
     duplicates: pd.DataFrame = field(default_factory=pd.DataFrame)
     seat_basis: str = "none"
+    reservations: pd.DataFrame = field(default_factory=pd.DataFrame)  # loadrun.json "reservations", kept runs
 
 
 def _utilisation(sub: pd.DataFrame, weights: dict[str, float], plans: dict[str, dict[str, int]], shapes: dict) -> float:
@@ -237,12 +246,38 @@ def _plan_load(run_dir: Path, load_run: str) -> dict[str, float]:
     return {"plan_open_sessions": float(sessions), "plan_open_steps": float(steps), "plan_agent_steps": float(agent)}
 
 
-def _load_one(run_dir: Path, config_dir: Path | None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
-    """One run directory -> (run rows, tenant rows, completed-request rows, seat-weight basis),
-    each row tagged with label, seed, load_run and run_dir."""
+RESERVATION_COLUMNS = ["label", "seed", "load_run", "run_dir", "tenant", "shape", "slots", "replica", "status", "granted",
+                       "error", "served", "timeouts"]
+
+
+def _reservation_entries(run_dir: Path, load_run: str) -> list[dict]:
+    """The load run's reservation requests and the gateway's answers (loadrun.json "reservations"),
+    one row per window: status 201 = granted, anything else refused or failed."""
+    path = run_dir / "loads" / load_run / "loadrun.json"
+    if not path.is_file():
+        return []
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    rows = []
+    for e in meta.get("reservations") or []:
+        if not isinstance(e, dict):
+            continue
+        rows.append({
+            "load_run": load_run, "tenant": e.get("tenant"), "shape": e.get("shape"), "slots": e.get("slots"),
+            "replica": e.get("replica") or "any", "status": e.get("status"), "granted": e.get("status") == 201,
+            "error": (e.get("error") or "")[:160], "served": e.get("served"), "timeouts": e.get("timeouts"),
+        })
+    return rows
+
+
+def _load_one(run_dir: Path, config_dir: Path | None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
+    """One run directory -> (run rows, tenant rows, completed-request rows, reservation rows,
+    seat-weight basis), each row tagged with label, seed, load_run and run_dir."""
     data = load_run_dir(run_dir, config_dir)
     if data.requests.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), "none"
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), "none"
     df = enrich(data.requests, data.config)
     res = data.reservations if len(data.reservations) else None
     pr = per_run(df, data.loads, data.config, res)
@@ -276,7 +311,8 @@ def _load_one(run_dir: Path, config_dir: Path | None) -> tuple[pd.DataFrame, pd.
     ok = df[df["ok"]]
     on_demand = ok[~ok["reserved"]].groupby(["load_run", "tenant"])["shape_usd"].sum()
     fees = rb.groupby(["load_run", "tenant"])["reservation_usd"].sum() if len(rb) else pd.Series(dtype=float)
-    agg["tenant_usd"] = on_demand.reindex(agg.index).fillna(0.0) + fees.reindex(agg.index).fillna(0.0)
+    agg["reservation_usd"] = fees.reindex(agg.index).fillna(0.0)
+    agg["tenant_usd"] = on_demand.reindex(agg.index).fillna(0.0) + agg["reservation_usd"]
     with np.errstate(divide="ignore", invalid="ignore"):
         agg["floor_violation_share"] = np.where(agg["floor_judged"] > 0, agg["floor_violations"] / agg["floor_judged"], np.nan)
         agg["start_violation_share"] = np.where(agg["start_judged"] > 0, agg["start_violations"] / agg["start_judged"], np.nan)
@@ -287,7 +323,12 @@ def _load_one(run_dir: Path, config_dir: Path | None) -> tuple[pd.DataFrame, pd.
     req = ok[["load_run", "tenant", "shape_usd", "bound_usd"]].copy()
     for col in ("label", "seed", "run_dir"):
         req[col] = req["load_run"].map(tags[col])
-    return pr, agg, req, basis
+    res = pd.DataFrame([r for lr in pr["load_run"].unique() for r in _reservation_entries(run_dir, lr)])
+    if len(res):
+        for col in ("label", "seed", "run_dir"):
+            res[col] = res["load_run"].map(tags[col])
+        res = res[RESERVATION_COLUMNS]
+    return pr, agg, req, res, basis
 
 
 def _derive(runs: pd.DataFrame) -> pd.DataFrame:
@@ -311,14 +352,16 @@ def load_campaign(run_dirs: list[str | Path], manifest: Manifest, config_dir: st
     """Load every run directory, keep the runs whose label the manifest knows, and for a repeated
     (label, seed) keep the load run that started last."""
     cfg_dir = Path(config_dir) if config_dir else None
-    runs, tenants, requests, basis = [], [], [], "none"
+    runs, tenants, requests, reservations, basis = [], [], [], [], "none"
     for d in run_dirs:
-        pr, agg, req, b = _load_one(Path(d), cfg_dir)
+        pr, agg, req, res, b = _load_one(Path(d), cfg_dir)
         if pr.empty:
             continue
         runs.append(pr)
         tenants.append(agg)
         requests.append(req)
+        if len(res):
+            reservations.append(res)
         basis = b
     if not runs:
         empty = pd.DataFrame()
@@ -339,7 +382,9 @@ def load_campaign(run_dirs: list[str | Path], manifest: Manifest, config_dir: st
     ten = ten[(ten["run_dir"] + "::" + ten["load_run"]).isin(keys)].reset_index(drop=True)
     req = pd.concat(requests, ignore_index=True)
     req = req[(req["run_dir"] + "::" + req["load_run"]).isin(keys)].reset_index(drop=True)
-    return Campaign(manifest, kept, ten, req, unassigned, duplicates, basis)
+    res = pd.concat(reservations, ignore_index=True) if reservations else pd.DataFrame(columns=RESERVATION_COLUMNS)
+    res = res[(res["run_dir"] + "::" + res["load_run"]).isin(keys)].reset_index(drop=True)
+    return Campaign(manifest, kept, ten, req, unassigned, duplicates, basis, reservations=res)
 
 
 # ------------------------------------------------------------------------------------- statistics
@@ -449,6 +494,128 @@ def predictability_table(c: Campaign) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols)
 
 
+RESERVED_COLUMNS = ["label", "tenant", "n", "fee_share", "mean_usd_per_token", "cv_per_token", "mean_usd_slot", "cv_slot",
+                    "cv_ratio", "baseline", "n_baseline", "cv_per_token_baseline", "cv_shape_baseline"]
+
+
+def on_demand_baseline(manifest: Manifest, label: str, reserved_labels: set[str], _seen: set[str] | None = None) -> str | None:
+    """The on-demand setting a reserved label is compared with: the first manifest pair (label,
+    baseline) whose baseline has no reserved tenant, followed through reserved baselines in manifest
+    order (resv-spill -> resv-split -> burst); None when the chain ends without one."""
+    seen = _seen if _seen is not None else set()
+    seen.add(label)
+    for setting, baseline in manifest.pairs:
+        if setting != label or baseline in seen:
+            continue
+        if baseline not in reserved_labels:
+            return baseline
+        found = on_demand_baseline(manifest, baseline, reserved_labels, seen)
+        if found is not None:
+            return found
+    return None
+
+
+def reserved_bills_table(c: Campaign, pred: pd.DataFrame) -> pd.DataFrame:
+    """reserved_bills.csv, the headline of the predictability question: for every (label, tenant)
+    where the tenant holds a reservation in every run of the label, the tenant's bill across seeds
+    under slot billing (reservation fee plus the on-demand shape bills of its unreserved requests:
+    mean_usd_slot, cv_slot) against the same tenant's bill under per-token pricing over the same runs
+    (mean_usd_per_token, cv_per_token); cv_ratio = cv_slot ÷ cv_per_token (below 1: the slot bill is
+    the more predictable), fee_share = the fee's share of the slot bill (1.0: a fixed bill by
+    construction, nothing spilled to on demand). The baseline columns give the same tenant's CVs
+    under the on-demand setting the manifest pairs the label with (on_demand_baseline: the pair chain
+    followed to the first baseline without a reservation), over that setting's own runs."""
+    if c.tenants.empty or "reservation_usd" not in c.tenants or pred.empty:
+        return pd.DataFrame(columns=RESERVED_COLUMNS)
+    fee = c.tenants.groupby(["label", "tenant"])["reservation_usd"].agg(["min", "mean"])
+    reserved = fee[fee["min"] > 0]
+    reserved_labels = set(reserved.index.get_level_values(0))
+    wide = pred.pivot_table(index=["label", "tenant"], columns="scheme", values=["mean_usd", "cv", "n"], aggfunc="first")
+    rows = []
+    for label in c.manifest.settings:
+        if label not in reserved_labels:
+            continue
+        base = on_demand_baseline(c.manifest, label, reserved_labels)
+        for tenant in sorted(reserved.loc[label].index):
+            w = wide.loc[(label, tenant)]
+            mean_slot, cv_slot = float(w[("mean_usd", "shape")]), float(w[("cv", "shape")])
+            cv_pt = float(w[("cv", "per_token")])
+            n_b, cv_pt_b, cv_sh_b = 0, np.nan, np.nan
+            if base is not None and (base, tenant) in wide.index:
+                wb = wide.loc[(base, tenant)]
+                n_b, cv_pt_b, cv_sh_b = int(wb[("n", "shape")]), float(wb[("cv", "per_token")]), float(wb[("cv", "shape")])
+            rows.append({
+                "label": label, "tenant": tenant, "n": int(w[("n", "shape")]),
+                "fee_share": float(reserved.loc[(label, tenant), "mean"]) / mean_slot if mean_slot else np.nan,
+                "mean_usd_per_token": float(w[("mean_usd", "per_token")]), "cv_per_token": cv_pt,
+                "mean_usd_slot": mean_slot, "cv_slot": cv_slot,
+                "cv_ratio": cv_slot / cv_pt if cv_pt and not np.isnan(cv_pt) else np.nan,
+                "baseline": base, "n_baseline": n_b, "cv_per_token_baseline": cv_pt_b, "cv_shape_baseline": cv_sh_b,
+            })
+    return pd.DataFrame(rows, columns=RESERVED_COLUMNS)
+
+
+INTEGRITY_COLUMNS = ["label", "tenant", "slots", "runs", "granted_seeds", "refused_seeds", "consistent", "error"]
+
+
+def reservations_table(c: Campaign) -> pd.DataFrame:
+    """reservations.csv: every reservation the load generator asked for, in manifest order."""
+    if c.reservations.empty:
+        return pd.DataFrame(columns=RESERVATION_COLUMNS)
+    order = {label: i for i, label in enumerate(c.manifest.settings)}
+    res = c.reservations.assign(_o=c.reservations["label"].map(order))
+    return res.sort_values(["_o", "seed", "tenant"], kind="stable").drop(columns="_o").reset_index(drop=True)[RESERVATION_COLUMNS]
+
+
+def reservation_integrity(c: Campaign) -> pd.DataFrame:
+    """Per (label, tenant) that asked for a reservation: the seeds where it was granted and where it was
+    refused. `consistent` is False when both lists are non-empty: the label's runs then mix a reserved
+    and an on-demand configuration for that tenant, its paired comparisons are confounded on the
+    refused seeds and reserved_bills drops the tenant (a reservation must hold in every run)."""
+    if c.reservations.empty:
+        return pd.DataFrame(columns=INTEGRITY_COLUMNS)
+    rows = []
+    for label in c.manifest.settings:
+        sub = c.reservations[c.reservations["label"] == label]
+        if sub.empty:
+            continue
+        n_runs = int(c.runs[c.runs["label"] == label].shape[0])
+        for tenant, t in sub.groupby("tenant", sort=True):
+            granted = sorted(int(s) for s in t.loc[t["granted"], "seed"].unique())
+            refused = sorted(int(s) for s in t.loc[~t["granted"], "seed"].unique())
+            errors = [e for e in t.loc[~t["granted"], "error"].tolist() if e]
+            rows.append({
+                "label": label, "tenant": tenant, "slots": int(t["slots"].max()), "runs": n_runs,
+                "granted_seeds": " ".join(map(str, granted)), "refused_seeds": " ".join(map(str, refused)),
+                "consistent": not (granted and refused), "error": errors[0] if errors else "",
+            })
+    return pd.DataFrame(rows, columns=INTEGRITY_COLUMNS)
+
+
+def _integrity_warning(integ: pd.DataFrame) -> str:
+    """The headline's warning for every (label, tenant) with a refused reservation: mixed labels (granted in
+    some seeds, refused in others) and labels where it was refused in every seed; empty when none."""
+    bad = integ[integ["refused_seeds"].astype(str) != ""] if len(integ) else integ
+    if bad.empty:
+        return ""
+    items = []
+    for r in bad.itertuples():
+        head = f"<li><b>{escape(r.label)}</b>: {escape(r.tenant)}'s {int(r.slots)}-slot reservation was "
+        if r.granted_seeds:
+            head += f"granted in seed(s) {escape(r.granted_seeds)} but refused in seed(s) {escape(r.refused_seeds)}"
+        else:
+            head += f"refused in every seed ({escape(r.refused_seeds)}): the label ran without it"
+        items.append(head + (f" ({escape(r.error)})" if r.error else "") + "</li>")
+    return (
+        '<div class="card"><h3>Reservation integrity</h3><p>The load generator asked for these reservations and the '
+        "gateway refused them, so the tenant ran on demand: a label refused in some seeds pools a reserved and an "
+        "unreserved tenant and its paired comparisons are confounded on those seeds; a label refused in every seed is "
+        "not the configuration its name says. The reserved-bills table keeps a tenant only where the reservation held "
+        "in every run of the label. Re-run the refused seeds or read the label for what it was.</p>"
+        f"<ul>{''.join(items)}</ul></div>"
+    )
+
+
 def sweep_table(c: Campaign) -> pd.DataFrame:
     """sweep.csv: for every family, series and x: the label, n runs, and mean / ci_lo / ci_hi of the
     SWEEP_METRICS plus the chat tenant's queue p95 (ms). A point whose label has no runs yet keeps
@@ -545,6 +712,83 @@ def _pm_frame(ci: pd.DataFrame, keys: list[str], metrics: list[str], reg: dict) 
     return pd.DataFrame(rows)
 
 
+def _headline_section(c: Campaign, rb: pd.DataFrame, st: pd.DataFrame, fits: dict[str, LinearFit],
+                      integ: pd.DataFrame | None = None) -> str:
+    """What the owner asked to read first: the reserved tenants' bill CV against per-token pricing,
+    then the price-free unit economics (output per GPU-hour, utilisation, break-even utilisation). A
+    reservation-integrity warning, when there is one, comes before everything."""
+    if c.runs.empty:
+        return '<p class="muted">no runs</p>'
+    parts = [
+        _integrity_warning(integ if integ is not None else pd.DataFrame(columns=INTEGRITY_COLUMNS)),
+        "<p>The predictability claim lives in reservations: a tenant holding a reservation pays a fixed fee "
+        "plus on-demand shape bills for what spills past it, and the question is how much less its monthly "
+        "bill moves from seed to seed (CV = sd ÷ mean across seeds) than the same tenant's per-token bill over "
+        "the same runs. The on-demand settings' bills track per-token billing (Predictability, below), so they "
+        "are the baseline here, not the claim.</p>"
+    ]
+    if rb.empty:
+        parts.append('<p class="muted">no tenant holds a reservation in these runs</p>')
+    else:
+        charts_html = []
+        for tenant, sub in rb.groupby("tenant", sort=False):
+            sub = sub[sub["n"] >= 2]
+            if sub.empty:
+                continue
+            charts_html.append(charts.bar_chart(
+                f"Bill CV across seeds, reserved {tenant}", sub["label"].tolist(),
+                {"per-token": (sub["cv_per_token"] * 100).tolist(), "slot billing": (sub["cv_slot"] * 100).tolist()},
+                subtitle="the same tenant over the same runs; lower = a more predictable bill", y_label="CV, %",
+                fmt=lambda v: f"{v:.1f}%",
+            ))
+        tbl = html.table(
+            rb,
+            [("label", "label", html.fmt_text), ("tenant", "tenant", html.fmt_text), ("n", "n", html.fmt_int),
+             ("fee_share", "fee share of the slot bill", html.fmt_pct),
+             ("mean_usd_per_token", "per-token mean", html.fmt_usd), ("cv_per_token", "per-token CV", html.fmt_pct),
+             ("mean_usd_slot", "slot bill mean", html.fmt_usd), ("cv_slot", "slot bill CV", html.fmt_pct),
+             ("cv_ratio", "CV ratio (slot ÷ per-token)", html.fmt_f(2)),
+             ("baseline", "on-demand baseline", html.fmt_text), ("n_baseline", "n", html.fmt_int),
+             ("cv_per_token_baseline", "baseline per-token CV", html.fmt_pct),
+             ("cv_shape_baseline", "baseline shape CV", html.fmt_pct)],
+            left=2,
+        )
+        grid = f'<div class="grid">{"".join(charts_html)}</div>' if charts_html else ""
+        parts.append(
+            f'<div class="card">{grid}<h3>Reserved tenants: the bill across seeds</h3>{tbl}'
+            '<p class="muted">fee share 100% means the whole bill is the reservation fee (nothing spilled to on '
+            "demand), so the slot CV is 0 by construction; what the fee buys is then read in the Tenants section: "
+            "queue p95 and the start bound of the reserved tenant, and the refusals of the others.</p></div>"
+        )
+    frame = _pm_frame(st, ["label"], UNIT_ECONOMICS, RUN_METRICS)
+    cols = [("label", "label", html.fmt_text), ("n", "n", html.fmt_int)]
+    cols += [(m, m.replace("_", " "), html.fmt_text) for m in UNIT_ECONOMICS]
+    means = st.pivot(index="label", columns="metric", values="mean").reindex(frame["label"])
+    chart = charts.bar_chart(
+        "Output tokens per GPU-hour per setting", frame["label"].tolist(),
+        {"tokens / GPU-h (K)": (means["output_tokens_per_gpu_hour"] / 1e3).tolist()},
+        subtitle="means over seeds; intervals in the table", y_label="K tokens / GPU-h",
+    )
+    fit_rows = [
+        {"scheme": SCHEME_LABELS[k], "n": fits[k].n, "breakeven_utilisation": fits[k].x_at(1.0), "r2": fits[k].r2}
+        for k in ("shape", "per_token") if k in fits
+    ]
+    fit_tbl = html.table(
+        pd.DataFrame(fit_rows),
+        [("scheme", "scheme", html.fmt_text), ("n", "runs", html.fmt_int),
+         ("breakeven_utilisation", "break-even utilisation", html.fmt_pct), ("r2", "r²", html.fmt_f(3))],
+    )
+    parts.append(
+        f'<div class="card">{chart}<h3>Unit economics before prices</h3>{html.table(frame, cols)}'
+        "<h3>Break-even utilisation (least-squares line of revenue ÷ GPU cost against utilisation, every run)</h3>"
+        f"{fit_tbl}"
+        '<p class="muted">Output per GPU-hour is free of the configured prices; break-even utilisation says what '
+        "utilisation the configured list prices need to cover the GPU. Revenue ÷ GPU cost and gross margin, "
+        "which scale with the price table, follow in Settings and Margin curve.</p></div>"
+    )
+    return "".join(parts)
+
+
 def _overview_section(c: Campaign) -> str:
     rows = []
     for label, desc in c.manifest.settings.items():
@@ -565,6 +809,17 @@ def _overview_section(c: Campaign) -> str:
          f"per seed); n &lt; 2 gives a mean without one.</p>"),
         f'<div class="card">{tbl}</div>',
     ]
+    integ = reservation_integrity(c)
+    if len(integ):
+        parts.append("<h3>Reservations asked for by the load generator, per label and tenant</h3>")
+        parts.append('<div class="card">' + html.table(
+            integ.assign(consistent=integ["consistent"].map({True: "yes", False: "NO"})),
+            [("label", "label", html.fmt_text), ("tenant", "tenant", html.fmt_text), ("slots", "slots", html.fmt_int),
+             ("runs", "runs", html.fmt_int), ("granted_seeds", "granted in seeds", html.fmt_text),
+             ("refused_seeds", "refused in seeds", html.fmt_text), ("consistent", "consistent", html.fmt_text),
+             ("error", "gateway's answer when refused", html.fmt_text)],
+            left=2,
+        ) + "</div>")
     if len(c.unassigned):
         parts.append("<h3>Unassigned runs (label not in the manifest; ignored)</h3>")
         parts.append('<div class="card">' + html.table(
@@ -810,6 +1065,8 @@ def _definitions_section() -> str:
         ("CV", "sd ÷ mean of a tenant's bill across seeds under one billing scheme."),
         ("billed ÷ quote", "a request's shape bill ÷ its shape bound (the quote the tenant could have been shown)."),
         ("break-even utilisation", "where the least-squares line of revenue ÷ GPU cost against utilisation crosses 1.0."),
+        ("fee share", "mean reservation fee ÷ mean slot bill of a reserved tenant across seeds; 1.0 = nothing spilled to on demand."),
+        ("CV ratio", "a reserved tenant's slot-bill CV ÷ its per-token CV over the same runs; below 1 the slot bill is the more predictable."),
     ]
     items += [f"<dt>{escape(k)}</dt><dd>{escape(v)}</dd>" for k, v in methods]
     return f"<dl>{''.join(items)}</dl>"
@@ -834,6 +1091,9 @@ def build_campaign(run_dirs: list[str | Path], manifest_path: str | Path, out_di
     sw = sweep_table(c)
     fits = margin_fits(c)
     mc = margin_table(c, fits)
+    rb = reserved_bills_table(c, pred)
+    rt = reservations_table(c)
+    integ = reservation_integrity(c)
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -843,6 +1103,8 @@ def build_campaign(run_dirs: list[str | Path], manifest_path: str | Path, out_di
     _write_csv(pred, out / "predictability.csv")
     _write_csv(sw, out / "sweep.csv")
     _write_csv(mc, out / "margin_curve.csv")
+    _write_csv(rb, out / "reserved_bills.csv")
+    _write_csv(rt, out / "reservations.csv")
     runs_cols = ["label", "seed", "load_run", "run_dir", "started_at", "duration_s", *RUN_METRICS, *PLAN_METRICS]
     if not c.runs.empty:
         _write_csv(c.runs[runs_cols], out / "runs.csv")
@@ -854,6 +1116,7 @@ def build_campaign(run_dirs: list[str | Path], manifest_path: str | Path, out_di
         f"Manifest: {escape(str(manifest_path))}.</p>"
     )
     sections = [
+        ("headline", "Headline", _headline_section(c, rb, st, fits, integ)),
         ("overview", "Overview", _overview_section(c)),
         ("settings", "Settings", _settings_section(c, st)),
         ("paired", "Paired comparisons", _paired_section(c, pt)),

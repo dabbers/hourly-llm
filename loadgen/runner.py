@@ -93,6 +93,10 @@ class CsvSink:
         self._f.close()
 
 
+class ReservationRefused(RuntimeError):
+    """--reservations-required: a reservation opening at t=0 was refused; the run stopped before any load."""
+
+
 @dataclass
 class Counters:
     sent: int = 0
@@ -123,11 +127,13 @@ class LoadRunner:
         label: str | None = None,
         reservations: bool = True,
         reservation_replica: str | None = None,
+        reservations_required: bool = False,
     ):
         self.scenario = scenario
         self.plan = plan
         self.reservations_enabled = reservations
         self.reservation_replica = reservation_replica  # None: the scenario's `replica:`; "none": unpinned; else this replica
+        self.reservations_required = reservations_required  # a refused t=0 reservation ends the run before any load
         self.reservation_log: list[dict[str, Any]] = []
         self.gateway_url = gateway_url.rstrip("/")
         self.runs_dir = Path(runs_dir)
@@ -197,6 +203,8 @@ class LoadRunner:
                 for (w0, w1) in self.scenario.reservation_windows(spec.reservation)
             ]
             try:
+                if self.reservations_required and reservers:
+                    await self._require_reservations()
                 await asyncio.gather(*(self._drive_tenant(client, tp) for tp in self.plan.tenants))
             finally:
                 progress.cancel()
@@ -323,6 +331,33 @@ class LoadRunner:
             await self.sleep_until(w1)
         finally:
             await self._delete_reservation(client, entry)
+
+    async def _require_reservations(self, wait_s: float = 60.0) -> None:
+        """--reservations-required: wait until every reservation window opening at t=0 has been answered
+        and raise ReservationRefused if any was refused (or none answered within `wait_s`), so a run whose
+        setting is the reservation never runs on demand with only a warning in its log. Windows that
+        open later (phased reservations) are not waited for."""
+        expected = sum(
+            1
+            for spec in self.scenario.tenants
+            if spec.reservation is not None
+            for (w0, _w1) in self.scenario.reservation_windows(spec.reservation)
+            if w0 == 0
+        )
+        deadline = time.perf_counter() + wait_s
+        answered: list[dict[str, Any]] = []
+        while True:
+            answered = [e for e in self.reservation_log if e["t_start_offset"] == 0 and (e["status"] is not None or "error" in e)]
+            if len(answered) >= expected or time.perf_counter() >= deadline:
+                break
+            await asyncio.sleep(0.05)
+        refused = [e for e in answered if e["status"] != 201]
+        if refused or len(answered) < expected:
+            detail = "; ".join(f"{e['tenant']}: {e.get('status') or 'no answer'} {e.get('error', '')}".strip() for e in refused)
+            detail = detail or f"{len(answered)} of {expected} reservations answered within {wait_s:.0f} s"
+            log.error("reservations required but not all placed: %s", detail)
+            raise ReservationRefused(detail)
+        log.info("reservations required: all %d placed", expected)
 
     async def _delete_reservation(self, client: httpx.AsyncClient, entry: dict[str, Any]) -> None:
         if not entry.get("id") or entry.get("released"):

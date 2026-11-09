@@ -63,11 +63,12 @@ data set). Every stage reuses `config/scenarios/mixed-4090.yaml` unless a varian
 | **I. Workload edges** | `outheavy-burstoff`, `outheavy-burst` | `mixed-4090-outheavy.yaml`: prompt : output ≈ 1.5 : 1 instead of 15 : 1 (long answers, short prompts), rate scaled so peak occupancy matches the base scenario; tests whether the floor finding is a property of prompt-heavy traffic | 1–2 | 4 | $3.6 |
 | | `flash-burstoff`, `flash-burst` | `mixed-4090-flash.yaml`: a two-minute surge at 2.5 × the peak rate inside the peak phase; admission, queueing and bills under a flash crowd | 1–2 | 4 | $3.6 |
 | **H. Engine sweep** | `chunk256`, `chunk2048` | vLLM `--max-num-batched-tokens` 256 (half) and 2048 (vLLM's default: what a naive deployment gets), burst on; needs an engine restart on all three pods between chains | 1–2 | 4 | $3.6 |
-| | | | | **55** | **$50.0** |
+| **I** | `resv-split` s3–6, `resv-spill` s1–3 (re-runs) | the seven pinned-reservation runs that ran without the note-taker's 4 slots (section 6: replica A's KV deficit on the campaign pod); after the second chain, engines restarted first, `--reservations-required` so a refusal costs seconds | split 3–6, spill 1–3 | 7 | $6.0 |
+| | | | | **62** | **$56.0** |
 
 Plus bring-up (start or create pods, vLLM up, push, cluster smoke: ~40 min, ~$1.8), the engine
 restarts between chains (~$0.5) and the grace hour at the end (3 pods idle, $2.7 at most; cancelled
-once the pull is done). **Expected total ≈ $54**, leaving ≈ $8.
+once the pull is done). **Expected total ≈ $60**, leaving ≈ $2 by the plan's per-run cost (the 07:17 balance trajectory, $0.86 a run, says ≈ $6).
 
 If the reserve is needed, trim from the end: stage H first, then `flash`, then `load1.5`. Stages
 D–G are the core and are not trimmed. If ≥ $8 is left when the campaign is committed, the owner can
@@ -75,7 +76,7 @@ choose fp16 vs AWQ (~$1.5, one pod) or the A100 cross-check (~$4); both are sepa
 
 Time: 51 runs ≈ 16.5 h over two chains (`matrix-campaign.yaml`, runs 1–14 of stage D, `--max-hours 19`;
 then `matrix-campaign-2.yaml`, 37 runs with `nopace` first, started between runs by `chain switch`,
-`--max-hours 14`), then 1.5 h for stage H. About 20 h of
+`--max-hours 14`), then ≈ 2.4 h for stage I (seven re-runs after an engine restart) and 1.5 h for stage H. About 20 h of
 wall clock from the first paid minute; the chain runs unattended on the gateway pod and survives this
 machine going down.
 
@@ -117,6 +118,13 @@ existing per-run and per-tenant tables and does not change the phase-2 report.
   is 36–51 %. The two halves are not the same requests: the decode misses are the prefill
   interference of Q5, the start misses are queueing (admission and reservation queues) plus prefill
   time, and the lever runs must move the first without inflating the second.
+- **Report order** (owner, 2026-11-09): `campaign.html` opens with a Headline section: the reserved tenants' bill CV
+  across seeds under slot billing against the same tenants under per-token pricing over the same runs
+  (`reserved_bills.csv`, with the on-demand baseline the manifest pairs the label with), then output tokens
+  per GPU-hour and utilisation per setting and the break-even utilisation per scheme, before any revenue ÷
+  cost ratio. A reservation-integrity warning (`reservations.csv`: every reservation the load generator
+  asked for and the gateway's answer, per seed) comes before all of it when a label's runs mix a granted
+  and a refused reservation. The start bound joined the headline metrics (Holm family 7 pairs × 7 metrics).
 - **Levers:** for each lever the paired gain in revenue per GPU-hour and the paired cost to tenants
   (floor violation share, queue p95, refusals), as a table and a scatter.
 - **Edges:** the out-heavy and flash scenarios compared with the base scenario at the same seeds;
@@ -181,6 +189,31 @@ pod. Armed 2026-11-09 05:10 UTC for `resv-shared-s6` → `matrix-campaign-2.yaml
 --stop-pods --stop-grace-min 60` (the owner's order change and `resv-p95-spill`); fired 05:44:53, the
 second chain's first run (nopace s1) passed preflight at 05:45.
 
+**The note-taker's reservation (found 2026-11-09 07:30 UTC, from the first `reserved_bills` table).** Every
+phase-3 run that pins reservations to replica A (`resv-split` s3–s6, `resv-spill` s1–s3) ran with chat's
+24 slots and *without* the note-taker's 4: the gateway answered the second `POST /admin/reservations` with
+`409 reservation_capacity: 4 x small.16k.30tps does not fit (kv; 3 placed)` and the load generator logged a
+warning and went on. The unpinned runs (`resv-shared`, all seeds) got both. Cause: on the campaign pod the
+engine on GPU 0 (replica A) profiled 271,152 KV tokens (257,594 usable) against 289,056 (274,603) on GPUs 1
+and 2 and on every phase-2 pod, the same `--gpu-memory-utilization 0.90` and the same free memory at start;
+vLLM's memory profile on that engine measured 1.16 GiB of peak activation against 0.21 GiB on the other
+two (it was started first, with a cold compile cache), and the KV budget is fixed at engine start. Chat's
+24 × 8k plus the note-taker's 4 × 16k need 262k of replica A's usable KV: 274.6k held it in phase 2,
+257.6k does not. Consequences and response: (1) `report/campaign.py` now tabulates every reservation the
+load generator asked for (`reservations.csv`) and warns at the top of the page when a label mixes granted
+and refused seeds; `reserved_bills` keeps a tenant only when its reservation held in every run of the
+label, so the note-taker is absent from `resv-split`/`resv-spill` until the re-runs land. (2) The load
+generator gained `--reservations-required`: a refused t=0 reservation ends the run with exit 3 before any
+load is sent (tested against the in-process gateway), so a run whose setting *is* the reservation can
+never again run on demand with a warning. (3) Stage I (`matrix-rerun-resv.yaml`): after the second chain
+is DONE, the engines are restarted with the RUNBOOK C2 argument line (a warm restart should give GPU 0
+the full 289k; the first run's gateway log shows `ledger runpod-4090-a: KV ...`), then the seven runs are
+repeated with the flag, pairs first (`resv-split` s3, `resv-spill` s1–s3, then `resv-split` s4–s6), ≈ 2.4 h
+and ≈ $6 within the approved budget; the campaign report keeps the latest start per (label, seed), so
+they supersede the broken runs, which stay on disk and in `chain.runs`. Stage H follows. The runs still
+in the second chain are unaffected: `resv-p95` and `resv-p95-spill` are unpinned and spread over three
+replicas, everything else runs without reservations.
+
 **First look, 2026-11-09 03:30 UTC, six runs in (burstoff and burst, seeds 4–6).** Seeds 4–6 offer
 less load than seeds 1–3. The agent tenant's arrivals are an on/off process (`bursty`: mean on 120 s
 at 33/min, off 180 s at 5.5/min after the ×11 multiplier) with only three or four cycles in an
@@ -226,6 +259,7 @@ seeds.
 | 2026-11-09 05:05 | balance $49.92 after 12 runs: $12.41 spent since the plan ($62.33) | | |
 | 2026-11-09 05:44:53 → | `chain switch` fired 3 s after resv-shared s6's report: second chain `matrix-campaign-2.yaml`, 37 runs, `--max-hours 14 --stop-pods --stop-grace-min 60`, nopace s1 first; no run lost, `chain.runs` kept its 14 ids | | $2.67/h |
 | 2026-11-09 07:17 | balance $43.88 after 18 runs (nopace s1–2 and resv-spill s1–2 done, 0 errors each; resv-spill s3 in flight): $6.04 for the last 6 runs, $18.45 since the plan; 37 runs ≈ $32 left, so ≈ $11 remains at the end | | |
+| 2026-11-09 07:30 | found: `resv-split` s3–s6 and `resv-spill` s1–s3 ran without the note-taker's reservation (409, replica A's KV deficit; section 6). Stage I added: seven re-runs after an engine restart, ≈ $6; the chain goes on unchanged | | |
 | | | | |
 
 Balance at plan time: $62.35 of $80 (phase 2 spent $17.61; see PHASE2.md §3).

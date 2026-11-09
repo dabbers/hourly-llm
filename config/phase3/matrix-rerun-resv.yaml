@@ -1,0 +1,36 @@
+# Phase 3 stage I (docs/PHASE3.md section 6, "the note-taker's reservation"): the seven pinned-reservation
+# runs of the campaign that ran without the note-taker's 4 slots. On the campaign pod the engine on GPU 0
+# profiled 271,152 KV tokens (257.6k usable) against 289,056 on GPUs 1 and 2 (and on every phase-2 pod),
+# so "4 x small.16k.30tps" no longer fit on replica A beside chat's 24 slots and the gateway answered 409
+# reservation_capacity; the load generator warned and ran the tenant on demand. Run after the second
+# chain is DONE and the engines have been restarted (pod.sh vllm <p> restart <the RUNBOOK C2 argument
+# line>, which brings GPU 0 back to the full KV; check `ledger runpod-4090-a: KV 289056` in the gateway
+# log of the first run), before stage H:
+#   bash scripts/pod.sh chain <gw> start config/phase3/matrix-rerun-resv.yaml --max-hours 3
+# --reservations-required makes the load generator exit 3 before any load if a reservation is refused
+# again, so a failed run costs seconds, not $0.86. fresh_runs is off: chain.runs keeps every id; the
+# campaign report keeps the latest start per (label, seed), so these supersede the broken runs.
+scenario: config/scenarios/mixed-4090.yaml
+config_dir: config/phase2
+expect_replicas: 3
+expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
+expect_calibration: runpod-4090
+report_out: runs/phase3/report
+report_mode: last
+continue_on_fail: true
+fresh_runs: false
+runs:
+  # the pairs first: resv-split s3 restores [resv-spill, resv-split] on seed 3 with the three resv-spill
+  # seeds, then resv-split s4-s6 complete the six-seed [resv-split, burst]
+  - label: resv-split                    # (3) reservations pinned to replica A, 60 tps shape kept off A
+    seeds: [3]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, REPLICA_A_EXCLUDE: small.8k.60tps}
+    loadgen_args: ["--reservation-replica", "runpod-4090-a", "--reservations-required"]
+  - label: resv-spill                    # (3) + admission.reservation_spill
+    seeds: [1, 2, 3]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, REPLICA_A_EXCLUDE: small.8k.60tps, SLOTGW_RESERVATION_SPILL: "true"}
+    loadgen_args: ["--reservation-replica", "runpod-4090-a", "--reservations-required"]
+  - label: resv-split
+    seeds: [4, 5, 6]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, REPLICA_A_EXCLUDE: small.8k.60tps}
+    loadgen_args: ["--reservation-replica", "runpod-4090-a", "--reservations-required"]

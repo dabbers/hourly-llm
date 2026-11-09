@@ -10,7 +10,7 @@ import os
 import sys
 
 from .plan import build_plan
-from .runner import LoadRunner
+from .runner import LoadRunner, ReservationRefused
 from .scenario import load_scenario
 
 
@@ -26,6 +26,9 @@ def main() -> None:
     p.add_argument("--no-reservations", action="store_true", help="ignore the scenario's reservation specs (on-demand only)")
     p.add_argument("--reservation-replica", default=None, metavar="ID|none",
                    help="pin every reservation to this replica, or 'none' to ignore the scenario's `replica:` pins")
+    p.add_argument("--reservations-required", action="store_true",
+                   help="exit 3 before any load is sent if a reservation opening at t=0 is refused: a run whose "
+                        "setting is the reservation must not run on demand with a warning")
     p.add_argument("--plan-only", action="store_true", help="print the plan as JSON and exit")
     p.add_argument("--log-level", default=os.environ.get("LOADGEN_LOG_LEVEL", "info"))
     args = p.parse_args()
@@ -48,8 +51,13 @@ def main() -> None:
         label=args.label,
         reservations=not args.no_reservations,
         reservation_replica=args.reservation_replica,
+        reservations_required=args.reservations_required,
     )
-    meta = asyncio.run(runner.run())
+    try:
+        meta = asyncio.run(runner.run())
+    except ReservationRefused as e:
+        print(f"loadgen: reservation refused, no load sent: {e}", file=sys.stderr)
+        sys.exit(3)
     print(json.dumps({k: meta[k] for k in ("load_run", "gateway_run_id", "plan_digest", "counters", "elapsed_s")}, indent=1))
     sys.exit(0 if meta["counters"]["errors"] == 0 else 1)
 
