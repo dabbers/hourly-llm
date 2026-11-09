@@ -318,8 +318,9 @@ more, so it ends about 23:05 with the pod stopping itself about 23:25: inside th
 with no room for a retry. So that no paid minute waits for an operator, stage H is chained onto the sweep by
 `scripts/stage_h.sh` (RUNBOOK C2 "Stage H"), armed at 18:12:51 in tmux session `stageh` on the pod: it waits
 for the sweep's DONE, cancels the chain's pod stop, restarts the engines per chunk size (GPU 0 last, one
-retry), runs `matrix-chunk256.yaml` and then `matrix-chunk2048.yaml`, and that last chain stops the pod 20 min
-after its DONE. Rehearsed in WSL against a fake chain, a fake runchain and a fake restart (one simulated restart
+retry), runs `matrix-chunk256.yaml` and then `matrix-chunk2048.yaml`, then (section 9, decided 18:40) restores
+the campaign's chunk of 512 with the KV budgets checked and runs `matrix-stage-j.yaml`, the last chain, which
+stops the pod 20 min after its DONE. Rehearsed in WSL against a fake chain, a fake runchain and a fake restart (one simulated restart
 failure, retried), including the prompt cancel of the chain's grace-period stop. The engine restart body moved
 from `pod.sh` into `scripts/engines_restart.sh` unchanged, so the driver and `pod.sh vllm restart` run the same
 code. Risk accepted with the owner's call: if the balance reaches zero before the last run is pulled, RunPod
@@ -349,6 +350,7 @@ top-up of about $10 before about 22:30 removes it.
 | 2026-11-09 16:02 | balance $20.44; sweep 5/22 done, all with 0 request errors and 0 cancelled (load1.5-burstoff s1/s2 re-runs 637 and 578 refused; load1.5-burst s1/s2 638 and 564 refused, 2 and 1 revoked; load2-burstoff s1 978 refused), every run local with its meter; run 6/22 load2-burstoff s2 running. Forecast unchanged: DONE ≈ 21:30, pod self-stop ≈ 22:30 UTC with ≈ $3 left | | |
 | 2026-11-09 18:13 | balance $15.08 (18:03); sweep 12/22 done, 0 request errors in every run so far (run 13/22 prefillcap s1 running); owner: run what we can until zero, top up where needed → stage H chained onto the sweep by `scripts/stage_h.sh` (armed 18:12:51); forecast sweep DONE ≈ 21:25, stage H DONE ≈ 23:05, pod self-stop ≈ 23:25, balance zero ≈ 23:40 | | |
 | 2026-11-09 18:16 | owner topped up $15 ("to handle lulls where you need my response but I am asleep/busy"): balance $29.41, zero ≈ 05:15 UTC on 2026-11-10; stage H now ends with ≈ $15 left (sweep DONE ≈ 21:25, stage H DONE ≈ 23:05, pod self-stop ≈ 23:25), so a slow engine restart or a retry no longer costs the last run | | +15.00 |
+| 2026-11-09 18:31 | owner: "Ship it, with a few adjustments" (section 9): stage J (`matrix-stage-j.yaml`, resv-p95-spill + resv-p95 seeds 3–4, ≈ $4) chained after stage H as the driver's third step with chunk 512 restored and the KV budgets checked from `/metrics` and again by the matrix preflight (`expect_kv_total` 289,056, `continue_on_fail` off); driver re-armed 18:30:46 (sweep 13/22 done, run 14 prefillcap s2 running). Forecast: sweep DONE ≈ 21:25, stage H ≈ 23:05, stage J DONE ≈ 00:40, pod self-stop ≈ 01:00 UTC on 2026-11-10 with ≈ $11 left; then write-up, terminate, rotate | | |
 | | | | |
 
 Balance at plan time: $62.35 of $80 (phase 2 spent $17.61; see PHASE2.md §3).
@@ -360,3 +362,76 @@ Balance at plan time: $62.35 of $80 (phase 2 spent $17.61; see PHASE2.md §3).
    that is not local; the alternative is waiting for the hosts, with no way to know how long).
 3. **The optional phase-2 experiments** (fp16 vs AWQ, A100) from what is left: asked again at the
    end with the actual balance.
+
+## 9. After the campaign: the scorecard, two more seeds, and the backfill question
+
+Decided 2026-11-09 18:40 UTC. The 18:20 assessment put the data so far in one sentence: predictability works
+for the reserved tenant, but at the current prices it is paid for by the on-demand tenants' waiting time and
+by the provider's idle seats, and the decode floor is not reliable under load. The owner's direction on the
+five ideas offered ("Ship it, with a few adjustments"), and the order of what follows:
+
+**A. Offline re-pricing from the existing meters, scorecard first.** Pricing does not change scheduling, so
+the campaign's meters already contain every price table's revenue; the risk is overfitting, adjusting until all
+three parties look happy. So the scorecard and its pass criteria are fixed here, before any price is tried, and
+the result is the whole trade-off frontier (each setting under a grid of reservation price factors and SLA-credit
+policies: reserved tenants' bill CV and bill, on-demand tenants' service, provider margin and output per
+GPU-hour), not one chosen table. The write-up says plainly that offline re-pricing holds behaviour fixed: real
+tenants would change what they buy and what they send if prices changed, which these meters cannot show.
+
+The scorecard. "Baseline" is on-demand slot billing with bursting (`burst`) on the same seeds; "per-token" is the
+same runs billed per token at `basket-7b` parity; every comparison is paired by seed.
+
+| Party | Metric | Pass |
+|---|---|---|
+| reserved tenant | bill CV across seeds | at most 2 %, and below the same tenant's per-token CV on the same runs |
+| reserved tenant | start-bound violation share (queue + TTFT over 2 s) and decode-floor violation share | not above the baseline's for the same tenant |
+| on-demand tenants | start p95 | at most 1.5 × the baseline's on the same seeds and inside the shape's queue contract; refusal rate within one point of the baseline's |
+| provider | gross margin at the price table under test | at least the baseline's gross margin under the campaign's price table, and at least the per-token margin of the same runs |
+| provider | output tokens per GPU-hour | at least 95 % of the baseline's |
+| everyone | decode-floor violation share per tenant | not above the baseline's |
+
+The reserved tenant's bill against its per-token bill is reported on the frontier, not passed or failed: it
+is the price of predictability, and the owner reads it. A price table can move the provider's row and the
+reserved tenant's bill; it cannot move the on-demand tenants' waiting time or anyone's floor, which is why C
+exists. The SLA-credit policy (a request whose decode floor was missed is refunded its runtime price, in whole or
+in part) is on the same grid, so the frontier also shows the sellable fallback if the floor cannot be fixed:
+best-effort throughput with credits.
+
+**B. Stage J, four runs tonight (≈ $4).** Two more seeds (3 and 4) of the configuration that would ship,
+`resv-p95-spill`, and of its pair `resv-p95`, interleaved by seed so a lost last run still leaves complete
+pairs (`config/phase3/matrix-stage-j.yaml`). Chained after stage H by the same driver (`scripts/stage_h.sh`, a
+third step): the engines are restarted with the campaign's chunk of 512, which is exactly where GPU 0 came back
+6 % short before stage I, so the owner's condition carries over: every engine's KV budget is read from
+`/metrics` after the restart (within 1 % of each other and of 289,056; one retry, then the pod is stopped), and
+the matrix repeats the check as its preflight with `continue_on_fail` off: every replica reports its full budget
+before the first run or the chain stops. Stage J is the last chain of the campaign and stops the pod 20 min
+after its DONE.
+
+**C. Reservation backfill: the plan and its pass criteria come before any code; decided after tonight.**
+The idea: an idle reserved slot is lent to a preemptable lazy request (complete mode, as the `requeue` policy
+already preempts) and taken back the instant a request of the reserved tenant arrives: the lazy run is evicted
+and requeued, its partial output wasted and unbilled, as a revoked burst is. It attacks the provider's cost of
+predictability (idle reserved seats, 7 % of output per GPU-hour under the p95 reservations) and gives the batch
+tenant cheaper capacity. The risk, named by the owner: reclaiming a seat is not instant. Freeing KV and aborting a
+request mid-prefill takes time, and that delay lands on the reserved tenant's start bound. So the plan carries a
+new metric, reclaim latency (reserved request arrival to admission when a backfilled hold had to be evicted), and
+these pass criteria, paired by seed against `resv-p95-spill`: the reserved tenants' start p95 and start-bound
+violation share not worse, their decode-floor violation share not worse, their bill CV still at most 2 %, output
+per GPU-hour up, the batch tenant's queue p95 down. If the reserved tenants' start or floor gets worse, C fails
+even if utilisation improves. Cost: about a day of code and tests (scheduler, fake replicas, rehearsal) and two
+or three paired runs; the pod stops tonight and its host has no free GPU, so a fresh pod would also re-run the
+`resv-p95-spill` baseline on the same hardware (two pairs ≈ $4, bring-up ≈ $2). Decision after tonight's prefill
+cap and chunk results: if they fix the floor, C is the natural next step; if they do not, the sellable version of
+the scheme is best-effort throughput with SLA credits, which A already models, and C is dropped.
+
+**D and E (a small reservation for the bursty agent tenant; lazy aging at 1.5 × load) are skipped** unless
+money is genuinely left over: neither changes the headline.
+
+**Then the write-up, and nothing else runs.** The owner's thesis, as of this evening: predictability works for the
+reserved tenant; at the current prices it is paid for by the on-demand tenants' waiting time and the provider's
+idle seats; the decode floor is not reliable under load. If the prefill cap or the chunk size fixes the floor,
+the result gets better; if not, the sellable version is best-effort throughput with SLA credits. After tonight's
+runs, stage J and possibly C: stop running experiments and write it up. The pod is terminated and the RunPod API
+key rotated as soon as the last report lands, rather than letting the pod sit (owner's instruction, 2026-11-09
+18:40 UTC; `terminate --yes` deletes the pod and its volume once every run is local).
+

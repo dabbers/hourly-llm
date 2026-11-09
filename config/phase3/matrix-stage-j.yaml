@@ -1,0 +1,37 @@
+# Phase 3 stage J (docs/PHASE3.md section 9, decided 2026-11-09 18:40 UTC): two more seeds of the reservation
+# configuration that would ship (p95 sizing + spill) and of its pair without spill, so the headline
+# predictability claim rests on four seeds instead of two. Run by scripts/stage_h.sh after stage H, once the
+# engines are restarted with the campaign's chunk of 512: the owner's condition is that every replica reports
+# its full KV budget before the first run or the chain stops (expect_kv_total, kv_spread_max, continue_on_fail
+# off), because the restart that restores the campaign arguments is exactly where GPU 0 came back 6 % short
+# before stage I. Pairs are interleaved by seed so that a lost last run still leaves complete pairs. This is the
+# last chain of the campaign: it stops the pod 20 min after its DONE.
+#   bash scripts/pod.sh chain <gw> start config/phase3/matrix-stage-j.yaml --max-hours 2 --stop-pods --stop-grace-min 20
+scenario: config/scenarios/mixed-4090-resv-p95.yaml
+config_dir: config/phase2
+expect_replicas: 3
+expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
+expect_calibration: runpod-4090
+expect_kv_total: 289056      # every engine's KV budget within 1 % of the campaign's (chunk 512)
+kv_spread_max: 0.01          # and within 1 % of each other
+report_out: runs/phase3/report
+report_mode: last
+continue_on_fail: false      # a failed preflight or a refused reservation stops the chain: nothing more is spent
+fresh_runs: false
+runs:
+  - label: resv-p95-spill                # p95 sizing (chat 44, note-taker 7) + spill: the configuration that would ship
+    seeds: [3]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_RESERVATION_SPILL: "true"}
+    loadgen_args: ["--reservation-replica", "none", "--reservations-required"]
+  - label: resv-p95                      # its pair: p95 sizing without spill
+    seeds: [3]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
+    loadgen_args: ["--reservation-replica", "none", "--reservations-required"]
+  - label: resv-p95-spill
+    seeds: [4]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_RESERVATION_SPILL: "true"}
+    loadgen_args: ["--reservation-replica", "none", "--reservations-required"]
+  - label: resv-p95
+    seeds: [4]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
+    loadgen_args: ["--reservation-replica", "none", "--reservations-required"]

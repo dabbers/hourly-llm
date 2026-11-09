@@ -316,7 +316,7 @@ cmd_chain() {
     stage-h)  # stage H chained onto the running chain's end: scripts/stage_h.sh in tmux session stageh
       rssh "$pod" "mkdir -p $REMOTE/runs/phase2 && cat > $REMOTE/runs/phase2/pods.json" <"$PODS"
       if [ -f "$REPO/.env" ]; then cmd_key "$pod"; else echo "warning: no $REPO/.env; without RUNPOD_API_KEY on the pod the last chain cannot stop the pod" >&2; fi
-      for f in scripts/stage_h.sh scripts/engines_restart.sh config/phase3/matrix-chunk256.yaml config/phase3/matrix-chunk2048.yaml; do
+      for f in scripts/stage_h.sh scripts/engines_restart.sh config/phase3/matrix-chunk256.yaml config/phase3/matrix-chunk2048.yaml config/phase3/matrix-stage-j.yaml; do
         rssh "$pod" "cat > $REMOTE/$f" <"$REPO/$f"  # the files stage H needs, without a full push over a running chain
       done
       rssh "$pod" "$PRE; cd $REMOTE && (tmux kill-session -t stageh 2>/dev/null || true) && tmux new-session -d -s stageh \"bash scripts/stage_h.sh --self $pod\" && sleep 3 && echo 'stage H driver started in tmux session stageh:' && cat runs/phase2/stageh.status"

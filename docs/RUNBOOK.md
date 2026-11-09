@@ -469,8 +469,11 @@ bash scripts/pod.sh pull <gw> <run id>
 2026-11-09): the driver waits for the chain's `DONE`, kills the chain session inside its grace period (which
 cancels the chain's pod stop), restarts every engine with engine 0's argument line and
 `--max-num-batched-tokens 256` (GPU 0 last, `START_ORDER="1 2 0" STAGGER=1` as in stage I; one retry, then
-the pod is stopped), chains `matrix-chunk256.yaml`, restarts with 2048 and chains `matrix-chunk2048.yaml` with
-`--stop-pods --stop-grace-min 20`, the last chain of the campaign. `chain <gw> status` shows the driver's state
+the pod is stopped), chains `matrix-chunk256.yaml`, restarts with 2048 and chains `matrix-chunk2048.yaml`, then
+restores chunk 512 (every engine's KV budget read from `/metrics` after each restart: within 1 % of each other,
+and of 289,056 for the restored campaign engines; one retry, then the pod is stopped) and chains
+`matrix-stage-j.yaml` (stage J, PHASE3 section 9) with `--stop-pods --stop-grace-min 20`, the last chain of
+the campaign. `chain <gw> status` shows the driver's state
 (`runs/phase2/stageh.status`; log `stageh.log`), and the poll keeps pulling through the hand-over. The chunk
 size moves each engine's KV budget, which must still agree across the engines (the matrices carry
 `kv_spread_max: 0.01` and no `expect_kv_total`):
