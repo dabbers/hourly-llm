@@ -21,9 +21,13 @@ P2=runs/phase2; LOG=$P2/chain-switch.log
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$LOG"; }
 [ -f "$MATRIX" ] || { log "no such matrix: $MATRIX"; exit 1; }
 printf -v q '%q ' "$MATRIX" "$@"
-log "waiting for run $AFTER to finish (its report written), then: runchain.sh $q"
+# chain.log is appended across chains, so only lines written after this watcher started count: a label-sN
+# that an earlier chain already ran would otherwise match at once (2026-11-09 12:02 UTC: stage I's switch
+# fired on the first chain's resv-split-s6 report and killed stage I eight seconds in).
+start=$(wc -l <"$P2/chain.log" 2>/dev/null || echo 0)
+log "waiting for run $AFTER to finish (its report written after line $start of chain.log), then: runchain.sh $q"
 pat="report written to runs/${AFTER}-[0-9]{8}-[0-9]{6}/report/report\.html"
-until grep -Eq "$pat" "$P2/chain.log" 2>/dev/null; do
+until tail -n +"$((start + 1))" "$P2/chain.log" 2>/dev/null | grep -Eq "$pat"; do
   tmux has-session -t chain 2>/dev/null || { log "chain session gone before $AFTER finished; not switching"; exit 1; }
   sleep 1
 done

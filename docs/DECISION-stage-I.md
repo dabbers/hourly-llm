@@ -10,6 +10,11 @@ the chain stops before any run if one is short; GPU 0 restarted last, after the 
 compile cache), and KV per replica recorded per run in the campaign report, with the capacity-bound metrics
 split per KV profile wherever phase-2 and phase-3 seeds are pooled.
 
+**Executed** 2026-11-09 12:03 UTC, before the rest of the sweep rather than after it (the second chain was
+stopped at 11:18 for the batch tenant's timeout, PHASE3.md section 6): after the restart with GPU 0 last,
+every engine reported 289,056 KV tokens, the first run's preflight passed the KV checks, and replica A's
+ledger started with 289,056 (usable 274,603), enough for chat's 24 slots and the note-taker's 4.
+
 ## The question
 
 Seven phase-3 runs ran without one of their two reservations. Do you want them re-run after the chain finishes (about $6, 2.4 hours), or should the report read those labels on the seeds they actually have?
