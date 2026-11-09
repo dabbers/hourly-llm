@@ -336,8 +336,16 @@ back healthy but failed the KV check: engine 1 reported 271,216 KV tokens agains
 (spread 6.3 %, limit 1 %). The second attempt (21:37–21:55) gave 289,680 on all three (18,105 blocks of 16;
 624 tokens more than chunk 512's 289,056, the smaller chunk's smaller activation peak) and `matrix-chunk256.yaml`
 started at 21:55:51 (`--max-hours 2`). Without the check the chunk-256 runs would have run with one replica 6 %
-short of KV, the confound the preflight was carried over to catch; the retry cost 19 min (≈ $0.85); the cause of
-the short first start was not investigated. Operator note: `pod.sh chain <gw> status` shows the driver's WAITING
+short of KV, the confound the preflight was carried over to catch; the retry cost 19 min (≈ $0.85). This is the
+third occurrence of the same pattern (the stage-A calibration pods' first engine, GPU 0 at the campaign pod's
+bring-up, now engine 1 at a chunk change): the first engine started with a cold compile cache profiles about 6 %
+less KV, a warm restart gives every engine the same budget, and the cause of the larger profiled peak is not
+investigated. Promoted to a finding in its own right (ASSUMPTIONS "Phase 3 measurements", RESULTS Q12, DESIGN
+sections 12–13): vLLM's KV budget is not deterministic across engine starts, so capacity sold by KV needs a
+margin of that order or a post-start gate like this one. Prediction, written before the event: the chunk-2048
+restart changes the compiled shapes again, so its first attempt should fail the KV check the same way and the
+second pass, about 19 min and $0.85 later; the chunk-512 restore for stage J has a warm cache and should pass
+first time. Operator note: `pod.sh chain <gw> status` shows the driver's WAITING
 line until the new chain starts, because `stageh.status` is rewritten only at WAITING, RUNNING (after the chain
 start), HANDED-OVER, ABORTED and FAILED; the restart's progress is in `runs/phase2/stageh.log`.
 
