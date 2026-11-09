@@ -1,8 +1,8 @@
 # Phase 3 plan: the confidence campaign (milestone 6)
 
-Status: APPROVED 2026-11-08 (the owner: the whole campaign as one approval, pods recreated where
-their hosts have no free GPU). Local work (section 5) built and rehearsed 2026-11-08/09; the spend
-log in section 7 says what has run.
+Status: RUNNING since 2026-11-09 01:20 UTC (approved 2026-11-08 by the owner as one approval, pods
+recreated where their hosts had no free GPU; topology changed to one pod with three GPUs, section 2).
+Local work (section 5) built, tested and rehearsed; the spend log in section 7 says what has run.
 
 Phase 2 (`PHASE2.md`) answered Q5–Q7 with two or three runs per setting. The owner wants the
 remaining RunPod credit (**$62.35** on 2026-11-08 21:40 UTC, loaded only for this project) spent on
@@ -171,7 +171,8 @@ seeds.
 |---|---|---|---|
 | 2026-11-08 06:28 – 11-09 00:20 | three stopped phase-2 pods' volumes until terminated | – | ~$0.30 |
 | 2026-11-09 00:23–00:36 | three fresh one-GPU pods (EUR-IS-2): same host, no network between them; terminated | 3 × 0.22 | ~$0.58 |
-| 2026-11-09 00:39 → | one pod with three 4090s (`qka0zggy47mw7e`): bring-up, campaign | | $2.67/h |
+| 2026-11-09 00:39–01:20 | one pod with three 4090s (`qka0zggy47mw7e`, EUR-IS-2): bring-up; vLLM's pip install onto the network volume took ~25 min, then one engine per GPU (KV 271,152 tokens each, as in phase 2), push, setup, cluster smoke (148 ok, 2 refused, 0 errors, work on all three engines) | 0.68 × 3 | ~$1.82 |
+| 2026-11-09 01:20 → | the campaign chain: `matrix-campaign.yaml`, 49 runs, `--max-hours 19 --stop-pods --stop-grace-min 60`; runs pulled every 10 min | | $2.67/h |
 | | | | |
 
 Balance at plan time: $62.35 of $80 (phase 2 spent $17.61; see PHASE2.md §3).
