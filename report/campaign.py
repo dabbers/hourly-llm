@@ -360,7 +360,7 @@ def _load_one(run_dir: Path, config_dir: Path | None) -> tuple[pd.DataFrame, pd.
         agg[col] = agg["load_run"].map(tags[col])
 
     pr["reservation_factor"] = float(data.config.pricing.shape.reservation_price_factor)  # the fee's factor the runs were billed at
-    req = ok[["load_run", "tenant", "shape_usd", "bound_usd", "prompt_usd", "floor_violation", "reserved"]].copy()
+    req = ok[["load_run", "tenant", "shape_usd", "bound_usd", "prompt_usd", "floor_violation", "start_violation", "reserved"]].copy()
     for col in ("label", "seed", "run_dir"):
         req[col] = req["load_run"].map(tags[col])
     res = pd.DataFrame([r for lr in pr["load_run"].unique() for r in _reservation_entries(run_dir, lr)])

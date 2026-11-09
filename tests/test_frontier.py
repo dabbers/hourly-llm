@@ -33,7 +33,7 @@ def campaign(tmp_path_factory):
     for label in ("burstoff", "burst", "resv-shared"):
         for seed in (1, 2, 3):
             d = root / f"{label}-s{seed}"
-            _write_run(d, label, seed)
+            _write_run(d, label, seed, late_start_every=4)  # agent requests k = 0, 4, 8 start late: the start-bound credit's base
             dirs.append(d)
     manifest_path = root / "campaign.yaml"
     manifest_path.write_text(MANIFEST, encoding="utf-8")
@@ -118,6 +118,30 @@ def test_the_sla_credit_refunds_floor_missed_runtime_and_never_below_zero(campai
     assert (full["credit_usd"] <= runtime + 1e-9).all()  # a credit is never more than what the tenant was billed
 
 
+def test_the_start_bound_credit_refunds_late_started_runtime(campaign):
+    c, *_ = campaign
+    f0 = float(c.runs["reservation_factor"].iloc[0])
+    req = c.requests
+    assert "start_violation" in req and req["start_violation"].any()
+    late = req[req["start_violation"].astype(bool)]
+    assert set(late["tenant"]) == {"agent"} and len(late) == 3 * c.runs.shape[0]  # k = 0, 4, 8 of every run
+    base = frontier.credit_base(c, "start")
+    want = (late["shape_usd"] - late["prompt_usd"]).groupby([late["run_dir"] + "::" + late["load_run"], late["tenant"]]).sum()
+    assert np.allclose(base.sort_index().to_numpy(), want.sort_index().to_numpy())
+    floor_base = frontier.credit_base(c)  # the default basis is the decode floor
+    assert np.allclose(floor_base.to_numpy(), frontier.credit_base(c, "floor").to_numpy())
+    # a late start that is also a floor miss (burstoff: every agent request misses the floor) is refunded on either basis, once
+    none = frontier.tenant_bills(c, f0, 0.0).set_index(["label", "seed", "tenant"])
+    start = frontier.tenant_bills(c, f0, 1.0, base).set_index(["label", "seed", "tenant"])
+    floor = frontier.tenant_bills(c, f0, 1.0, floor_base).set_index(["label", "seed", "tenant"])
+    agent = start.index.get_level_values("tenant") == "agent"
+    assert (start.loc[agent, "credit_usd"] > 0).all()
+    assert (start.loc[~agent, "credit_usd"] == 0).all()  # chat and batch started inside the bound
+    off = start.index.get_level_values("label") == "burstoff"
+    assert (start.loc[off & agent, "credit_usd"] < floor.loc[off & agent, "credit_usd"]).all()  # 3 of 12 late, 12 of 12 slow
+    assert (start["bill_usd"] <= none["bill_usd"] + 1e-12).all() and (start["bill_usd"] >= 0).all()
+
+
 def test_scorecard_holds_every_setting_against_the_bursting_baseline(campaign):
     c, *_ = campaign
     sc = frontier.scorecard_table(c)
@@ -139,11 +163,14 @@ def test_frontier_covers_the_grid_and_marks_the_campaign_table(campaign):
     fr = frontier.frontier_table(c)
     f0 = float(c.runs["reservation_factor"].iloc[0])
     resv = fr[fr["label"] == "resv-shared"]
-    grid = {(f, cr) for f in frontier.FACTORS for cr in frontier.CREDITS}
-    assert set(zip(resv["factor"], resv["credit"], strict=True)) >= grid
+    grid = {(f, cr, b) for f in frontier.FACTORS for cr in frontier.CREDITS for b in frontier.CREDIT_BASES if cr > 0}
+    grid |= {(f, 0.0, frontier.NO_CREDIT) for f in frontier.FACTORS}
+    assert set(zip(resv["factor"], resv["credit"], resv["credit_basis"], strict=True)) == grid
     for label in ("burst", "burstoff"):
         sub = fr[fr["label"] == label]
         assert set(sub["credit"]) == set(frontier.CREDITS) and (sub["factor"] == f0).all()  # no reservation: only the credit varies
+        assert set(sub["credit_basis"]) == {frontier.NO_CREDIT, *frontier.CREDIT_BASES}
+    assert ((fr["credit"] == 0.0) == (fr["credit_basis"] == frontier.NO_CREDIT)).all()  # a credit of zero has no basis, and vice versa
     assert (fr.groupby("label")["campaign_table"].sum() == 1).all()
     # the reserved chat tenant's bill is the fee alone: CV 0 at every factor, below its per-token CV
     assert (resv["reserved_tenants"] == "chat").all()
@@ -153,9 +180,13 @@ def test_frontier_covers_the_grid_and_marks_the_campaign_table(campaign):
     no_credit = resv[resv["credit"] == 0.0].sort_values("factor")
     assert no_credit["revenue_usd"].is_monotonic_increasing and no_credit["gross_margin"].is_monotonic_increasing
     assert no_credit["reserved_bill_ratio_max"].is_monotonic_increasing
-    # a credit lowers revenue at a fixed factor
-    at_f0 = resv[np.isclose(resv["factor"], f0)].sort_values("credit")
-    assert at_f0["revenue_usd"].is_monotonic_decreasing
+    # a credit lowers revenue at a fixed factor, on either basis; the start-bound credit refunds less here (3 of 12 agent
+    # requests start late, every agent request in the paired burstoff runs misses the floor)
+    for basis in frontier.CREDIT_BASES:
+        at_f0 = resv[np.isclose(resv["factor"], f0) & resv["credit_basis"].isin([frontier.NO_CREDIT, basis])].sort_values("credit")
+        assert len(at_f0) == len(frontier.CREDITS) and at_f0["revenue_usd"].is_monotonic_decreasing
+    full = resv[np.isclose(resv["factor"], f0) & (resv["credit"] == 1.0)].set_index("credit_basis")["revenue_usd"]
+    assert full["start"] > full["floor"]
     # the baseline's own row at the campaign table passes the margin criterion against itself
     b = fr[(fr["label"] == "burst") & fr["campaign_table"]].iloc[0]
     assert b["pass_margin"] == 1.0 and np.isclose(b["gross_margin"], b["baseline_gross_margin"])

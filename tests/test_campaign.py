@@ -115,14 +115,16 @@ def _row(i: int, load_run: str, scenario: str, seed: int, tenant: str, shape: st
 
 
 def _write_run(run_dir: Path, label: str, seed: int, started_at: str = "2026-11-08T00:00:00+00:00",
-               plan: bool = True, refuse_reservation: bool = False, kv_total: int = 289056) -> None:
+               plan: bool = True, refuse_reservation: bool = False, kv_total: int = 289056, late_start_every: int = 0) -> None:
     """One synthetic gateway run with one load run: scenario 'mixed-4090+<label>'. The burst label
     delivers chat faster than the shape (a burst discount) and has fewer floor violations. With `plan`
     the load run carries a plan.json whose open-loop load grows with the seed (the agent tenant). A
     label starting with 'resv' gives chat a one-slot reservation that serves every chat request, so
     chat's slot bill is the fee alone; with `refuse_reservation` the gateway's answer in loadrun.json is a
     409 and chat runs on demand (the phase-3 incident). `kv_total` is the one replica's KV budget in the
-    gateway snapshot the load generator stores (the run's KV profile)."""
+    gateway snapshot the load generator stores (the run's KV profile). `late_start_every` = N gives every
+    N-th agent request (k = 0, N, 2N, ...) a 2.5 s first token, a start-bound violation (queue + TTFT > 2 s)
+    that leaves its decode floor verdict alone; 0 (default) starts every request within the bound."""
     scenario = f"mixed-4090+{label}"
     load_run = f"mixed-4090-{label}-s{seed}"
     meter = Meter(run_dir / "meter.sqlite", run_id=f"{label}-s{seed}")
@@ -153,7 +155,8 @@ def _write_run(run_dir: Path, label: str, seed: int, started_at: str = "2026-11-
         meter.record(chat); i += 1
         # agent: 60 tps shape; in burst runs the engine keeps up on the even requests after the first 2·seed − 1
         slow = (not burst) or (k % 2 == 1) or (k < 2 * seed - 1)
-        meter.record(_row(i, load_run, scenario, seed, "agent", "small.8k.60tps", "stream", t + 1, 1500, 200, 0.4,
+        late = bool(late_start_every) and k % late_start_every == 0
+        meter.record(_row(i, load_run, scenario, seed, "agent", "small.8k.60tps", "stream", t + 1, 1500, 200, 2.5 if late else 0.4,
                           40 if slow else 70, 40 if slow else 60)); i += 1
         meter.record(_row(i, load_run, scenario, seed, "batch", "small.8k.15tps.lazy", "complete", t + 2, 1000, 300, 0.5,
                           100, 18, lazy=True)); i += 1

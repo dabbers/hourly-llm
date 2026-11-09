@@ -2,7 +2,9 @@
 
 Pricing does not change scheduling, so every price table's revenue is already in the campaign's
 meters: a reservation fee scales with the reservation price factor, and an SLA credit refunds the
-runtime price of a completed request whose decode floor was missed (in whole or in part). The pass
+runtime price of a completed request (in whole or in part) on one of two bases: its decode floor was
+missed, or it started late (queue + first token over the 2 s start bound; the basis the flash crowd
+and the saturation runs make the relevant one, added 2026-11-09). The pass
 criteria below were fixed in PHASE3 section 9 before any price was tried; this module reports the
 whole frontier (every setting under every table of the grid) and marks which rows pass, instead of
 choosing a table. Offline re-pricing holds behaviour fixed: real tenants would change what they buy
@@ -31,7 +33,10 @@ from . import charts, html
 from .stats import mean_ci
 
 FACTORS: tuple[float, ...] = (1.0, 2.3, 3.2, 4.0, 5.0, 6.0)  # reservation price factors tried (x the shape's price per second)
-CREDITS: tuple[float, ...] = (0.0, 0.5, 1.0)  # SLA credit: share of the runtime price refunded on a floor-missed request
+CREDITS: tuple[float, ...] = (0.0, 0.5, 1.0)  # SLA credit: share of the runtime price refunded on a request that missed its basis
+CREDIT_BASES: tuple[str, ...] = ("floor", "start")  # what a credit refunds: decode-floor misses, or late starts (queue + TTFT > 2 s)
+CREDIT_COLUMN = {"floor": "floor_violation", "start": "start_violation"}
+NO_CREDIT = "none"  # the credit_basis of a table without a credit
 CRITERIA = {
     "reserved_cv_max": 0.02,  # a reserved tenant's bill CV across seeds
     "on_demand_start_p95_ratio_max": 1.5,  # an on-demand tenant's start p95 against the baseline's
@@ -41,7 +46,7 @@ CRITERIA = {
 BASELINE_LABEL = "burst"  # on-demand slot billing with bursting: the status quo every setting is held against
 
 SCORECARD_COLUMNS = ["label", "baseline", "scope", "tenant", "metric", "n", "value", "baseline_value", "criterion", "pass"]
-FRONTIER_COLUMNS = ["label", "baseline", "n", "factor", "credit", "campaign_table", "revenue_usd", "revenue_ci_lo", "revenue_ci_hi",
+FRONTIER_COLUMNS = ["label", "baseline", "n", "factor", "credit", "credit_basis", "campaign_table", "revenue_usd", "revenue_ci_lo", "revenue_ci_hi",
                     "gross_margin", "baseline_gross_margin", "per_token_gross_margin", "pass_margin",
                     "reserved_tenants", "reserved_cv_max", "reserved_cv_per_token_max", "reserved_bill_ratio_min",
                     "reserved_bill_ratio_max", "pass_reserved_cv", "pass_reserved_service", "pass_on_demand", "pass_output",
@@ -106,13 +111,15 @@ def reserved_tenants(c) -> dict[str, list[str]]:
     return {k: sorted(v) for k, v in out.items()}
 
 
-def credit_base(c) -> pd.Series:
-    """Per (run key, tenant): the runtime price of the tenant's completed requests whose decode floor
-    was missed, i.e. what a 100 % SLA credit refunds."""
+def credit_base(c, basis: str = "floor") -> pd.Series:
+    """Per (run key, tenant): the runtime price of the tenant's completed requests that missed the
+    basis (`floor`: the decode floor; `start`: the 2 s start bound), i.e. what a 100 % SLA credit on
+    that basis refunds."""
     req = c.requests
-    if req.empty or "floor_violation" not in req:
+    col = CREDIT_COLUMN[basis]
+    if req.empty or col not in req:
         return pd.Series(dtype=float)
-    viol = req[req["floor_violation"].astype(bool)]
+    viol = req[req[col].astype(bool)]
     runtime = (viol["shape_usd"] - viol.get("prompt_usd", 0.0)).clip(lower=0.0)
     key = viol["run_dir"] + "::" + viol["load_run"]
     return runtime.groupby([key, viol["tenant"]]).sum()
@@ -120,8 +127,9 @@ def credit_base(c) -> pd.Series:
 
 def tenant_bills(c, factor: float, credit: float, base: pd.Series | None = None) -> pd.DataFrame:
     """One row per kept run and tenant: the tenant's bill under the price table (reservation factor,
-    SLA credit): on-demand shape bills + fee x factor / the run's factor - credit x the floor-missed
-    runtime price, floored at zero; with the per-token bill of the same requests."""
+    SLA credit): on-demand shape bills + fee x factor / the run's factor - credit x the credited runtime
+    price (`base`: the floor-missed requests' by default, see credit_base), floored at zero; with the
+    per-token bill of the same requests."""
     cols = ["label", "seed", "load_run", "run_dir", "tenant", "on_demand_usd", "fee_usd", "credit_usd", "bill_usd", "per_token_usd"]
     if c.tenants.empty:
         return pd.DataFrame(columns=cols)
@@ -256,18 +264,22 @@ def _cv(values: pd.Series) -> float:
     return sd / mean if n >= 2 and mean else np.nan
 
 
-def frontier_table(c, sc: pd.DataFrame | None = None, factors: tuple[float, ...] = FACTORS, credits: tuple[float, ...] = CREDITS) -> pd.DataFrame:
-    """frontier.csv: one row per setting and price table (reservation factor x SLA credit; a setting
-    without a reservation only varies the credit, its factor column is the campaign's). Revenue, the
-    provider's gross margin against the baseline's at the campaign table and against the per-token
-    margin of the same runs, the reserved tenants' bill CV (max over them) and their bill against
-    per-token (min and max over them), and the pass columns; pass_all folds every criterion."""
+def frontier_table(c, sc: pd.DataFrame | None = None, factors: tuple[float, ...] = FACTORS, credits: tuple[float, ...] = CREDITS,
+                   bases: tuple[str, ...] = CREDIT_BASES) -> pd.DataFrame:
+    """frontier.csv: one row per setting and price table (reservation factor x SLA credit x credit
+    basis; a table without a credit has the basis `none`; a setting without a reservation only varies
+    the credit, its factor column is the campaign's). Revenue, the provider's gross margin against the
+    baseline's at the campaign table and against the per-token margin of the same runs, the reserved
+    tenants' bill CV (max over them) and their bill against per-token (min and max over them), and the
+    pass columns; pass_all folds every criterion."""
     if c.runs.empty:
         return pd.DataFrame(columns=FRONTIER_COLUMNS)
     sc = scorecard_table(c) if sc is None else sc
     wl = workloads(c)
     reserved = reserved_tenants(c)
-    base_credit = credit_base(c)
+    base_credit = {b: credit_base(c, b) for b in bases}
+    no_credit_base = next(iter(base_credit.values()), pd.Series(dtype=float))
+    credit_tables = [(0.0, NO_CREDIT)] + [(cr, b) for cr in credits if cr > 0 for b in bases]
     runs = c.runs.assign(key=c.runs["run_dir"] + "::" + c.runs["load_run"])
     f0_by_label = runs.groupby("label")["reservation_factor"].first()
 
@@ -289,19 +301,19 @@ def frontier_table(c, sc: pd.DataFrame | None = None, factors: tuple[float, ...]
         seeds = _common_seeds(c, label, base)
         f0 = float(f0_by_label.get(label, np.nan))
         res_tenants = reserved.get(label, [])
-        tables = [(f, cr) for f in factors for cr in credits] if res_tenants else [(f0, cr) for cr in credits]
-        if (f0, 0.0) not in tables:
-            tables.insert(0, (f0, 0.0))
+        tables = [(f, cr, b) for f in factors for cr, b in credit_tables] if res_tenants else [(f0, cr, b) for cr, b in credit_tables]
+        if (f0, 0.0, NO_CREDIT) not in tables:
+            tables.insert(0, (f0, 0.0, NO_CREDIT))
         service = _service_passes(sc, label)
         b_margin = np.nan
         if base is not None:
             if base not in campaign_bills:
-                campaign_bills[base] = tenant_bills(c, float(f0_by_label.get(base, f0)), 0.0, base_credit)
+                campaign_bills[base] = tenant_bills(c, float(f0_by_label.get(base, f0)), 0.0, no_credit_base)
             _rev, bm = margins(campaign_bills[base], base, seeds)
             b_margin = float(bm.mean()) if len(bm) else np.nan
         pt_margin = _run_mean(c, label, "gross_margin_token", seeds)
-        for f, cr in tables:
-            bills = tenant_bills(c, f, cr, base_credit)
+        for f, cr, basis in tables:
+            bills = tenant_bills(c, f, cr, base_credit.get(basis, no_credit_base))
             rev, margin = margins(bills, label, seeds)
             rev_mean, _sd, n, lo, hi = mean_ci(rev)
             gm = float(margin.mean()) if len(margin) else np.nan
@@ -326,7 +338,7 @@ def frontier_table(c, sc: pd.DataFrame | None = None, factors: tuple[float, ...]
             assessed = [p for p in parts if not np.isnan(p)]
             pass_all = np.nan if not assessed else (1.0 if all(p > 0.5 for p in assessed) else 0.0)
             rows.append({
-                "label": label, "baseline": base, "n": n, "factor": f, "credit": cr,
+                "label": label, "baseline": base, "n": n, "factor": f, "credit": cr, "credit_basis": basis,
                 "campaign_table": bool(abs(f - f0) < 1e-9 and cr == 0.0),
                 "revenue_usd": rev_mean, "revenue_ci_lo": lo, "revenue_ci_hi": hi,
                 "gross_margin": gm, "baseline_gross_margin": b_margin, "per_token_gross_margin": pt_margin, "pass_margin": pass_margin,
@@ -359,6 +371,10 @@ def _fmt_credit(v) -> str:
     return "–" if v is None or (isinstance(v, float) and np.isnan(v)) else f"{float(v) * 100:.0f}%"
 
 
+def _fmt_basis(v) -> str:
+    return "–" if v is None or v == NO_CREDIT or (isinstance(v, float) and np.isnan(v)) else {"floor": "decode floor", "start": "start bound"}.get(str(v), escape(str(v)))
+
+
 def frontier_section(c, sc: pd.DataFrame, fr: pd.DataFrame) -> str:
     """The HTML section: the criteria as fixed, the service scorecard per setting, the frontier (the
     campaign table's row and every passing row per setting; the whole grid is frontier.csv) and a chart
@@ -379,6 +395,8 @@ def frontier_section(c, sc: pd.DataFrame, fr: pd.DataFrame) -> str:
         f'<p class="muted">baseline = <code>{escape(baseline_label(c))}</code> (on-demand slot billing with bursting) for settings of the same '
         "workload, else the setting's manifest pair of the same workload; every comparison is paired by seed on the common seeds. "
         "A price table moves the provider's margin and the reserved tenants' bills; it cannot move anyone's waiting time or floor. "
+        "An SLA credit refunds a share of the runtime price of a completed request on one of two bases: its decode floor was "
+        "missed, or it started late (queue + first token over the 2 s start bound, the contract a surge or saturation breaks). "
         "The reserved tenant's bill against its per-token bill is reported, not passed or failed. Offline re-pricing holds "
         "behaviour fixed: real tenants would change what they buy and send if prices changed, which these meters cannot show.</p>"
     )
@@ -414,6 +432,7 @@ def frontier_section(c, sc: pd.DataFrame, fr: pd.DataFrame) -> str:
     t_frontier = html.table(
         show,
         [("label", "setting", html.fmt_text), ("factor", "reservation factor", _fmt_factor), ("credit", "SLA credit", _fmt_credit),
+         ("credit_basis", "credit on", _fmt_basis),
          ("n", "n", html.fmt_int), ("revenue_usd", "revenue per run", html.fmt_usd), ("gross_margin", "gross margin", html.fmt_pct),
          ("baseline_gross_margin", "baseline margin", html.fmt_pct), ("per_token_gross_margin", "per-token margin", html.fmt_pct),
          ("pass_margin", "margin", _fmt_pass), ("reserved_cv_max", "reserved CV (worst)", html.fmt_pct),
@@ -446,6 +465,6 @@ def frontier_section(c, sc: pd.DataFrame, fr: pd.DataFrame) -> str:
         f'<div class="card"><h3>The frontier: the campaign table and every passing table per setting</h3>'
         f'<p class="muted">{n_pass} of {len(fr)} (setting, price table) rows pass every criterion, in {n_settings_pass} setting(s); '
         f"the whole grid is <code>frontier.csv</code>, the rows behind the service passes <code>scorecard.csv</code>. "
-        f"campaign table = the factor the runs were billed at and no credit.</p>{t_frontier}"
+        f"campaign table = the factor the runs were billed at and no credit; a credit row says what it refunds (decode floor or start bound).</p>{t_frontier}"
         f'{"<div class=grid>" + chart + "</div>" if chart else ""}</div>'
     )

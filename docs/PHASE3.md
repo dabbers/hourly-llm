@@ -418,7 +418,11 @@ is the price of predictability, and the owner reads it. A price table can move t
 reserved tenant's bill; it cannot move the on-demand tenants' waiting time or anyone's floor, which is why C
 exists. The SLA-credit policy (a request whose decode floor was missed is refunded its runtime price, in whole or
 in part) is on the same grid, so the frontier also shows the sellable fallback if the floor cannot be fixed:
-best-effort throughput with credits.
+best-effort throughput with credits. Added 2026-11-09 22:50 UTC on the owner's word, after the flash-crowd and
+saturation results: a second credit basis, the start bound (a completed interactive request whose queue + first
+token exceeded 2 s is refunded its runtime price, in whole or in part), because under a surge slot pricing holds
+the bills fixed and moves the cost onto latency, and the contract that fails there is the start, not the floor;
+`frontier.csv` carries a `credit_basis` column (`none`, `floor`, `start`) and the grid is factor × credit × basis.
 
 **First result (2026-11-09 18:55 UTC, 50 runs, the sweep still running).** The frontier is built
 (`report/frontier.py`: `scorecard.csv`, `frontier.csv` and the "Scorecard and re-pricing frontier" section of
