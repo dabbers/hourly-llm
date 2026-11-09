@@ -15,6 +15,8 @@
 #   pod.sh smoke <pod> [scenario]        smoke-4090.yaml (or smoke.yaml) through the pod's gateway; exit code + last 20 lines
 #   pod.sh chain <pod> start [matrix.yaml] [--max-hours N] [--stop-pods] [--stop-grace-min N] | status | log | stop
 #   pod.sh chain <pod> switch <after label-sN> <matrix> [args]   replace the chain between runs (scripts/chain_switch.sh)
+#   pod.sh chain <pod> stage-h           after the chain's DONE: engines restarted per chunk size, the two stage-H
+#                                        matrices chained, the pod stopped at the end (scripts/stage_h.sh)
 #   pod.sh key <pod>                     copy the local .env to the pod, mode 600 (`chain start --stop-pods` needs it)
 #
 # Environment: RUNPOD_SSH_KEY (default ~/.ssh/id_ed25519), VERBOSE=1 prints every ssh command,
@@ -139,38 +141,8 @@ EOF
       # [args...]: the whole argument line, written for engine 0; engine i gets --port 8000+10*i
       local args_q=""
       if [ $# -gt 0 ]; then args_q=$(printf '%q' "$*"); fi
-      rssh "$pod" "ENGINES=$n ARGS=$args_q START_ORDER='${START_ORDER:-}' STAGGER='${STAGGER:-0}' bash -s" <<'EOF'
-if [ -n "$ARGS" ]; then
-  case "$ARGS" in  # without the port the sed below is a no-op and every engine would bind 8000 (2026-11-09: 15 min lost)
-    *"--port 8000"*) ;;
-    *) echo "restart: the argument line must contain '--port 8000' (engine i gets --port 8000+10*i); nothing restarted" >&2; exit 1 ;;
-  esac
-  for i in $(seq 0 $((ENGINES - 1))); do
-    echo "$ARGS" | sed "s/--port 8000/--port $((8000 + 10 * i))/" > "/workspace/vllm-$i.args"
-    echo "wrote /workspace/vllm-$i.args: $(cat "/workspace/vllm-$i.args")"
-  done
-fi
-for i in $(seq 0 $((ENGINES - 1))); do tmux kill-session -t "vllm-$i" 2>/dev/null || true; done
-pkill -f vllm.entrypoints 2>/dev/null || true
-sleep 3
-ORDER=${START_ORDER:-$(seq -s ' ' 0 $((ENGINES - 1)))}
-for i in $ORDER; do
-  tmux new-session -d -s "vllm-$i" "/workspace/run-vllm.sh $i"
-  echo "engine $i started: $(cat "/workspace/vllm-$i.args")"
-  if [ "${STAGGER:-0}" = 1 ]; then
-    for _ in $(seq 1 180); do curl -sf -m 3 "localhost:$((8000 + 10 * i))/health" >/dev/null && break; sleep 5; done
-    if curl -sf -m 3 "localhost:$((8000 + 10 * i))/health" >/dev/null; then echo "engine $i healthy"; else echo "engine $i not healthy in 15 min; see /root/vllm-$i.log" >&2; exit 1; fi
-  fi
-done
-for _ in $(seq 1 180); do
-  ok=0
-  for i in $(seq 0 $((ENGINES - 1))); do curl -sf -m 3 "localhost:$((8000 + 10 * i))/health" >/dev/null && ok=$((ok + 1)); done
-  if [ "$ok" -eq "$ENGINES" ]; then echo "all $ENGINES engine(s) healthy"; exit 0; fi
-  sleep 5
-done
-echo "not every engine became healthy in 15 min; see /root/vllm-*.log" >&2
-exit 1
-EOF
+      # the restart itself is scripts/engines_restart.sh (also run in place by scripts/stage_h.sh), fed to bash -s
+      rssh "$pod" "ENGINES=$n ARGS=$args_q START_ORDER='${START_ORDER:-}' STAGGER='${STAGGER:-0}' bash -s" <"$REPO/scripts/engines_restart.sh"
       ;;
     install)
       # The template path (RUNBOOK stage A): the pod runs RunPod's own PyTorch image, which already
@@ -341,11 +313,19 @@ cmd_chain() {
       printf -v q '%q ' "$after" "$matrix" "$@" --self "$pod"
       rssh "$pod" "$PRE; cd $REMOTE && (tmux kill-session -t switch 2>/dev/null || true) && tmux new-session -d -s switch \"bash scripts/chain_switch.sh $q\" && sleep 2 && tail -n 3 runs/phase2/chain-switch.log"
       ;;
+    stage-h)  # stage H chained onto the running chain's end: scripts/stage_h.sh in tmux session stageh
+      rssh "$pod" "mkdir -p $REMOTE/runs/phase2 && cat > $REMOTE/runs/phase2/pods.json" <"$PODS"
+      if [ -f "$REPO/.env" ]; then cmd_key "$pod"; else echo "warning: no $REPO/.env; without RUNPOD_API_KEY on the pod the last chain cannot stop the pod" >&2; fi
+      for f in scripts/stage_h.sh scripts/engines_restart.sh config/phase3/matrix-chunk256.yaml config/phase3/matrix-chunk2048.yaml; do
+        rssh "$pod" "cat > $REMOTE/$f" <"$REPO/$f"  # the files stage H needs, without a full push over a running chain
+      done
+      rssh "$pod" "$PRE; cd $REMOTE && (tmux kill-session -t stageh 2>/dev/null || true) && tmux new-session -d -s stageh \"bash scripts/stage_h.sh --self $pod\" && sleep 3 && echo 'stage H driver started in tmux session stageh:' && cat runs/phase2/stageh.status"
+      ;;
     status)
-      rssh "$pod" "cat $REMOTE/runs/phase2/chain.status 2>/dev/null || echo 'no chain.status yet'; echo '--- runs so far:'; cat $REMOTE/runs/phase2/chain.runs 2>/dev/null || true; tmux has-session -t chain 2>/dev/null && echo '--- chain session: running' || echo '--- chain session: none'; tmux has-session -t switch 2>/dev/null && { echo '--- switch pending:'; tail -n 2 $REMOTE/runs/phase2/chain-switch.log; } || true" ;;
+      rssh "$pod" "cat $REMOTE/runs/phase2/chain.status 2>/dev/null || echo 'no chain.status yet'; echo '--- runs so far:'; cat $REMOTE/runs/phase2/chain.runs 2>/dev/null || true; tmux has-session -t chain 2>/dev/null && echo '--- chain session: running' || echo '--- chain session: none'; tmux has-session -t switch 2>/dev/null && { echo '--- switch pending:'; tail -n 2 $REMOTE/runs/phase2/chain-switch.log; } || true; if tmux has-session -t stageh 2>/dev/null; then echo '--- stage H driver: running'; cat $REMOTE/runs/phase2/stageh.status; elif [ -f $REMOTE/runs/phase2/stageh.status ]; then echo '--- stage H driver: ended'; cat $REMOTE/runs/phase2/stageh.status; fi" ;;
     log) rssh "$pod" "tail -n ${LINES:-60} $REMOTE/runs/phase2/chain.log" ;;
     stop) rssh "$pod" "tmux kill-session -t chain 2>/dev/null && echo 'chain session killed (pods left running)' || echo 'no chain session'; tmux kill-session -t gateway 2>/dev/null && echo 'gateway stopped' || true" ;;
-    *) die "chain <pod> start [matrix] [--max-hours N] [--stop-pods] [--stop-grace-min N]|switch <after label-sN> <matrix> [args]|status|log|stop" ;;
+    *) die "chain <pod> start [matrix] [--max-hours N] [--stop-pods] [--stop-grace-min N]|switch <after label-sN> <matrix> [args]|stage-h|status|log|stop" ;;
   esac
 }
 

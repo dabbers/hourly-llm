@@ -1,7 +1,8 @@
 # Phase 3 stage H, first half (docs/PHASE3.md): the burst setting with vLLM's prefill chunk halved to
-# 256 tokens (--max-num-batched-tokens 256). Before this chain every pod's engine is restarted with the
-# new argument line (pod.sh vllm <p> restart ... --max-num-batched-tokens 256) and checked with
-# pod.sh vllm <p> status; the pods stay up afterwards for matrix-chunk2048.yaml:
+# 256 tokens (--max-num-batched-tokens 256). scripts/stage_h.sh (pod.sh chain <gw> stage-h) restarts every
+# engine with the new argument line once the campaign chain is DONE, chains this matrix without --stop-pods
+# and goes on to matrix-chunk2048.yaml; by hand: START_ORDER="1 2 0" STAGGER=1 pod.sh vllm <gw> restart ...
+# --max-num-batched-tokens 256, pod.sh vllm <gw> status, then
 #   bash scripts/pod.sh chain <gw> start config/phase3/matrix-chunk256.yaml --max-hours 2
 scenario: config/scenarios/mixed-4090.yaml
 config_dir: config/phase2

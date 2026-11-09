@@ -465,19 +465,30 @@ bash scripts/pod.sh chain <gw> status
 bash scripts/pod.sh pull <gw> <run id>
 ```
 
-**Stage H.** After `DONE`, inside the grace hour: cancel the stop, restart every engine with the new
-chunk size (the whole argument line, `START_ORDER="1 2 0" STAGGER=1` as in stage I; `vllm <p> status` echoes
-the line and each engine's KV budget, which the chunk size moves but which must agree across the engines:
-the matrices carry `kv_spread_max: 0.01`), chain `matrix-chunk256.yaml`
-without `--stop-pods`, restart with 2048, chain `matrix-chunk2048.yaml` with `--stop-pods
---stop-grace-min 30`, pull:
+**Stage H** runs itself (`scripts/stage_h.sh`, armed while the campaign chain is still running; used
+2026-11-09): the driver waits for the chain's `DONE`, kills the chain session inside its grace period (which
+cancels the chain's pod stop), restarts every engine with engine 0's argument line and
+`--max-num-batched-tokens 256` (GPU 0 last, `START_ORDER="1 2 0" STAGGER=1` as in stage I; one retry, then
+the pod is stopped), chains `matrix-chunk256.yaml`, restarts with 2048 and chains `matrix-chunk2048.yaml` with
+`--stop-pods --stop-grace-min 20`, the last chain of the campaign. `chain <gw> status` shows the driver's state
+(`runs/phase2/stageh.status`; log `stageh.log`), and the poll keeps pulling through the hand-over. The chunk
+size moves each engine's KV budget, which must still agree across the engines (the matrices carry
+`kv_spread_max: 0.01` and no `expect_kv_total`):
+
+```bash
+bash scripts/pod.sh chain <gw> stage-h
+```
+
+By hand instead, after `DONE` and inside the grace hour: cancel the stop, restart the engines (the restart
+itself is `scripts/engines_restart.sh`, the same code the driver runs), chain the two matrices (the second with
+`--stop-pods --stop-grace-min 20`), pull:
 
 ```bash
 bash scripts/pod.sh chain <gw> stop
 ```
 
 ```bash
-for p in a b c; do bash scripts/pod.sh vllm $p restart --model Qwen/Qwen2.5-7B-Instruct-AWQ --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens 256 --enable-prefix-caching --enable-prompt-tokens-details --port 8000 --host 0.0.0.0; done
+START_ORDER="1 2 0" STAGGER=1 bash scripts/pod.sh vllm <gw> restart --model Qwen/Qwen2.5-7B-Instruct-AWQ --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens 256 --enable-prefix-caching --enable-prompt-tokens-details --port 8000 --host 0.0.0.0
 ```
 
 ```bash

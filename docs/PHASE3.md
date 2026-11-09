@@ -311,6 +311,21 @@ preflight OK. Refusals, revocations and queueing in the saturation and flash run
 A run that fails is rerun from the reserve only if the stage would otherwise have fewer than two
 seeds.
 
+**Stage H without a top-up (2026-11-09 18:13 UTC).** The owner's call at 18:05: "run what we can until
+zero, then I can top up where we need". Balance $15.08 at 18:03, which reaches zero at about 23:40 UTC at
+$2.68/h; the sweep's 22 runs end about 21:25 and stage H (two engine restarts, four runs) needs about 100 min
+more, so it ends about 23:05 with the pod stopping itself about 23:25: inside the balance if nothing slips,
+with no room for a retry. So that no paid minute waits for an operator, stage H is chained onto the sweep by
+`scripts/stage_h.sh` (RUNBOOK C2 "Stage H"), armed at 18:12:51 in tmux session `stageh` on the pod: it waits
+for the sweep's DONE, cancels the chain's pod stop, restarts the engines per chunk size (GPU 0 last, one
+retry), runs `matrix-chunk256.yaml` and then `matrix-chunk2048.yaml`, and that last chain stops the pod 20 min
+after its DONE. Rehearsed in WSL against a fake chain, a fake runchain and a fake restart (one simulated restart
+failure, retried), including the prompt cancel of the chain's grace-period stop. The engine restart body moved
+from `pod.sh` into `scripts/engines_restart.sh` unchanged, so the driver and `pod.sh vllm restart` run the same
+code. Risk accepted with the owner's call: if the balance reaches zero before the last run is pulled, RunPod
+stops the pod, the run in flight is lost and the pod cannot be restarted on its host (no free GPU there); a
+top-up of about $10 before about 22:30 removes it.
+
 ## 7. Spend log
 
 | When (UTC) | What | Pod-hours | Cost |
@@ -332,6 +347,7 @@ seeds.
 | 2026-11-09 14:03 | balance $25.80; stage I 6/7 done, every re-run so far with both reservations granted (201/201) and 0 request errors | | |
 | 2026-11-09 14:16 | **stage I DONE 7/7**: all seven re-runs got both reservations and finished with 0 request errors (`reservation_busy` refusals of chat requests in `resv-split`: 138–210 per seed, as in phase 2; 0 in `resv-spill`). The switch fired on the *new* `resv-split-s6` report line at 14:16:43 and started the resume chain at 14:16:47: run 1/22 `load1.5-burstoff s1` PREFLIGHT OK with the KV checks, per-shape request timeouts in force (lazy 4,200 s), 0 errors at t=190 s. Forecast: 22 runs DONE ≈ 21:20, pod self-stop ≈ 22:20 UTC with ≈ $3 left; stage H still unfunded | | |
 | 2026-11-09 16:02 | balance $20.44; sweep 5/22 done, all with 0 request errors and 0 cancelled (load1.5-burstoff s1/s2 re-runs 637 and 578 refused; load1.5-burst s1/s2 638 and 564 refused, 2 and 1 revoked; load2-burstoff s1 978 refused), every run local with its meter; run 6/22 load2-burstoff s2 running. Forecast unchanged: DONE ≈ 21:30, pod self-stop ≈ 22:30 UTC with ≈ $3 left | | |
+| 2026-11-09 18:13 | balance $15.08 (18:03); sweep 12/22 done, 0 request errors in every run so far (run 13/22 prefillcap s1 running); owner: run what we can until zero, top up where needed → stage H chained onto the sweep by `scripts/stage_h.sh` (armed 18:12:51); forecast sweep DONE ≈ 21:25, stage H DONE ≈ 23:05, pod self-stop ≈ 23:25, balance zero ≈ 23:40 | | |
 | | | | |
 
 Balance at plan time: $62.35 of $80 (phase 2 spent $17.61; see PHASE2.md §3).

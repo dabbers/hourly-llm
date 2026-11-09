@@ -1,7 +1,8 @@
 # Phase 3 stage H, second half (docs/PHASE3.md): the burst setting with vLLM's default prefill chunk of
 # 2048 tokens (what a deployment that never tuned --max-num-batched-tokens gets). Engines restarted with
-# 2048 first (pod.sh vllm <p> restart ...), then the last chain of the campaign, which stops the pods:
-#   bash scripts/pod.sh chain <gw> start config/phase3/matrix-chunk2048.yaml --max-hours 2 --stop-pods --stop-grace-min 30
+# 2048 first (scripts/stage_h.sh, or by hand START_ORDER="1 2 0" STAGGER=1 pod.sh vllm <gw> restart ...),
+# then the last chain of the campaign, which stops the pod 20 min after its DONE:
+#   bash scripts/pod.sh chain <gw> start config/phase3/matrix-chunk2048.yaml --max-hours 2 --stop-pods --stop-grace-min 20
 scenario: config/scenarios/mixed-4090.yaml
 config_dir: config/phase2
 expect_replicas: 3
