@@ -178,7 +178,8 @@ per-run report (the chain's last act for a run), kills the chain and gateway bet
 the new matrix; nothing paid is lost, the new matrix lists only the runs still to do with
 `fresh_runs: false` so `chain.runs` stays complete, and the chain's signal handler does not stop the
 pod. Armed 2026-11-09 05:10 UTC for `resv-shared-s6` → `matrix-campaign-2.yaml --max-hours 14
---stop-pods --stop-grace-min 60` (the owner's order change and `resv-p95-spill`).
+--stop-pods --stop-grace-min 60` (the owner's order change and `resv-p95-spill`); fired 05:44:53, the
+second chain's first run (nopace s1) passed preflight at 05:45.
 
 **First look, 2026-11-09 03:30 UTC, six runs in (burstoff and burst, seeds 4–6).** Seeds 4–6 offer
 less load than seeds 1–3. The agent tenant's arrivals are an on/off process (`bursty`: mean on 120 s
@@ -223,6 +224,7 @@ seeds.
 | 2026-11-09 00:39–01:20 | one pod with three 4090s (`qka0zggy47mw7e`, EU-RO-1; the EUR-IS-2 request had no 3-GPU instance): bring-up; vLLM's pip install onto the network volume took ~25 min, then one engine per GPU (KV 271,152 tokens each, as in phase 2), push, setup, cluster smoke (148 ok, 2 refused, 0 errors, work on all three engines) | 0.68 × 3 | ~$1.82 |
 | 2026-11-09 01:20 → | the campaign chain: `matrix-campaign.yaml`, 49 runs, `--max-hours 19 --stop-pods --stop-grace-min 60`; runs pulled every 10 min; ~19 min per run | | $2.67/h |
 | 2026-11-09 05:05 | balance $49.92 after 12 runs: $12.41 spent since the plan ($62.33) | | |
+| 2026-11-09 05:44:53 → | `chain switch` fired 3 s after resv-shared s6's report: second chain `matrix-campaign-2.yaml`, 37 runs, `--max-hours 14 --stop-pods --stop-grace-min 60`, nopace s1 first; no run lost, `chain.runs` kept its 14 ids | | $2.67/h |
 | | | | |
 
 Balance at plan time: $62.35 of $80 (phase 2 spent $17.61; see PHASE2.md §3).
