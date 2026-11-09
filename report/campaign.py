@@ -34,12 +34,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from html import escape
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import yaml
 
-from . import charts, html
+from . import charts, frontier, html
 from .metrics import (
     _run_window,
     _seat_weights,
@@ -154,6 +155,10 @@ class Manifest:
     pairs: list[tuple[str, str]]  # (setting, baseline)
     families: dict[str, Family]
     headline: list[tuple[str, str]]  # the pairs whose headline metrics get Holm-corrected p-values
+    # the scorecard (report/frontier.py): "baseline" = the on-demand bursting label every setting of its workload is
+    # held against (default burst); "workload_of" = label -> workload name, for a label whose scenario file differs
+    # from its workload's only in a setting (resv-p95 runs mixed-4090 with other reservation sizes)
+    scorecard: dict[str, Any] = field(default_factory=dict)
 
 
 def load_manifest(path: str | Path) -> Manifest:
@@ -167,15 +172,20 @@ def load_manifest(path: str | Path) -> Manifest:
         series = {str(s): [(float(x), str(lbl)) for x, lbl in pts] for s, pts in (fam.get("series") or {}).items()}
         families[str(name)] = Family(str(name), str(fam.get("x_name") or name), series)
     headline = [(str(a), str(b)) for a, b in raw.get("headline") or []]
+    sc_raw = raw.get("scorecard") or {}
+    scorecard = {
+        "baseline": str(sc_raw.get("baseline") or "burst"),
+        "workload_of": {str(k): str(v) for k, v in (sc_raw.get("workload_of") or {}).items()},
+    }
     named = {lbl for p in pairs + headline for lbl in p} | {
         lbl for f in families.values() for pts in f.series.values() for _, lbl in pts
-    }
+    } | set(scorecard["workload_of"]) | ({scorecard["baseline"]} if sc_raw else set())
     unknown = sorted(named - set(settings))
     if unknown:
         raise ValueError(f"{path}: labels used but not defined under settings: {unknown}")
     if not set(headline) <= set(pairs):
         raise ValueError(f"{path}: headline pairs must also be listed under pairs")
-    return Manifest(settings, pairs, families, headline)
+    return Manifest(settings, pairs, families, headline, scorecard)
 
 
 def label_of(scenario) -> str | None:
@@ -230,7 +240,7 @@ def _utilisation(sub: pd.DataFrame, weights: dict[str, float], plans: dict[str, 
 
 
 CAPACITY_METRICS = ["refusal_rate", "start_violation_rate", "start_p95_s", "utilisation", "plan_agent_steps"]
-RUN_EXTRA = ["kv_profile", "kv_total_min"]  # per-run facts beside the metrics: the replicas' KV budgets
+RUN_EXTRA = ["kv_profile", "kv_total_min", "reservation_factor"]  # per-run facts beside the metrics: the replicas' KV budgets, the fee factor
 CAPACITY_COLUMNS = ["label", "kv_profile", "n", "seeds", *CAPACITY_METRICS]
 
 
@@ -348,7 +358,8 @@ def _load_one(run_dir: Path, config_dir: Path | None) -> tuple[pd.DataFrame, pd.
     for col in ("label", "seed", "scenario", "run_dir"):
         agg[col] = agg["load_run"].map(tags[col])
 
-    req = ok[["load_run", "tenant", "shape_usd", "bound_usd"]].copy()
+    pr["reservation_factor"] = float(data.config.pricing.shape.reservation_price_factor)  # the fee's factor the runs were billed at
+    req = ok[["load_run", "tenant", "shape_usd", "bound_usd", "prompt_usd", "floor_violation", "reserved"]].copy()
     for col in ("label", "seed", "run_dir"):
         req[col] = req["load_run"].map(tags[col])
     res = pd.DataFrame([r for lr in pr["load_run"].unique() for r in _reservation_entries(run_dir, lr)])
@@ -1202,9 +1213,13 @@ def build_campaign(run_dirs: list[str | Path], manifest_path: str | Path, out_di
     rt = reservations_table(c)
     integ = reservation_integrity(c)
     cap = capacity_table(c)
+    sc = frontier.scorecard_table(c)
+    fr = frontier.frontier_table(c, sc)
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    _write_csv(sc, out / "scorecard.csv")
+    _write_csv(fr, out / "frontier.csv")
     _write_csv(st, out / "settings.csv")
     _write_csv(tt, out / "tenants.csv")
     _write_csv(pt, out / "paired.csv")
@@ -1230,6 +1245,7 @@ def build_campaign(run_dirs: list[str | Path], manifest_path: str | Path, out_di
         ("settings", "Settings", _settings_section(c, st)),
         ("paired", "Paired comparisons", _paired_section(c, pt)),
         ("predictability", "Predictability", _predictability_section(c, pred)),
+        ("frontier", "Scorecard and re-pricing frontier", frontier.frontier_section(c, sc, fr)),
         ("sweeps", "Sweeps", _sweeps_section(c, sw)),
         ("margin", "Margin curve", _margin_section(c, fits, mc)),
         ("tenants", "Tenants", _tenants_section(c, tt)),

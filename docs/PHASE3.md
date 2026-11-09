@@ -397,6 +397,23 @@ exists. The SLA-credit policy (a request whose decode floor was missed is refund
 in part) is on the same grid, so the frontier also shows the sellable fallback if the floor cannot be fixed:
 best-effort throughput with credits.
 
+**First result (2026-11-09 18:55 UTC, 50 runs, the sweep still running).** The frontier is built
+(`report/frontier.py`: `scorecard.csv`, `frontier.csv` and the "Scorecard and re-pricing frontier" section of
+`campaign.html`; the manifest's `scorecard:` block names the baseline and says that `resv-p95` runs the
+`mixed-4090` workload with other reservation sizes). Over the runs so far only the baseline itself passes every
+criterion. The reserved tenants' CV row passes in every reservation setting but `resv-spill` (6.9–9.7 %). The
+provider's margin row passes only from a reservation factor of 4× (p95 sizing, with or without spill: 59 %
+against the baseline's 54 % on the same seeds) or 5× (the 24 + 4 reservations: 51 % against 48 %), where the
+reserved tenant pays 1.4–2.0× (p95) or 1.1–1.6× (24 + 4) its per-token bill. And no price table moves the
+service rows: the p95 reservations put the on-demand tenants' start p95 at 2.4–2.5× the baseline's (agent 17–18 s
+against 7 s, batch 17–18 s against 10 s) against the 1.5× limit, so they fail the on-demand row at every price;
+the 24 + 4 reservations pass the on-demand row (they hold fewer seats) but fail their own reserved tenants'
+service (`reservation_busy` refusals, a 30 s start p95) and, pinned, the floor row. A full SLA credit costs 1–4
+points of margin at the campaign factor (`burst` 48.1 → 44.4 %). Read: the price of predictability is set by the
+provider's margin criterion at about 4× the shape's price per second, where the reserved tenant pays roughly 1.4×
+per-token for a bill that moves under 1 %; the on-demand tenants' waiting time is the cost no price table can
+move, which is what C would address. Final numbers after stage J.
+
 **B. Stage J, four runs tonight (≈ $4).** Two more seeds (3 and 4) of the configuration that would ship,
 `resv-p95-spill`, and of its pair `resv-p95`, interleaved by seed so a lost last run still leaves complete
 pairs (`config/phase3/matrix-stage-j.yaml`). Chained after stage H by the same driver (`scripts/stage_h.sh`, a

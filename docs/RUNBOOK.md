@@ -506,7 +506,8 @@ py -3.11 -m uv run slotgw-campaign $(sed 's#^#runs/#' runs/phase2/chain.runs run
 ```
 
 (run directories are named by the gateway run id, `<label>-s<seed>-<timestamp>`; the two `chain.runs`
-files list them)
+files list them). The report's "Scorecard and re-pricing frontier" section, `scorecard.csv` and `frontier.csv`
+hold the fixed scorecard and the price-table frontier of PHASE3 section 9 A.
 
 Teardown as in section D once every run is local (`terminate --yes` deletes the one pod and its volume); then rotate the API key.
 

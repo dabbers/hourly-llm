@@ -65,3 +65,8 @@ headline:   # the rows that get Holm-corrected p-values in the headline table
   - [nopace, burstoff]
   - [oc1.5, burst]
   - [resv-p95-spill, burst]
+scorecard:   # report/frontier.py (PHASE3.md section 9 A): every setting of a workload is held against its on-demand bursting label
+  baseline: burst
+  workload_of:   # labels whose scenario file is their workload's with other reservation sizes, not another workload
+    resv-p95: mixed-4090
+    resv-p95-spill: mixed-4090
