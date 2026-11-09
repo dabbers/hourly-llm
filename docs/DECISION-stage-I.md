@@ -15,6 +15,8 @@ stopped at 11:18 for the batch tenant's timeout, PHASE3.md section 6): after the
 every engine reported 289,056 KV tokens, the first run's preflight passed the KV checks, and replica A's
 ledger started with 289,056 (usable 274,603), enough for chat's 24 slots and the note-taker's 4.
 
+**Result** 2026-11-09 14:16 UTC: all seven re-runs got both reservations (201/201) and finished with 0 request errors; they supersede the broken runs in the campaign report, which now reads `resv-split` on six clean seeds and `resv-spill` on three, both with the note-taker row back. The chat reservation refused 138 to 210 requests per `resv-split` seed as `reservation_busy` (phase-2 seeds: 197 and 202), and none in `resv-spill`, where a reserved tenant may spill into shared capacity: the phase-2 finding that a reservation below the tenant's p95 acts as a cap reproduces on every seed.
+
 ## The question
 
 Seven phase-3 runs ran without one of their two reservations. Do you want them re-run after the chain finishes (about $6, 2.4 hours), or should the report read those labels on the seeds they actually have?
