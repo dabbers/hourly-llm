@@ -225,6 +225,7 @@ seeds.
 | 2026-11-09 01:20 → | the campaign chain: `matrix-campaign.yaml`, 49 runs, `--max-hours 19 --stop-pods --stop-grace-min 60`; runs pulled every 10 min; ~19 min per run | | $2.67/h |
 | 2026-11-09 05:05 | balance $49.92 after 12 runs: $12.41 spent since the plan ($62.33) | | |
 | 2026-11-09 05:44:53 → | `chain switch` fired 3 s after resv-shared s6's report: second chain `matrix-campaign-2.yaml`, 37 runs, `--max-hours 14 --stop-pods --stop-grace-min 60`, nopace s1 first; no run lost, `chain.runs` kept its 14 ids | | $2.67/h |
+| 2026-11-09 07:17 | balance $43.88 after 18 runs (nopace s1–2 and resv-spill s1–2 done, 0 errors each; resv-spill s3 in flight): $6.04 for the last 6 runs, $18.45 since the plan; 37 runs ≈ $32 left, so ≈ $11 remains at the end | | |
 | | | | |
 
 Balance at plan time: $62.35 of $80 (phase 2 spent $17.61; see PHASE2.md §3).
