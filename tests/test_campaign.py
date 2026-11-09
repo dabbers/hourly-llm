@@ -291,6 +291,12 @@ def test_campaign_end_to_end(tmp_path):
 
     mc = pd.read_csv(out / "margin_curve.csv")
     assert (mc["kind"] == "point").sum() == 11 and set(mc.loc[mc["kind"] == "fit", "scheme"]) == {"shape", "per_token"}
+    fits = mc[mc["kind"] == "fit"]
+    assert (fits.loc[fits["family"] == "all", "n"] == 11).all()  # the pooled line is over every run
+    load = fits[fits["family"] == "load"]  # one controlled line per sweep series and scheme, over that series' labels only
+    assert set(load["series"]) == {"burstoff", "burst"} and len(load) == 4
+    assert (load.loc[load["series"] == "burst", "n"] == 3).all() and (load.loc[load["series"] == "burstoff", "n"] == 3).all()
+    assert (fits.loc[fits["family"] == "chunk", "n"] == 3).all()  # chunk256 / chunk2048 have no runs: the series is burst alone
 
     page = (out / "campaign.html").read_text(encoding="utf-8")
     assert "Capacity per replica" in page and "Capacity note: burst" in page and "local-2080ti=271152" in page

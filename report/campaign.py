@@ -12,7 +12,8 @@ tenants.csv (the same per label and tenant), paired.csv (seed-paired differences
 Wilcoxon p-values, Hedges' g, Holm-corrected p for the headline rows), predictability.csv (CV of
 each tenant's bill across seeds per scheme, and the per-request bill ÷ quote distribution),
 sweep.csv (the manifest's families: mean and CI per x), margin_curve.csv (revenue ÷ GPU cost
-against utilisation: raw points and the fitted line with its break-even utilisation),
+against utilisation: raw points, the line fitted over every run with its break-even utilisation,
+and one line per sweep series of the manifest, the controlled curves),
 reserved_bills.csv (the headline: for every tenant holding a reservation under a label, its bill's
 CV across seeds under slot billing against the same tenant under per-token pricing, with the
 on-demand baseline the manifest pairs the label with), reservations.csv (every reservation the load
@@ -715,7 +716,8 @@ def sweep_table(c: Campaign) -> pd.DataFrame:
 
 
 MARGIN_COLUMNS = ["kind", "scheme", "label", "seed", "utilisation", "shape_rev_over_cost", "token_rev_over_cost", "n", "slope",
-                  "intercept", "r2", "breakeven_utilisation"]
+                  "intercept", "r2", "breakeven_utilisation", "family", "series"]
+SCHEME_COLUMNS = (("shape", "shape_rev_over_cost"), ("per_token", "token_rev_over_cost"))
 
 
 def margin_fits(c: Campaign) -> dict[str, LinearFit]:
@@ -723,21 +725,38 @@ def margin_fits(c: Campaign) -> dict[str, LinearFit]:
     kept run of every label."""
     if c.runs.empty:
         return {s: LinearFit(np.nan, np.nan, np.nan, 0) for s, _ in SCHEMES}
-    return {
-        "shape": linear_fit(c.runs["utilisation"], c.runs["shape_rev_over_cost"]),
-        "per_token": linear_fit(c.runs["utilisation"], c.runs["token_rev_over_cost"]),
-    }
+    return {scheme: linear_fit(c.runs["utilisation"], c.runs[col]) for scheme, col in SCHEME_COLUMNS}
+
+
+def family_margin_fits(c: Campaign) -> list[dict[str, Any]]:
+    """Per sweep family and series of the manifest, the least-squares line of revenue ÷ GPU cost
+    against utilisation over the kept runs of the series' labels: the controlled margin curves,
+    where only the swept variable changes between the points (the load family's two series are
+    the margin curve of PHASE3.md section 1, bursting off and on)."""
+    rows: list[dict[str, Any]] = []
+    if c.runs.empty:
+        return rows
+    for fam in c.manifest.families.values():
+        for series, pts in fam.series.items():
+            sub = c.runs[c.runs["label"].isin([label for _x, label in pts])]
+            for scheme, col in SCHEME_COLUMNS:
+                fit = linear_fit(sub["utilisation"], sub[col])
+                rows.append({"kind": "fit", "family": fam.name, "series": series, "scheme": scheme, "n": fit.n, "slope": fit.slope,
+                             "intercept": fit.intercept, "r2": fit.r2, "breakeven_utilisation": fit.x_at(1.0)})
+    return rows
 
 
 def margin_table(c: Campaign, fits: dict[str, LinearFit]) -> pd.DataFrame:
     """margin_curve.csv: "fit" rows (scheme, n, slope, intercept, r2 and breakeven_utilisation,
-    the utilisation where the fitted revenue ÷ cost line crosses 1.0) and one "point" row per
-    kept run (label, seed, utilisation, shape_rev_over_cost, token_rev_over_cost)."""
+    the utilisation where the fitted revenue ÷ cost line crosses 1.0; family and series "all" for
+    the line over every run, else the sweep series the line was fitted over) and one "point" row
+    per kept run (label, seed, utilisation, shape_rev_over_cost, token_rev_over_cost)."""
     rows = [
         {"kind": "fit", "scheme": scheme, "n": fit.n, "slope": fit.slope, "intercept": fit.intercept, "r2": fit.r2,
-         "breakeven_utilisation": fit.x_at(1.0)}
+         "breakeven_utilisation": fit.x_at(1.0), "family": "all", "series": "all"}
         for scheme, fit in fits.items()
     ]
+    rows += family_margin_fits(c)
     if not c.runs.empty:
         for r in c.runs.itertuples(index=False):
             rows.append({"kind": "point", "label": r.label, "seed": int(r.seed), "utilisation": r.utilisation,
@@ -1138,15 +1157,21 @@ def _margin_section(c: Campaign, fits: dict[str, LinearFit], mc: pd.DataFrame) -
         y_ref_label="break-even",
     )
     fit_rows = mc[mc["kind"] == "fit"].assign(scheme=lambda d: d["scheme"].map(SCHEME_LABELS).fillna(d["scheme"]))
-    tbl = html.table(
-        fit_rows,
-        [("scheme", "scheme", html.fmt_text), ("n", "runs", html.fmt_int), ("slope", "slope (per unit utilisation)", html.fmt_f(3)),
-         ("intercept", "intercept", html.fmt_f(3)), ("r2", "r²", html.fmt_f(3)),
-         ("breakeven_utilisation", "break-even utilisation", html.fmt_pct)],
+    fit_cols = [("scheme", "scheme", html.fmt_text), ("n", "runs", html.fmt_int), ("slope", "slope (per unit utilisation)", html.fmt_f(3)),
+                ("intercept", "intercept", html.fmt_f(3)), ("r2", "r²", html.fmt_f(3)),
+                ("breakeven_utilisation", "break-even utilisation", html.fmt_pct)]
+    tbl = html.table(fit_rows[fit_rows["family"] == "all"], fit_cols)
+    fam_rows = fit_rows[(fit_rows["family"] != "all") & (fit_rows["n"] >= 2)]
+    fam_tbl = (
+        "<h3>Per sweep series (the controlled curves: only the swept variable changes between the points)</h3>"
+        + html.table(fam_rows, [("family", "family", html.fmt_text), ("series", "series", html.fmt_text), *fit_cols])
+        if not fam_rows.empty else ""
     )
     return (
-        f'<div class="card">{chart}<p class="muted">The fit pools every setting, so it is a campaign-wide tendency, not a '
-        f"controlled curve; the load sweep above holds the setting fixed. Break-even is where the fitted line reaches 1.0.</p>{tbl}</div>"
+        f'<div class="card">{chart}<p class="muted">The first fit pools every setting and workload, so it is a campaign-wide '
+        "tendency, not a controlled curve; the fits per sweep series hold everything but the swept variable fixed (the load "
+        "family is the margin curve against utilisation with bursting off and on). Break-even is where a fitted line reaches "
+        f"1.0; a break-even below the lowest point of its series is extrapolated.</p>{tbl}{fam_tbl}</div>"
     )
 
 
