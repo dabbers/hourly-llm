@@ -17,8 +17,10 @@ reserved_bills.csv (the headline: for every tenant holding a reservation under a
 CV across seeds under slot billing against the same tenant under per-token pricing, with the
 on-demand baseline the manifest pairs the label with), reservations.csv (every reservation the load
 generator asked for, with the gateway's answer: a label whose tenant was granted in some seeds and
-refused in others is flagged at the top of the page, since its runs mix two configurations) and
-campaign.html, one page over all of it,
+refused in others is flagged at the top of the page, since its runs mix two configurations),
+capacity.csv (per label and KV profile, the replicas' KV budgets the load generator saw at the start
+of the run: the capacity-bound metrics beside the offered load, for labels that pool engines of
+different capacity; runs.csv carries the profile per run) and campaign.html, one page over all of it,
 which leads with the reserved tenants' CV, break-even utilisation and output per GPU-hour: the
 outputs that do not depend on the configured prices come before the revenue ÷ cost ratios.
 """
@@ -227,6 +229,29 @@ def _utilisation(sub: pd.DataFrame, weights: dict[str, float], plans: dict[str, 
     return sold / (seats * duration) if seats and duration > 0 else np.nan
 
 
+CAPACITY_METRICS = ["refusal_rate", "start_violation_rate", "start_p95_s", "utilisation", "plan_agent_steps"]
+RUN_EXTRA = ["kv_profile", "kv_total_min"]  # per-run facts beside the metrics: the replicas' KV budgets
+CAPACITY_COLUMNS = ["label", "kv_profile", "n", "seeds", *CAPACITY_METRICS]
+
+
+def _kv_profile(run_dir: Path, load_run: str) -> dict[str, Any]:
+    """The replicas' KV budgets at the start of one load run, from the gateway's /admin/replicas snapshot
+    the load generator stores in loadrun.json `replicas`: `kv_profile` is "id=kv_total" per replica in id
+    order (the ledger's kv_total, else the engine's cache size), `kv_total_min` the smallest budget. Two
+    runs with different profiles ran on engines of different capacity (phase 3: one engine 6 % short)."""
+    path = run_dir / "loads" / load_run / "loadrun.json"
+    if not path.is_file():
+        return {"kv_profile": "", "kv_total_min": np.nan}
+    kv: dict[str, int] = {}
+    for rep in json.loads(path.read_text(encoding="utf-8")).get("replicas") or []:
+        v = (rep.get("ledger") or {}).get("kv_total") or (rep.get("cache") or {}).get("kv_tokens_total")
+        if v:
+            kv[str(rep.get("id"))] = int(v)
+    if not kv:
+        return {"kv_profile": "", "kv_total_min": np.nan}
+    return {"kv_profile": " ".join(f"{k}={kv[k]}" for k in sorted(kv)), "kv_total_min": float(min(kv.values()))}
+
+
 def _plan_load(run_dir: Path, load_run: str) -> dict[str, float]:
     """The plan-load covariates of one load run from its plan.json; NaN when the plan is not there."""
     out: dict[str, float] = {m: np.nan for m in PLAN_METRICS}
@@ -295,6 +320,9 @@ def _load_one(run_dir: Path, config_dir: Path | None) -> tuple[pd.DataFrame, pd.
     plan_loads = {lr: _plan_load(run_dir, lr) for lr in pr["load_run"].unique()}
     for m in PLAN_METRICS:
         pr[m] = pr["load_run"].map(lambda lr, m=m: plan_loads[lr][m]).astype(float)
+    kv_profiles = {lr: _kv_profile(run_dir, lr) for lr in pr["load_run"].unique()}
+    pr["kv_profile"] = pr["load_run"].map(lambda lr: kv_profiles[lr]["kv_profile"])
+    pr["kv_total_min"] = pr["load_run"].map(lambda lr: kv_profiles[lr]["kv_total_min"]).astype(float)
     tags = pr.set_index("load_run")[["label", "seed", "scenario", "run_dir"]]
 
     agg = pt.groupby(["load_run", "tenant"], dropna=False).agg(
@@ -413,13 +441,43 @@ def _manifest_order(c: Campaign, frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def settings_table(c: Campaign) -> pd.DataFrame:
-    """settings.csv: per label (manifest order) and run-level metric, n, mean, sd, ci_lo, ci_hi (95% Student t)."""
-    return _ci_rows(_manifest_order(c, c.runs), ["label"], [*RUN_METRICS, *PLAN_METRICS])
+    """settings.csv: per label (manifest order) and run-level metric, n, mean, sd, ci_lo, ci_hi (95% Student t),
+    and kv_profiles: how many distinct KV profiles the label's runs come from (above 1 the mean pools
+    engines of different capacity; capacity.csv has the split)."""
+    st = _ci_rows(_manifest_order(c, c.runs), ["label"], [*RUN_METRICS, *PLAN_METRICS])
+    if not st.empty:
+        k = c.runs.groupby("label")["kv_profile"].nunique() if "kv_profile" in c.runs else {}
+        st["kv_profiles"] = st["label"].map(k).fillna(0).astype(int)
+    return st
 
 
 def tenants_table(c: Campaign) -> pd.DataFrame:
     """tenants.csv: per label (manifest order), tenant and tenant-level metric, n, mean, sd, ci_lo, ci_hi."""
     return _ci_rows(_manifest_order(c, c.tenants), ["label", "tenant"], list(TENANT_METRICS))
+
+
+def capacity_table(c: Campaign) -> pd.DataFrame:
+    """capacity.csv: per label (manifest order) and KV profile (the replicas' KV budgets at the start of
+    the run), n, the seeds, and the mean of the capacity-bound metrics (refusals, the start bound, its
+    p95, utilisation) with the offered agent load beside them as the covariate it is."""
+    if c.runs.empty or "kv_profile" not in c.runs:
+        return pd.DataFrame(columns=CAPACITY_COLUMNS)
+    rows = []
+    for (label, prof), sub in _manifest_order(c, c.runs).groupby(["label", "kv_profile"], sort=False):
+        row: dict[str, Any] = {"label": label, "kv_profile": prof, "n": len(sub),
+                               "seeds": ", ".join(str(int(s)) for s in sorted(sub["seed"]))}
+        for m in CAPACITY_METRICS:
+            row[m] = float(sub[m].mean()) if m in sub else np.nan
+        rows.append(row)
+    return pd.DataFrame(rows, columns=CAPACITY_COLUMNS)
+
+
+def pooled_labels(cap: pd.DataFrame) -> list[str]:
+    """Labels whose runs come from more than one KV profile: their pooled means mix replica capacities."""
+    if cap.empty:
+        return []
+    k = cap.groupby("label", sort=False)["kv_profile"].nunique()
+    return [str(label) for label, n in k.items() if n > 1]
 
 
 PAIRED_COLUMNS = ["setting", "baseline", "scope", "tenant", "metric", "n", "mean_baseline", "mean_setting", "diff",
@@ -736,6 +794,13 @@ def _headline_section(c: Campaign, rb: pd.DataFrame, st: pd.DataFrame, fits: dic
         "the same runs. The on-demand settings' bills track per-token billing (Predictability, below), so they "
         "are the baseline here, not the claim.</p>"
     ]
+    pooled = pooled_labels(capacity_table(c))
+    if pooled:
+        parts.append(
+            f'<p class="muted">Capacity note: {", ".join(escape(x) for x in pooled)} pool runs whose replicas had '
+            "different KV budgets (Overview, Capacity per replica): read their refusal and start-bound means per "
+            "profile there before reading them pooled.</p>"
+        )
     if rb.empty:
         parts.append('<p class="muted">no tenant holds a reservation in these runs</p>')
     else:
@@ -798,7 +863,36 @@ def _headline_section(c: Campaign, rb: pd.DataFrame, st: pd.DataFrame, fits: dic
     return "".join(parts)
 
 
-def _overview_section(c: Campaign) -> str:
+def _capacity_html(c: Campaign, cap: pd.DataFrame) -> str:
+    """Overview card: the KV profiles seen (every replica's KV budget as the gateway's ledger had it at the
+    start of each run) and, for every label pooling more than one, the capacity-bound metrics per profile
+    beside the offered load; empty when the whole campaign ran on one profile."""
+    if cap.empty or cap["kv_profile"].nunique() < 2:
+        return ""
+    pooled = pooled_labels(cap)
+    profiles = cap.groupby("kv_profile", sort=False)["n"].sum()
+    seen = "; ".join(f"<code>{escape(str(p))}</code> ({int(n)} runs)" for p, n in profiles.items())
+    if pooled:
+        what = (f"Labels pooling more than one profile: {', '.join(f'<b>{escape(x)}</b>' for x in pooled)}. Their "
+                "pooled means mix replica capacities, which bears on the capacity-bound metrics (refusals, the start "
+                "bound): the table gives those per profile with the offered load beside them, so a shift is read "
+                "against the load before it is read as capacity. Paired comparisons are unaffected, both arms of a "
+                "pair share the seed and the engines.")
+    else:
+        what = "No label pools more than one profile."
+    intro = ("<h3>Capacity per replica</h3><p>The load generator records every replica's KV budget at the start of "
+             "each run (the gateway's ledger; <code>kv_profile</code> in runs.csv, per label in capacity.csv). "
+             f"Profiles in these runs: {seen}. {what}</p>")
+    if not pooled:
+        return intro
+    sub = cap[cap["label"].isin(pooled)]
+    cols: list[tuple[str, str, Callable]] = [("label", "label", html.fmt_text), ("kv_profile", "KV profile", html.fmt_text),
+                                             ("seeds", "seeds", html.fmt_text), ("n", "n", html.fmt_int)]
+    cols += [(m, m.replace("_", " "), ({**RUN_METRICS, **PLAN_METRICS}[m])[1]) for m in CAPACITY_METRICS]
+    return intro + '<div class="card">' + html.table(sub, cols, left=3) + "</div>"
+
+
+def _overview_section(c: Campaign, cap: pd.DataFrame | None = None) -> str:
     rows = []
     for label, desc in c.manifest.settings.items():
         sub = c.runs[c.runs["label"] == label] if not c.runs.empty else pd.DataFrame()
@@ -817,6 +911,7 @@ def _overview_section(c: Campaign) -> str:
          f"{escape(c.seat_basis)}. Every interval is a two-sided 95% Student-t interval over the runs (one "
          f"per seed); n &lt; 2 gives a mean without one.</p>"),
         f'<div class="card">{tbl}</div>',
+        _capacity_html(c, cap if cap is not None else capacity_table(c)),
     ]
     integ = reservation_integrity(c)
     if len(integ):
@@ -1076,6 +1171,9 @@ def _definitions_section() -> str:
         ("break-even utilisation", "where the least-squares line of revenue ÷ GPU cost against utilisation crosses 1.0."),
         ("fee share", "mean reservation fee ÷ mean slot bill of a reserved tenant across seeds; 1.0 = nothing spilled to on demand."),
         ("CV ratio", "a reserved tenant's slot-bill CV ÷ its per-token CV over the same runs; below 1 the slot bill is the more predictable."),
+        ("KV profile", ("every replica's KV budget in tokens as the gateway's ledger had it at the start of the run (loadrun.json); "
+                        "runs that differ in it ran on engines of different capacity, and a label pooling two profiles "
+                        "mixes them (settings.csv kv_profiles, capacity.csv).")),
     ]
     items += [f"<dt>{escape(k)}</dt><dd>{escape(v)}</dd>" for k, v in methods]
     return f"<dl>{''.join(items)}</dl>"
@@ -1103,6 +1201,7 @@ def build_campaign(run_dirs: list[str | Path], manifest_path: str | Path, out_di
     rb = reserved_bills_table(c, pred)
     rt = reservations_table(c)
     integ = reservation_integrity(c)
+    cap = capacity_table(c)
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -1114,7 +1213,8 @@ def build_campaign(run_dirs: list[str | Path], manifest_path: str | Path, out_di
     _write_csv(mc, out / "margin_curve.csv")
     _write_csv(rb, out / "reserved_bills.csv")
     _write_csv(rt, out / "reservations.csv")
-    runs_cols = ["label", "seed", "load_run", "run_dir", "started_at", "duration_s", *RUN_METRICS, *PLAN_METRICS]
+    _write_csv(cap, out / "capacity.csv")
+    runs_cols = ["label", "seed", "load_run", "run_dir", "started_at", "duration_s", *RUN_METRICS, *PLAN_METRICS, *RUN_EXTRA]
     if not c.runs.empty:
         _write_csv(c.runs[runs_cols], out / "runs.csv")
 
@@ -1126,7 +1226,7 @@ def build_campaign(run_dirs: list[str | Path], manifest_path: str | Path, out_di
     )
     sections = [
         ("headline", "Headline", _headline_section(c, rb, st, fits, integ)),
-        ("overview", "Overview", _overview_section(c)),
+        ("overview", "Overview", _overview_section(c, cap)),
         ("settings", "Settings", _settings_section(c, st)),
         ("paired", "Paired comparisons", _paired_section(c, pt)),
         ("predictability", "Predictability", _predictability_section(c, pred)),

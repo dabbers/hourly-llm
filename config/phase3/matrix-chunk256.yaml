@@ -8,6 +8,7 @@ config_dir: config/phase2
 expect_replicas: 3
 expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
 expect_calibration: runpod-4090
+kv_spread_max: 0.01          # the chunk size moves the absolute KV budget; the engines must still agree within 1 %
 report_out: runs/phase3/report
 report_mode: last
 continue_on_fail: true

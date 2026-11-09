@@ -114,6 +114,50 @@ async def test_gateway_down_is_one_clear_failure(tmp_path):
     assert "healthz" in failed and "/healthz" in failed["healthz"]
 
 
+async def test_kv_budget_checks_against_the_live_cluster(cluster, tmp_path):
+    """--expect-kv-total passes when every replica's ledger kv_total is within the tolerance and fails for
+    every replica otherwise; --kv-spread-max passes on two equal fakes."""
+    async with httpx.AsyncClient(base_url=cluster.gateway.url, timeout=10) as c:
+        snap = (await c.get("/admin/replicas")).json()
+    kv = [r["ledger"]["kv_total"] for r in snap["replicas"]]
+    assert len(kv) == 2 and kv[0] == kv[1] > 0
+    checks, _ = await asyncio.to_thread(_run, cluster.gateway.url, tmp_path, expect_calibration=":inline",
+                                        expect_kv_total=kv[0], kv_spread_max=0.01)
+    assert _failed(checks) == {}
+    assert {"kv_budget[fake-0]", "kv_budget[fake-1]", "kv_uniform"} <= {c.name for c in checks}
+    checks, _ = await asyncio.to_thread(_run, cluster.gateway.url, tmp_path, expect_calibration=":inline",
+                                        expect_kv_total=int(kv[0] * 1.066))  # the phase-3 deficit, inverted
+    failed = _failed(checks)
+    assert set(failed) == {"kv_budget[fake-0]", "kv_budget[fake-1]"} and "within 1%" in failed["kv_budget[fake-0]"]
+
+
+def test_kv_spread_flags_one_short_engine(tmp_path):
+    """A canned /admin/replicas snapshot with one engine 6 % short (the campaign pod, 2026-11-09): kv_uniform
+    fails and names the spread, the absolute check fails for that replica only."""
+    def ledger(kv_total):
+        return {"kv_total": kv_total, "kv_usable": int(kv_total * 0.95), "engine_active": 0, "running": 0,
+                "reserved_slots": 0, "profile": "canned"}
+    health = {"ok": True, "running": 0, "waiting": 0, "kv_usage": 0.0}
+    snap = {"replicas": [{"id": "a", "hf_model": "m", "health": health, "ledger": ledger(271152)},
+                         {"id": "b", "hf_model": "m", "health": health, "ledger": ledger(289056)}],
+            "scheduler": {"queues": {"interactive": 0}}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/healthz":
+            return httpx.Response(200, json={"ok": True, "run_id": "canned"})
+        if request.url.path == "/admin/replicas":
+            return httpx.Response(200, json=snap)
+        return httpx.Response(404)
+
+    client = httpx.Client(base_url="http://canned", transport=httpx.MockTransport(handler))
+    checks, run_id = preflight.run_checks("http://canned", expect_replicas=2, expect_model="m", runs_dir=tmp_path,
+                                          min_free_gb=0, client=client, expect_kv_total=289056, kv_spread_max=0.01)
+    failed = _failed(checks)
+    assert run_id == "canned"
+    assert set(failed) == {"kv_budget[a]", "kv_uniform", "tokenizer"}, failed  # no /admin/tokenize in the canned gateway
+    assert "kv_total=271152" in failed["kv_budget[a]"] and "spread 6.19%" in failed["kv_uniform"]
+
+
 def test_cli_prints_ok_line_and_exit_code(cluster, tmp_path, capsys):
     rc = preflight.main(["--gateway", cluster.gateway.url, "--expect-replicas", "2", "--expect-model", FAKE_HF_MODEL,
                          "--runs-dir", str(tmp_path), "--min-free-gb", "0"])

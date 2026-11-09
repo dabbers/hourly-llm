@@ -11,7 +11,7 @@ import pytest
 from scipy import stats as sps
 
 from report import stats
-from report.campaign import build_campaign, label_of, load_manifest, on_demand_baseline
+from report.campaign import CAPACITY_COLUMNS, build_campaign, label_of, load_manifest, on_demand_baseline, pooled_labels
 from slotgw.meter import Meter, RequestRecord, ReservationRecord
 
 REPO = Path(__file__).resolve().parents[1]
@@ -115,13 +115,14 @@ def _row(i: int, load_run: str, scenario: str, seed: int, tenant: str, shape: st
 
 
 def _write_run(run_dir: Path, label: str, seed: int, started_at: str = "2026-11-08T00:00:00+00:00",
-               plan: bool = True, refuse_reservation: bool = False) -> None:
+               plan: bool = True, refuse_reservation: bool = False, kv_total: int = 289056) -> None:
     """One synthetic gateway run with one load run: scenario 'mixed-4090+<label>'. The burst label
     delivers chat faster than the shape (a burst discount) and has fewer floor violations. With `plan`
     the load run carries a plan.json whose open-loop load grows with the seed (the agent tenant). A
     label starting with 'resv' gives chat a one-slot reservation that serves every chat request, so
     chat's slot bill is the fee alone; with `refuse_reservation` the gateway's answer in loadrun.json is a
-    409 and chat runs on demand (the phase-3 incident)."""
+    409 and chat runs on demand (the phase-3 incident). `kv_total` is the one replica's KV budget in the
+    gateway snapshot the load generator stores (the run's KV profile)."""
     scenario = f"mixed-4090+{label}"
     load_run = f"mixed-4090-{label}-s{seed}"
     meter = Meter(run_dir / "meter.sqlite", run_id=f"{label}-s{seed}")
@@ -164,6 +165,7 @@ def _write_run(run_dir: Path, label: str, seed: int, started_at: str = "2026-11-
     (d / "loadrun.json").write_text(json.dumps({
         "load_run": load_run, "scenario": scenario, "label": label, "seed": seed, "started_at": started_at,
         "duration_s": 90, "gateway_pacing": {"enabled": True, "bucket_depth_s": 1.0}, "reservations": reservation_entries,
+        "replicas": [{"id": "local-2080ti", "ledger": {"kv_total": kv_total, "kv_usable": int(kv_total * 0.95)}}],
     }), encoding="utf-8")
     with open(d / "samples.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -186,7 +188,8 @@ def test_campaign_end_to_end(tmp_path):
     for label in ("burstoff", "burst", "resv-shared"):
         for seed in (1, 2, 3):
             d = tmp_path / f"{label}-s{seed}"
-            _write_run(d, label, seed)
+            # burst seed 3 ran on an engine 6 % short of KV (the phase-3 pod): burst pools two KV profiles
+            _write_run(d, label, seed, kv_total=271152 if (label, seed) == ("burst", 3) else 289056)
             dirs.append(d)
     # a duplicate (burst, seed 1) that started later replaces the first; an unknown label is listed and ignored
     dup = tmp_path / "burst-s1-again"
@@ -200,7 +203,7 @@ def test_campaign_end_to_end(tmp_path):
     out = build_campaign([*dirs, dup, odd, *spill], MANIFEST, tmp_path / "campaign", config_dir=REPO / "config")
 
     for name in ("settings.csv", "tenants.csv", "paired.csv", "predictability.csv", "sweep.csv", "margin_curve.csv",
-                 "reserved_bills.csv", "reservations.csv", "runs.csv", "campaign.html"):
+                 "reserved_bills.csv", "reservations.csv", "capacity.csv", "runs.csv", "campaign.html"):
         assert (out / name).is_file(), name
 
     st = pd.read_csv(out / "settings.csv")
@@ -223,6 +226,17 @@ def test_campaign_end_to_end(tmp_path):
     assert (with_plan["plan_agent_steps"] == 2 * (5 + with_plan["seed"])).all()
     no_plan = runs[(runs["label"] == "burst") & (runs["seed"] == 1)].iloc[0]
     assert np.isnan(no_plan["plan_open_steps"])
+    # capacity: every run records its replicas' KV budgets; burst pools two profiles, burstoff one
+    assert set(runs["kv_profile"]) == {"local-2080ti=289056", "local-2080ti=271152"}
+    assert runs[(runs["label"] == "burst") & (runs["seed"] == 3)]["kv_total_min"].iloc[0] == 271152
+    cap = pd.read_csv(out / "capacity.csv")
+    assert list(cap.columns) == CAPACITY_COLUMNS
+    assert list(dict.fromkeys(cap["label"])) == ["burstoff", "burst", "resv-shared", "resv-spill"]
+    assert cap[cap["label"] == "burst"]["kv_profile"].nunique() == 2 and cap[cap["label"] == "burstoff"]["kv_profile"].nunique() == 1
+    short = cap[(cap["label"] == "burst") & (cap["kv_profile"] == "local-2080ti=271152")].iloc[0]
+    assert str(short["seeds"]) == "3" and short["n"] == 1 and 0 < short["utilisation"] < 1
+    assert pooled_labels(cap) == ["burst"]
+    assert (st[st["label"] == "burst"]["kv_profiles"] == 2).all() and (st[st["label"] == "burstoff"]["kv_profiles"] == 1).all()
     load_ci = st[(st["metric"] == "plan_open_steps") & (st["label"] == "burstoff")].iloc[0]
     assert load_ci["n"] == 3 and load_ci["mean"] == pytest.approx(30 + 2 * (5 + 2))
     assert "plan_open_steps" not in set(pd.read_csv(out / "paired.csv")["metric"])
@@ -279,6 +293,7 @@ def test_campaign_end_to_end(tmp_path):
     assert (mc["kind"] == "point").sum() == 11 and set(mc.loc[mc["kind"] == "fit", "scheme"]) == {"shape", "per_token"}
 
     page = (out / "campaign.html").read_text(encoding="utf-8")
+    assert "Capacity per replica" in page and "Capacity note: burst" in page and "local-2080ti=271152" in page
     assert "burst vs burstoff" in page
     for word in ("Headline", "Overview", "Settings", "Paired comparisons", "Predictability", "Sweeps", "Margin curve", "Tenants"):
         assert word in page

@@ -395,17 +395,25 @@ bash scripts/pod.sh chain a switch resv-shared-s6 config/phase3/matrix-campaign-
 `chain a status` shows `--- switch pending:` with the watcher's last lines until it fires; the
 watcher logs to `runs/phase2/chain-switch.log` on the pod.
 
-**Stage I: re-running the pinned-reservation runs (PHASE3.md section 6).** When the second chain is DONE
-(within its 60-minute stop grace): cancel the pod stop, restart the engines with the same argument line
-(GPU 0's engine profiled 6 % less KV at bring-up, which is what refused the note-taker's reservation), check
-them, start the re-run matrix, and confirm replica A's KV in the first run's gateway log:
+**Stage I: re-running the pinned-reservation runs (PHASE3.md section 6; owner's decision 2026-11-09: re-run,
+with a KV preflight).** When the second chain is DONE (within its 60-minute stop grace): cancel the pod stop,
+ship the repo (the preflight's KV checks, the matrix, `--reservations-required`; never push while a chain
+runs, the push overwrites the running scripts), restart the engines with the same argument line but GPU 0
+last and each engine healthy before the next (GPU 0's engine profiled 6 % less KV when it was the first,
+cold start; GPUs 1 and 2 start first and warm the compile cache), read every engine's KV from `status`
+(289056 tokens on all three, or stop here), start the re-run matrix, and confirm replica A's KV in the first
+run's gateway log:
 
 ```bash
 bash scripts/pod.sh chain a stop
 ```
 
 ```bash
-bash scripts/pod.sh vllm a restart --model Qwen/Qwen2.5-7B-Instruct-AWQ --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens 512 --enable-prefix-caching --enable-prompt-tokens-details
+bash scripts/pod.sh push a
+```
+
+```bash
+START_ORDER="1 2 0" STAGGER=1 bash scripts/pod.sh vllm a restart --model Qwen/Qwen2.5-7B-Instruct-AWQ --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens 512 --enable-prefix-caching --enable-prompt-tokens-details
 ```
 
 ```bash
@@ -420,9 +428,12 @@ bash scripts/pod.sh chain a start config/phase3/matrix-rerun-resv.yaml --max-hou
 bash scripts/pod.sh ssh a 'cd /workspace/slotgw && grep -h "ledger runpod-4090-a" runs/phase2/logs/gateway-resv-split-s3-*.log | tail -n 1'
 ```
 
-`--reservations-required` (loadgen) makes a refused reservation exit 3 before any load, so if GPU 0 still
-comes up short the run fails in seconds and `chain.failed` says so; the fallback is then a documented
-configuration change, not a silent on-demand run. Stage H (the chunk sweep) follows as described above.
+The matrix carries `expect_kv_total: 289056` and `kv_spread_max: 0.01`, so the preflight refuses the first
+run if any engine is short again, and `continue_on_fail: false`, so the chain stops there (one gateway start
+and one preflight, about two minutes of pod time) rather than failing seven runs in turn;
+`--reservations-required` (loadgen) still makes a refused reservation exit 3 before any load. Either way the
+fallback is a documented configuration change, not a silent on-demand run. Stage H (the chunk sweep)
+follows as described above.
 
 **The chain.** 19 hours of watchdog for about 17 hours of runs; the pods stop an hour after the
 chain ends, so a failure can be caught and the stop cancelled (`chain <gw> stop`):
@@ -444,7 +455,9 @@ bash scripts/pod.sh pull <gw> <run id>
 ```
 
 **Stage H.** After `DONE`, inside the grace hour: cancel the stop, restart every engine with the new
-chunk size (the whole argument line; `vllm <p> status` echoes it), chain `matrix-chunk256.yaml`
+chunk size (the whole argument line, `START_ORDER="1 2 0" STAGGER=1` as in stage I; `vllm <p> status` echoes
+the line and each engine's KV budget, which the chunk size moves but which must agree across the engines:
+the matrices carry `kv_spread_max: 0.01`), chain `matrix-chunk256.yaml`
 without `--stop-pods`, restart with 2048, chain `matrix-chunk2048.yaml` with `--stop-pods
 --stop-grace-min 30`, pull:
 

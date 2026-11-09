@@ -63,7 +63,7 @@ data set). Every stage reuses `config/scenarios/mixed-4090.yaml` unless a varian
 | **I. Workload edges** | `outheavy-burstoff`, `outheavy-burst` | `mixed-4090-outheavy.yaml`: prompt : output ≈ 1.5 : 1 instead of 15 : 1 (long answers, short prompts), rate scaled so peak occupancy matches the base scenario; tests whether the floor finding is a property of prompt-heavy traffic | 1–2 | 4 | $3.6 |
 | | `flash-burstoff`, `flash-burst` | `mixed-4090-flash.yaml`: a two-minute surge at 2.5 × the peak rate inside the peak phase; admission, queueing and bills under a flash crowd | 1–2 | 4 | $3.6 |
 | **H. Engine sweep** | `chunk256`, `chunk2048` | vLLM `--max-num-batched-tokens` 256 (half) and 2048 (vLLM's default: what a naive deployment gets), burst on; needs an engine restart on all three pods between chains | 1–2 | 4 | $3.6 |
-| **I** | `resv-split` s3–6, `resv-spill` s1–3 (re-runs) | the seven pinned-reservation runs that ran without the note-taker's 4 slots (section 6: replica A's KV deficit on the campaign pod); after the second chain, engines restarted first, `--reservations-required` so a refusal costs seconds | split 3–6, spill 1–3 | 7 | $6.0 |
+| **I** | `resv-split` s3–6, `resv-spill` s1–3 (re-runs) | the seven pinned-reservation runs that ran without the note-taker's 4 slots (section 6: replica A's KV deficit on the campaign pod); after the second chain, engines restarted first (GPU 0 last), KV preflight (`expect_kv_total` 289,056, `kv_spread_max` 1 %, `continue_on_fail` off) so a short engine stops the chain before any run, `--reservations-required` so a refusal costs seconds | split 3–6, spill 1–3 | 7 | $6.0 |
 | | | | | **62** | **$56.0** |
 
 Plus bring-up (start or create pods, vLLM up, push, cluster smoke: ~40 min, ~$1.8), the engine
@@ -125,6 +125,8 @@ existing per-run and per-tenant tables and does not change the phase-2 report.
   cost ratio. A reservation-integrity warning (`reservations.csv`: every reservation the load generator
   asked for and the gateway's answer, per seed) comes before all of it when a label's runs mix a granted
   and a refused reservation. The start bound joined the headline metrics (Holm family 7 pairs × 7 metrics).
+  `runs.csv` records every replica's KV budget per run (`kv_profile`); `capacity.csv` splits the capacity-bound
+  metrics per profile and the page marks every label that pools two (section 6, the owner's second addition).
 - **Levers:** for each lever the paired gain in revenue per GPU-hour and the paired cost to tenants
   (floor violation share, queue p95, refusals), as a table and a scatter.
 - **Edges:** the out-heavy and flash scenarios compared with the base scenario at the same seeds;
@@ -214,6 +216,32 @@ they supersede the broken runs, which stay on disk and in `chain.runs`. Stage H 
 in the second chain are unaffected: `resv-p95` and `resv-p95-spill` are unpinned and spread over three
 replicas, everything else runs without reservations.
 
+**Owner's decision (2026-11-09 08:55 UTC): A, re-run**, "reservation predictability is the headline claim, and
+two clean seeds for one label and zero for the other won't support it", with two additions. (1) **KV preflight
+before stage I.** `scripts/preflight.py` checks every replica's KV budget: `--expect-kv-total` (the ledger's
+`kv_total` within 1 % of 289,056) and `--kv-spread-max` (the replicas within 1 % of each other); `runchain.sh`
+passes the matrix's `expect_kv_total` / `kv_spread_max`, and `matrix-rerun-resv.yaml` carries both with
+`continue_on_fail: false`, so a short engine stops the chain at the first preflight (about two minutes of pod
+time) instead of failing seven runs at reservation time. `pod.sh vllm <p> status` prints each engine's KV
+from `/metrics`, and `START_ORDER="1 2 0" STAGGER=1 pod.sh vllm <p> restart ...` starts GPU 0 last, after
+GPUs 1 and 2 are healthy and the compile cache is warm (the stage-A calibration pods, whose first engine also
+started cold, profiled the same 271,152: `calibration/runpod-4090-*.yaml`; every phase-2 run had 289,056 on
+all three replicas). The stage H matrices carry `kv_spread_max: 0.01` only, because the chunk size moves the
+absolute budget. (2) **KV per replica per run in the report.** The load generator already stores the gateway's
+`/admin/replicas` snapshot in `loadrun.json`; `report/campaign.py` now reads it into `runs.csv` (`kv_profile`,
+`kv_total_min`), writes `capacity.csv` (per label and KV profile: refusal rate, start-bound violation rate,
+start p95, utilisation, with the agent tenant's planned steps beside them as the load covariate), counts
+`kv_profiles` per label in `settings.csv`, and the page carries a "Capacity per replica" card in the Overview
+and a capacity note in the Headline for every label pooling two profiles (`burstoff`, `burst`, `resv-split`,
+`resv-shared`: seeds 1–3 on the phase-2 pods, 3–6 on the campaign pod). The quick check the owner asked for,
+stage D seeds 4–6 against 1–3 on the runs pulled by 08:50 UTC: refusal rate `burst` 2.8 % → 0.9 %, `burstoff`
+4.5 % → 2.5 %; start-bound violation rate `burst` 64 % → 32 %, `burstoff` 28 % → 13 %; start p95 `burst` 9.2 s
+→ 6.3 s, `burstoff` 5.8 s → 4.0 s; utilisation 54 % → 38 % and 48 % → 39 %; the agent tenant's planned steps
+3,401 → 1,616. The shift is large and towards *less* pressure, which is the seeds' lighter load, not the 2 %
+less cluster KV; the capacity effect cannot be separated from the seed effect in this design, so the write-up
+reads refusals and the start bound per KV profile (and paired, per seed) rather than pooled across the two
+pods, as the owner asked. Paired comparisons are unaffected: both arms of a pair share the seed and the engines.
+
 **First look, 2026-11-09 03:30 UTC, six runs in (burstoff and burst, seeds 4–6).** Seeds 4–6 offer
 less load than seeds 1–3. The agent tenant's arrivals are an on/off process (`bursty`: mean on 120 s
 at 33/min, off 180 s at 5.5/min after the ×11 multiplier) with only three or four cycles in an
@@ -261,6 +289,7 @@ seeds.
 | 2026-11-09 07:17 | balance $43.88 after 18 runs (nopace s1–2 and resv-spill s1–2 done, 0 errors each; resv-spill s3 in flight): $6.04 for the last 6 runs, $18.45 since the plan; 37 runs ≈ $32 left, so ≈ $11 remains at the end | | |
 | 2026-11-09 07:30 | found: `resv-split` s3–s6 and `resv-spill` s1–s3 ran without the note-taker's reservation (409, replica A's KV deficit; section 6). Stage I added: seven re-runs after an engine restart, ≈ $6; the chain goes on unchanged | | |
 | 2026-11-09 08:48 | balance $39.87 after 23 runs (resv-p95 s1–2 and resv-p95-spill s1–2 got both reservations; abort s1 in flight; 0 errors). Decision memo for the owner: `docs/DECISION-stage-I.md` (re-run the seven or skip; default re-run at DONE) | | $2.68/h |
+| 2026-11-09 08:55 | owner: **A, re-run** (memo answered), plus a KV preflight before stage I and KV per replica per run in the report (section 6); stage I cost unchanged ≈ $6; 24 runs pulled, abort s2 in flight, 0 errors | | |
 | | | | |
 
 Balance at plan time: $62.35 of $80 (phase 2 spent $17.61; see PHASE2.md §3).

@@ -7,7 +7,9 @@
 #   pod.sh push <pod>                    copy the repo tree to /workspace/slotgw (tar over ssh)
 #   pod.sh pull <pod> [run_id]           fetch runs/<run_id> (default: all of runs/) into local runs/
 #   pod.sh setup <pod>                   install uv, `uv sync --frozen`, check `uv run slotgw --help`
-#   pod.sh vllm <pod> status|log|restart [vllm args...]   one engine per GPU of the pod (pods.json gpu_count)
+#   pod.sh vllm <pod> status|log|restart [vllm args...]   one engine per GPU of the pod (pods.json gpu_count); status
+#                                        prints each engine's KV budget; START_ORDER="1 2 0" STAGGER=1 restart starts
+#                                        the engines in that order, each healthy before the next (GPU 0 last, warm cache)
 #   pod.sh gateway <pod> start [KEY=VALUE...]|stop|log
 #   pod.sh calibrate <pod> [calibrate.py args...]
 #   pod.sh smoke <pod> [scenario]        smoke-4090.yaml (or smoke.yaml) through the pod's gateway; exit code + last 20 lines
@@ -123,6 +125,9 @@ for i in $(seq 0 $((ENGINES - 1))); do
   if curl -sf -m 5 "localhost:$port/health" >/dev/null; then printf 'engine %s :%s healthy  ' "$i" "$port"; else printf 'engine %s :%s NO HEALTH  ' "$i" "$port"; fi
   curl -s -m 5 "localhost:$port/v1/models" | head -c 160; echo
   [ -f "/workspace/vllm-$i.args" ] && echo "  args: $(cat "/workspace/vllm-$i.args")"
+  m=$(curl -s -m 5 "localhost:$port/metrics" | grep '^vllm:cache_config_info' | head -n 1)
+  nb=$(printf '%s' "$m" | grep -o 'num_gpu_blocks="[0-9]*"' | grep -o '[0-9]*'); bs=$(printf '%s' "$m" | grep -o 'block_size="[0-9]*"' | grep -o '[0-9]*')
+  if [ -n "$nb" ] && [ -n "$bs" ]; then echo "  KV: $nb blocks x $bs = $((nb * bs)) tokens"; else echo "  KV: not in /metrics"; fi
 done
 tmux ls 2>/dev/null || echo 'no tmux sessions'
 nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null || true
@@ -133,7 +138,7 @@ EOF
       # [args...]: the whole argument line, written for engine 0; engine i gets --port 8000+10*i
       local args_q=""
       if [ $# -gt 0 ]; then args_q=$(printf '%q' "$*"); fi
-      rssh "$pod" "ENGINES=$n ARGS=$args_q bash -s" <<'EOF'
+      rssh "$pod" "ENGINES=$n ARGS=$args_q START_ORDER='${START_ORDER:-}' STAGGER='${STAGGER:-0}' bash -s" <<'EOF'
 if [ -n "$ARGS" ]; then
   for i in $(seq 0 $((ENGINES - 1))); do
     echo "$ARGS" | sed "s/--port 8000/--port $((8000 + 10 * i))/" > "/workspace/vllm-$i.args"
@@ -143,9 +148,14 @@ fi
 for i in $(seq 0 $((ENGINES - 1))); do tmux kill-session -t "vllm-$i" 2>/dev/null || true; done
 pkill -f vllm.entrypoints 2>/dev/null || true
 sleep 3
-for i in $(seq 0 $((ENGINES - 1))); do
+ORDER=${START_ORDER:-$(seq -s ' ' 0 $((ENGINES - 1)))}
+for i in $ORDER; do
   tmux new-session -d -s "vllm-$i" "/workspace/run-vllm.sh $i"
   echo "engine $i started: $(cat "/workspace/vllm-$i.args")"
+  if [ "${STAGGER:-0}" = 1 ]; then
+    for _ in $(seq 1 180); do curl -sf -m 3 "localhost:$((8000 + 10 * i))/health" >/dev/null && break; sleep 5; done
+    if curl -sf -m 3 "localhost:$((8000 + 10 * i))/health" >/dev/null; then echo "engine $i healthy"; else echo "engine $i not healthy in 15 min; see /root/vllm-$i.log" >&2; exit 1; fi
+  fi
 done
 for _ in $(seq 1 180); do
   ok=0

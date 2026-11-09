@@ -2,22 +2,28 @@
 # runs of the campaign that ran without the note-taker's 4 slots. On the campaign pod the engine on GPU 0
 # profiled 271,152 KV tokens (257.6k usable) against 289,056 on GPUs 1 and 2 (and on every phase-2 pod),
 # so "4 x small.16k.30tps" no longer fit on replica A beside chat's 24 slots and the gateway answered 409
-# reservation_capacity; the load generator warned and ran the tenant on demand. Run after the second
-# chain is DONE and the engines have been restarted (pod.sh vllm <p> restart <the RUNBOOK C2 argument
-# line>, which brings GPU 0 back to the full KV; check `ledger runpod-4090-a: KV 289056` in the gateway
-# log of the first run), before stage H:
+# reservation_capacity; the load generator warned and ran the tenant on demand. Owner's decision
+# (2026-11-09): re-run, with a KV preflight. Run after the second chain is DONE: `pod.sh chain <gw> stop`,
+# `pod.sh push <gw>` (never while a chain runs), the engines restarted with GPU 0 last and each healthy
+# before the next (START_ORDER="1 2 0" STAGGER=1 pod.sh vllm <gw> restart <the RUNBOOK C2 argument line>),
+# `pod.sh vllm <gw> status` showing 289056 KV tokens on every engine, then, before stage H:
 #   bash scripts/pod.sh chain <gw> start config/phase3/matrix-rerun-resv.yaml --max-hours 3
-# --reservations-required makes the load generator exit 3 before any load if a reservation is refused
-# again, so a failed run costs seconds, not $0.86. fresh_runs is off: chain.runs keeps every id; the
-# campaign report keeps the latest start per (label, seed), so these supersede the broken runs.
+# expect_kv_total / kv_spread_max make the preflight refuse the first run if any engine is short again,
+# and continue_on_fail is off, so the chain stops there before any load (one gateway start and one
+# preflight, about two minutes of pod time) instead of failing seven runs in turn. --reservations-required
+# makes the load generator exit 3 before any load if a reservation is refused anyway. fresh_runs is off:
+# chain.runs keeps every id; the campaign report keeps the latest start per (label, seed), so these
+# supersede the broken runs, which stay on disk.
 scenario: config/scenarios/mixed-4090.yaml
 config_dir: config/phase2
 expect_replicas: 3
 expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
 expect_calibration: runpod-4090
+expect_kv_total: 289056      # every engine's KV budget within 1 % of phase 2's (and GPUs 1-2 of the campaign pod)
+kv_spread_max: 0.01          # and within 1 % of each other
 report_out: runs/phase3/report
 report_mode: last
-continue_on_fail: true
+continue_on_fail: false      # a failed preflight or a refused reservation stops the chain: nothing more is spent
 fresh_runs: false
 runs:
   # the pairs first: resv-split s3 restores [resv-spill, resv-split] on seed 3 with the three resv-spill

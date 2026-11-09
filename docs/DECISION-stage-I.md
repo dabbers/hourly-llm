@@ -4,6 +4,12 @@
 **Answer needed by** about 17:25 UTC today, when the second chain reaches DONE. If no answer arrives by then, the re-runs go ahead as the default.
 **What the decision costs** about $6 of the approved $60 phase-3 budget. Balance now $39.87.
 
+**Decided** 2026-11-09 about 08:55 UTC by the owner: **A, re-run**, with two additions, both implemented
+(PHASE3.md section 6): a KV preflight before stage I (every engine's KV budget checked after the restart,
+the chain stops before any run if one is short; GPU 0 restarted last, after the other two have warmed the
+compile cache), and KV per replica recorded per run in the campaign report, with the capacity-bound metrics
+split per KV profile wherever phase-2 and phase-3 seeds are pooled.
+
 ## The question
 
 Seven phase-3 runs ran without one of their two reservations. Do you want them re-run after the chain finishes (about $6, 2.4 hours), or should the report read those labels on the seeds they actually have?

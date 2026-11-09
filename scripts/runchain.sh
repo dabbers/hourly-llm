@@ -15,6 +15,8 @@
 #   expect_replicas: 3                             # preflight (default 3)
 #   expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ     # preflight (default)
 #   expect_calibration: runpod-4090                # preflight: substring of every ledger's calibration source (optional)
+#   expect_kv_total: 289056                        # preflight: every replica's KV budget within 1 % of this (optional)
+#   kv_spread_max: 0.01                            # preflight: the replicas' KV budgets within this fraction of each other (optional)
 #   runs:
 #     - label: burstoff                            # loadgen --label and the run id prefix
 #       seeds: [1, 2]                              # one fresh gateway + one loadgen run per seed
@@ -89,7 +91,7 @@ if mode not in ("all", "last", "none"):
 print(SEP.join(["HEADER", m["scenario"], m.get("config_dir", "config/phase2"), m.get("report_out", "runs/phase2/report"),
                 str(m.get("expect_replicas", 3)), m.get("expect_model", "Qwen/Qwen2.5-7B-Instruct-AWQ"),
                 m.get("expect_calibration") or "", mode, s(bool(m.get("continue_on_fail", False))),
-                s(bool(m.get("fresh_runs", False)))]))
+                s(bool(m.get("fresh_runs", False))), str(m.get("expect_kv_total") or ""), str(m.get("kv_spread_max") or "")]))
 for run in m["runs"]:
     env = " ".join(shlex.quote(f"{k}={s(v)}") for k, v in (run.get("env") or {}).items())
     args = " ".join(shlex.quote(s(a)) for a in (run.get("loadgen_args") or []))
@@ -97,7 +99,7 @@ for run in m["runs"]:
         print(SEP.join(["RUN", str(run["label"]), str(seed), env, args, str(run.get("scenario") or "")]))
 PY
 )
-IFS=$'\x1f' read -r _ SCENARIO CONFIG_DIR REPORT_OUT EXPECT_REPLICAS EXPECT_MODEL EXPECT_CAL REPORT_MODE CONTINUE_ON_FAIL FRESH_RUNS \
+IFS=$'\x1f' read -r _ SCENARIO CONFIG_DIR REPORT_OUT EXPECT_REPLICAS EXPECT_MODEL EXPECT_CAL REPORT_MODE CONTINUE_ON_FAIL FRESH_RUNS EXPECT_KV KV_SPREAD \
   <<<"$(printf '%s\n' "$PLAN" | head -n 1)"
 N_TOTAL=$(printf '%s\n' "$PLAN" | grep -c '^RUN' || true)
 [ "$N_TOTAL" -gt 0 ] || { echo "runchain.sh: $MATRIX has no runs" >&2; exit 2; }
@@ -257,7 +259,7 @@ rm -f "$WATCHDOG_MARK"
 WATCHDOG_PID=$!
 disown "$WATCHDOG_PID"
 
-log "chain start: $MATRIX, $N_TOTAL run(s), scenario $SCENARIO, config $CONFIG_DIR, max $MAX_HOURS h, stop-pods=$STOP_PODS, report $REPORT_MODE, continue_on_fail=$CONTINUE_ON_FAIL"
+log "chain start: $MATRIX, $N_TOTAL run(s), scenario $SCENARIO, config $CONFIG_DIR, max $MAX_HOURS h, stop-pods=$STOP_PODS, report $REPORT_MODE, continue_on_fail=$CONTINUE_ON_FAIL, expect_kv_total=${EXPECT_KV:-none}, kv_spread_max=${KV_SPREAD:-none}"
 
 while IFS=$'\x1f' read -r kind label seed env_q args_q run_scn; do
   [ "$kind" = RUN ] || continue
@@ -276,7 +278,8 @@ while IFS=$'\x1f' read -r kind label seed env_q args_q run_scn; do
 
   if ! uv run python scripts/preflight.py --gateway "$GATEWAY" --expect-replicas "$EXPECT_REPLICAS" \
       --expect-model "$EXPECT_MODEL" --runs-dir runs \
-      ${PREV_RUN_ID:+--not-run-id "$PREV_RUN_ID"} ${EXPECT_CAL:+--expect-calibration "$EXPECT_CAL"} 2>&1 | tee -a "$LOG"; then
+      ${PREV_RUN_ID:+--not-run-id "$PREV_RUN_ID"} ${EXPECT_CAL:+--expect-calibration "$EXPECT_CAL"} \
+      ${EXPECT_KV:+--expect-kv-total "$EXPECT_KV"} ${KV_SPREAD:+--kv-spread-max "$KV_SPREAD"} 2>&1 | tee -a "$LOG"; then
     fail "$label" "$seed" "preflight" || continue
   fi
 
