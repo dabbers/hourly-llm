@@ -108,7 +108,8 @@ PY
 }
 
 cmd_vllm() {
-  # Engine i of a pod runs on GPU i (CUDA_VISIBLE_DEVICES), listens on 8000+i, reads /workspace/vllm-i.args,
+  # Engine i of a pod runs on GPU i (CUDA_VISIBLE_DEVICES), listens on 8000+10*i (RunPod's image has nginx on
+  # 8001, 3001, 7861, 8081, 7270 and 9091), reads /workspace/vllm-i.args,
   # lives in tmux session vllm-i and logs to /root/vllm-i.log. A one-GPU pod is the i=0 case.
   local pod=$1 action=${2:-status}
   shift; if [ $# -gt 0 ]; then shift; fi
@@ -117,7 +118,7 @@ cmd_vllm() {
     status)
       rssh "$pod" "ENGINES=$n bash -s" <<'EOF'
 for i in $(seq 0 $((ENGINES - 1))); do
-  port=$((8000 + i))
+  port=$((8000 + 10 * i))
   if curl -sf -m 5 "localhost:$port/health" >/dev/null; then printf 'engine %s :%s healthy  ' "$i" "$port"; else printf 'engine %s :%s NO HEALTH  ' "$i" "$port"; fi
   curl -s -m 5 "localhost:$port/v1/models" | head -c 160; echo
   [ -f "/workspace/vllm-$i.args" ] && echo "  args: $(cat "/workspace/vllm-$i.args")"
@@ -128,13 +129,13 @@ EOF
       ;;
     log) rssh "$pod" "for f in /root/vllm-*.log; do echo \"=== \$f\"; grep -v 'it/s]' \"\$f\" | tail -n ${LINES:-60}; done" ;;
     restart)
-      # [args...]: the whole argument line, written for engine 0; engine i gets --port 8000+i
+      # [args...]: the whole argument line, written for engine 0; engine i gets --port 8000+10*i
       local args_q=""
       if [ $# -gt 0 ]; then args_q=$(printf '%q' "$*"); fi
       rssh "$pod" "ENGINES=$n ARGS=$args_q bash -s" <<'EOF'
 if [ -n "$ARGS" ]; then
   for i in $(seq 0 $((ENGINES - 1))); do
-    echo "$ARGS" | sed "s/--port 8000/--port $((8000 + i))/" > "/workspace/vllm-$i.args"
+    echo "$ARGS" | sed "s/--port 8000/--port $((8000 + 10 * i))/" > "/workspace/vllm-$i.args"
     echo "wrote /workspace/vllm-$i.args: $(cat "/workspace/vllm-$i.args")"
   done
 fi
@@ -147,7 +148,7 @@ for i in $(seq 0 $((ENGINES - 1))); do
 done
 for _ in $(seq 1 180); do
   ok=0
-  for i in $(seq 0 $((ENGINES - 1))); do curl -sf -m 3 "localhost:$((8000 + i))/health" >/dev/null && ok=$((ok + 1)); done
+  for i in $(seq 0 $((ENGINES - 1))); do curl -sf -m 3 "localhost:$((8000 + 10 * i))/health" >/dev/null && ok=$((ok + 1)); done
   if [ "$ok" -eq "$ENGINES" ]; then echo "all $ENGINES engine(s) healthy"; exit 0; fi
   sleep 5
 done
@@ -179,13 +180,13 @@ fi
 /workspace/venv/bin/python -c "import vllm, torch; print('vllm', vllm.__version__, 'torch', torch.__version__, 'cuda', torch.cuda.is_available(), 'gpus', torch.cuda.device_count())"
 for i in $(seq 0 $((ENGINES - 1))); do
   if [ ! -f "/workspace/vllm-$i.args" ]; then
-    echo "--model $MODEL --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens $CHUNK --enable-prefix-caching --enable-prompt-tokens-details --port $((8000 + i)) --host 0.0.0.0" > "/workspace/vllm-$i.args"
+    echo "--model $MODEL --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens $CHUNK --enable-prefix-caching --enable-prompt-tokens-details --port $((8000 + 10 * i)) --host 0.0.0.0" > "/workspace/vllm-$i.args"
     echo "wrote /workspace/vllm-$i.args"
   fi
 done
 cat > /workspace/run-vllm.sh <<'RUN'
 #!/usr/bin/env bash
-# run-vllm.sh <engine index>: engine i on GPU i, port 8000+i, /workspace/vllm-i.args, /root/vllm-i.log
+# run-vllm.sh <engine index>: engine i on GPU i, port 8000+10*i, /workspace/vllm-i.args, /root/vllm-i.log
 i=${1:-0}
 export HF_HOME=/root/hf VLLM_USE_FLASHINFER_SAMPLER=0 CUDA_VISIBLE_DEVICES=$i
 mkdir -p /root/hf
@@ -213,7 +214,7 @@ for i in $(seq 1 $((ENGINES - 1))); do
 done
 for _ in $(seq 1 120); do
   ok=0
-  for i in $(seq 0 $((ENGINES - 1))); do curl -sf -m 3 "localhost:$((8000 + i))/health" >/dev/null && ok=$((ok + 1)); done
+  for i in $(seq 0 $((ENGINES - 1))); do curl -sf -m 3 "localhost:$((8000 + 10 * i))/health" >/dev/null && ok=$((ok + 1)); done
   if [ "$ok" -eq "$ENGINES" ]; then echo "all $ENGINES engine(s) healthy"; curl -s localhost:8000/v1/models | head -c 300; echo; exit 0; fi
   sleep 5
 done

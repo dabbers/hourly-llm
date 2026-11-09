@@ -360,7 +360,8 @@ On 2026-11-09 none of the three phase-2 pods could start, and three fresh one-GP
 host with no network path between them (no global-networking interface, `*.runpod.internal` did not
 resolve, the public port mappings were not reachable from inside), so the campaign runs on **one pod
 with three GPUs** (`create --gpu-count 3`, $2.67/h, the same price as three pods): `vllm install`
-starts one engine per GPU (engine i on GPU i, port 8000+i, `/workspace/vllm-i.args`, tmux `vllm-i`,
+starts one engine per GPU (engine i on GPU i, port 8000+10·i because RunPod's image has nginx on 8001,
+`/workspace/vllm-i.args`, tmux `vllm-i`,
 `/root/vllm-i.log`), `env-file` lists them as replicas A, B and C on localhost, and the gateway, meter,
 load generator and chain run on the same pod. Nothing crosses RunPod's inter-pod network any more.
 Everything else is as in stage B:
@@ -377,7 +378,7 @@ bash scripts/pod.sh vllm a install
 bash scripts/pod.sh env-file --gateway a && bash scripts/pod.sh push a && bash scripts/pod.sh setup a && bash scripts/pod.sh key a && bash scripts/pod.sh vllm a status && bash scripts/pod.sh smoke a
 ```
 
-`vllm a restart <args>` writes the argument line to every engine (engine i gets `--port 8000+i`) and
+`vllm a restart <args>` writes the argument line to every engine (engine i gets `--port 8000+10·i`) and
 restarts them all; `vllm a status` shows each engine's health, model and args, and `nvidia-smi` per GPU.
 
 **The chain.** 19 hours of watchdog for about 17 hours of runs; the pods stop an hour after the

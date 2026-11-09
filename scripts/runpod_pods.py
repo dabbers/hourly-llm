@@ -586,9 +586,9 @@ def env_file_text(pods: list[dict[str, Any]], gateway: str = GATEWAY_LETTER) -> 
     for letter in sorted(by_letter):
         pod = by_letter[letter]
         host = "127.0.0.1" if letter == gateway else f"{pod['id']}.runpod.internal"
-        for engine in range(int(pod.get("gpu_count") or 1)):  # one engine per GPU: ports 8000, 8001, ...
+        for engine in range(int(pod.get("gpu_count") or 1)):  # one engine per GPU: ports 8000, 8010, 8020 (8001 is RunPod's nginx)
             upper = next(letters).upper()
-            lines.append(f"REPLICA_{upper}_URL=http://{host}:{8000 + engine}")
+            lines.append(f"REPLICA_{upper}_URL=http://{host}:{8000 + 10 * engine}")
             lines.append(f"REPLICA_{upper}_ID={pod['id']}")
     return "\n".join(lines) + "\n"
 

@@ -380,12 +380,12 @@ def test_hosts_is_a_read_only_probe_of_balance_and_free_host_gpus(phase2, capsys
 
 
 def test_env_file_lists_one_replica_per_gpu_of_a_multi_gpu_pod():
-    """Phase 3 topology: one pod with three GPUs runs three engines on localhost ports 8000-8002; the
+    """Phase 3 topology: one pod with three GPUs runs three engines on localhost ports 8000, 8010 and 8020; the
     env file names them REPLICA_A/B/C as config/phase2/replicas.yaml expects."""
     text = rpods.env_file_text([{"name": "slotgw-a", "id": "p1", "gpu_count": 3, "public_ip": "1.2.3.4"}], "a")
     assert "REPLICA_A_URL=http://127.0.0.1:8000" in text
-    assert "REPLICA_B_URL=http://127.0.0.1:8001" in text
-    assert "REPLICA_C_URL=http://127.0.0.1:8002" in text
+    assert "REPLICA_B_URL=http://127.0.0.1:8010" in text
+    assert "REPLICA_C_URL=http://127.0.0.1:8020" in text
     assert text.count("_ID=p1") == 3 and "REPLICA_D_" not in text
     one_each = rpods.env_file_text([{"name": "slotgw-a", "id": "p1"}, {"name": "slotgw-b", "id": "p2"}], "b")
     assert "REPLICA_A_URL=http://p1.runpod.internal:8000" in one_each and "REPLICA_B_URL=http://127.0.0.1:8000" in one_each
