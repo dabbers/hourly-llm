@@ -403,14 +403,23 @@ def _ci_rows(frame: pd.DataFrame, keys: list[str], metrics: list[str]) -> pd.Dat
     return pd.DataFrame(rows)
 
 
+def _manifest_order(c: Campaign, frame: pd.DataFrame) -> pd.DataFrame:
+    """The frame's rows in the manifest's label order (stable), so grouped tables and the charts built
+    from them read in stage order rather than in the order the run directories were given."""
+    if frame.empty:
+        return frame
+    order = {label: i for i, label in enumerate(c.manifest.settings)}
+    return frame.assign(_o=frame["label"].map(order)).sort_values("_o", kind="stable").drop(columns="_o")
+
+
 def settings_table(c: Campaign) -> pd.DataFrame:
-    """settings.csv: per label and run-level metric, n, mean, sd, ci_lo, ci_hi (95% Student t)."""
-    return _ci_rows(c.runs, ["label"], [*RUN_METRICS, *PLAN_METRICS])
+    """settings.csv: per label (manifest order) and run-level metric, n, mean, sd, ci_lo, ci_hi (95% Student t)."""
+    return _ci_rows(_manifest_order(c, c.runs), ["label"], [*RUN_METRICS, *PLAN_METRICS])
 
 
 def tenants_table(c: Campaign) -> pd.DataFrame:
-    """tenants.csv: per label, tenant and tenant-level metric, n, mean, sd, ci_lo, ci_hi."""
-    return _ci_rows(c.tenants, ["label", "tenant"], list(TENANT_METRICS))
+    """tenants.csv: per label (manifest order), tenant and tenant-level metric, n, mean, sd, ci_lo, ci_hi."""
+    return _ci_rows(_manifest_order(c, c.tenants), ["label", "tenant"], list(TENANT_METRICS))
 
 
 PAIRED_COLUMNS = ["setting", "baseline", "scope", "tenant", "metric", "n", "mean_baseline", "mean_setting", "diff",
