@@ -34,6 +34,7 @@ burst off at seed 3" removes the day's randomness and the tests are on the diffe
 | Pods B (`9cz2sqjg40w0vl`, US-NC-1) and C (`59fpze6tlfdp2y`, EUR-IS-2) | stopped; both hosts report no free GPU; their data is pulled, their volumes hold only the vLLM venv | at campaign start, try to start them once; if refused, terminate them and create two fresh 4090 pods (letters b and c are reused, so `config/phase2/replicas.yaml` and the calibration files keep working); a fresh pod needs ~20 min of vLLM install and model download (~$0.30) |
 | Host GPUs over the evening | `runpod_pods.py hosts` (read-only, new): A free at 21:40 UTC, C free at 22:20, none of the three at 22:45 | the hosts' free GPUs come and go within the hour; the bring-up probes once and recreates whatever is refused rather than waiting |
 | **Topology** (decided 2026-11-09 00:40 UTC) | three fresh one-GPU pods created in EUR-IS-2 landed on one host with the same public ip and no network path between them: no global-networking interface, `*.runpod.internal` unresolvable, public port mappings unreachable from inside (phase 2's cluster had worked over global networking) | **one pod with three RTX 4090s** ($2.67/h, the same as three pods): one vLLM engine per GPU on ports 8000, 8010 and 8020 (8001 is RunPod's nginx), the gateway reaches its replicas on localhost, nothing depends on RunPod's inter-pod network for 20 unattended hours. Differences from phase 2 to keep in mind when pairing seeds 4–6 with 1–3: the three engines share one host's CPUs and PCIe, and the gateway-to-replica path has no WAN latency (in phase 2 two of the three replicas were reached from another continent) |
+| **Owner's adjustments** (2026-11-09, after reading the phase-2 brief) | the brief's four findings: the floor is not holding (check the metric first), on-demand slot billing tracks per-token billing so predictability must come from reservations, the configured reservations are under-sized, margins depend on configured prices | (1) floor metric split before the lever runs are judged: the **decode floor** is what `floor_violation` already measures (`delivered_tokens ÷ (t_last_token − t_first_token)` against 95 % of the shape's tps: queue and TTFT excluded, so the phase-2 misses are decode-side, the prefill mechanism of Q5), and a **start bound** (queue + TTFT) is reported beside it; (2) `nopace` moved to the head of the second chain, so the control exists even if the budget stops early; (3) `resv-p95-spill` added (p95 sizing + spill, seeds 1–2, ~$1.8): the reservation configuration that would ship; (4) the write-up leads with the bill CV of reserved tenants against the same tenants under per-token pricing, and with break-even utilisation and output per GPU-hour before any revenue ÷ cost ratio |
 | Gateway pod | pods on one host cannot reach each other | the pod with a unique public ip runs the gateway, meter, loadgen and chain (`env-file --gateway <letter>`, chain `--self`) |
 | Chain shape | a stopped pod may not restart for hours (the host rents the GPU out) | **one long chain** (~17 h) with the pods up throughout, then one short chain for the engine sweep; pods are stopped by the chain with a 60-minute grace so a failure can be caught and the stop cancelled; the runs are pulled while the chain runs |
 | Cluster | three 4090 replicas, 32 seats each at 30 tps, 7B AWQ, chunk 512 | unchanged for every run except the engine sweep (section 3, stage H) |
@@ -41,7 +42,7 @@ burst off at seed 3" removes the day's randomness and the tests are on the diffe
 
 ## 3. The campaign
 
-53 runs in six stages, in this order (highest value first, so a budget stop still leaves a coherent
+55 runs in six stages, in this order (highest value first, so a budget stop still leaves a coherent
 data set). Every stage reuses `config/scenarios/mixed-4090.yaml` unless a variant is named; seeds
 1–3 already exist for `burstoff` and `burst`, 1–2 for the two reservation settings.
 
@@ -51,27 +52,30 @@ data set). Every stage reuses `config/scenarios/mixed-4090.yaml` unless a varian
 | | `resv-split`, `resv-shared` | as phase 2 (3), (4) | 3, 4, 5, 6 | 8 | $7.3 |
 | **E. Reservation edges** | `resv-spill` | setting (3) with `admission.reservation_spill` on: a reserved tenant whose slots are busy competes on demand (the Q6 fix) | 1–3 | 3 | $2.7 |
 | | `resv-p95` | reservations sized to the measured peak (chat 44, note-taker 7 slots), no placement rule: what right-sizing costs the on-demand tenants | 1–2 | 2 | $1.8 |
+| | `resv-p95-spill` | `resv-p95` with `admission.reservation_spill` on: p95 sizing and spill together, the reservation configuration that would actually ship (owner's addition, 2026-11-09) | 1–2 | 2 | $1.8 |
 | | `abort` | setting (2) with `SLOTGW_BURST_REVOKE=abort`: revocations cancel within a tick instead of a 15 s grace | 1–2 | 2 | $1.8 |
 | **F. Load sweep** | `load0.5-burstoff`, `load0.5-burst` | `rate_multiplier` 5.5 (about 20–27 % utilisation, near the derived break-even) | 1–2 | 4 | $3.6 |
 | | `load1.5-burstoff`, `load1.5-burst` | 16.5 (60–80 %) | 1–2 | 4 | $3.6 |
 | | `load2-burstoff`, `load2-burst` | 22: saturation; queueing and refusals are the result, not a failure | 1–2 | 4 | $3.6 |
 | **G. Levers** | `oc1.25`, `oc1.5` | `SLOTGW_TPS_OVERCOMMIT`: seats = calibrated × 1.25 / 1.5, burst on (the vCPU lever against the floor) | 1–2 | 4 | $3.6 |
 | | `prefillcap` | `SLOTGW_MAX_PREFILL_TOKENS=4096` per replica, burst on: the gateway-side mitigation for the Q5 mechanism | 1–2 | 2 | $1.8 |
-| | `nopace` | pacing off, admission on, burst off: tokens leave as fast as the engine makes them, the plain deployment that per-token billing assumes; the control for "what does slicing cost in throughput" | 1–2 | 2 | $1.8 |
+| | `nopace` | pacing off, admission on, burst off: tokens leave as fast as the engine makes them, the plain deployment that per-token billing assumes; the control for "what does slicing cost in throughput" (runs first in the second chain, owner's order change 2026-11-09) | 1–2 | 2 | $1.8 |
 | **I. Workload edges** | `outheavy-burstoff`, `outheavy-burst` | `mixed-4090-outheavy.yaml`: prompt : output ≈ 1.5 : 1 instead of 15 : 1 (long answers, short prompts), rate scaled so peak occupancy matches the base scenario; tests whether the floor finding is a property of prompt-heavy traffic | 1–2 | 4 | $3.6 |
 | | `flash-burstoff`, `flash-burst` | `mixed-4090-flash.yaml`: a two-minute surge at 2.5 × the peak rate inside the peak phase; admission, queueing and bills under a flash crowd | 1–2 | 4 | $3.6 |
 | **H. Engine sweep** | `chunk256`, `chunk2048` | vLLM `--max-num-batched-tokens` 256 (half) and 2048 (vLLM's default: what a naive deployment gets), burst on; needs an engine restart on all three pods between chains | 1–2 | 4 | $3.6 |
-| | | | | **53** | **$48.2** |
+| | | | | **55** | **$50.0** |
 
 Plus bring-up (start or create pods, vLLM up, push, cluster smoke: ~40 min, ~$1.8), the engine
 restarts between chains (~$0.5) and the grace hour at the end (3 pods idle, $2.7 at most; cancelled
-once the pull is done). **Expected total ≈ $52**, leaving ≈ $10.
+once the pull is done). **Expected total ≈ $54**, leaving ≈ $8.
 
 If the reserve is needed, trim from the end: stage H first, then `flash`, then `load1.5`. Stages
 D–G are the core and are not trimmed. If ≥ $8 is left when the campaign is committed, the owner can
 choose fp16 vs AWQ (~$1.5, one pod) or the A100 cross-check (~$4); both are separate goes.
 
-Time: 49 runs ≈ 16.7 h in the main chain (`--max-hours 19`), then 1.5 h for stage H. About 20 h of
+Time: 51 runs ≈ 16.5 h over two chains (`matrix-campaign.yaml`, runs 1–14 of stage D, `--max-hours 19`;
+then `matrix-campaign-2.yaml`, 37 runs with `nopace` first, started between runs by `chain switch`,
+`--max-hours 14`), then 1.5 h for stage H. About 20 h of
 wall clock from the first paid minute; the chain runs unattended on the gateway pod and survives this
 machine going down.
 
@@ -97,6 +101,22 @@ existing per-run and per-tenant tables and does not change the phase-2 report.
   utilisation (seat-hours used ÷ offered) at the four load levels, both schemes, with intervals; the
   utilisation where shape revenue meets GPU cost, read from the fitted curve, against the 26 %
   derived in Q7.
+- **Floor, in two parts** (owner, 2026-11-09): the **decode floor** is the delivered rate from first to
+  last token against 95 % of the shape's tps (`floor_violation`, unchanged: queue and TTFT are not in
+  it), and the **start bound** is queue wait + TTFT (`start_s` = first token − arrival) against a
+  2 s placeholder for interactive shapes (`start_violation`; lazy shapes have no start promise), with
+  its p50/p95 so a reader can apply another threshold. Both are recomputed from the meter, so
+  phase 2 gets them for free, and the lever runs (`prefillcap`, `chunk256`, `oc1.25`/`oc1.5`) are judged
+  on each separately.
+  First recompute (2026-11-09 05:20 UTC, 21 runs: phase 2 and the campaign's stage D so far), mean over
+  seeds, interactive shapes: `burstoff` agent misses the decode floor on 41 % of judged requests and the
+  2 s start bound on 22 % (start p95 5.0 s), chat 20 % / 20 % (p95 4.8 s), note-taker 22 % / 32 %;
+  `burst` agent 56 % / 49 % (p95 8.2 s), chat 35 % / 46 % (p95 7.5 s): bursting worsens both, the
+  start bound more. Under reservations the start bound is the lockout of Q6: reserved chat misses it
+  on 70–80 % of requests with a start p95 of 31 s (`max_queue_s` is 30) while its decode floor share
+  is 36–51 %. The two halves are not the same requests: the decode misses are the prefill
+  interference of Q5, the start misses are queueing (admission and reservation queues) plus prefill
+  time, and the lever runs must move the first without inflating the second.
 - **Levers:** for each lever the paired gain in revenue per GPU-hour and the paired cost to tenants
   (floor violation share, queue p95, refusals), as a table and a scatter.
 - **Edges:** the out-heavy and flash scenarios compared with the base scenario at the same seeds;
@@ -152,6 +172,14 @@ While it runs: a poll every 20 minutes reads `chain status` (first line) and pul
 run id that is not yet local, so a lost pod costs at most the run in flight. The campaign report is
 rebuilt locally from the pulled runs, never on the pod.
 
+Changing the plan mid-chain: the chain reads its matrix once, so `pod.sh chain <gw> switch
+<label-sN> <matrix> [args]` arms `scripts/chain_switch.sh` on the pod, which waits for that run's
+per-run report (the chain's last act for a run), kills the chain and gateway between runs and starts
+the new matrix; nothing paid is lost, the new matrix lists only the runs still to do with
+`fresh_runs: false` so `chain.runs` stays complete, and the chain's signal handler does not stop the
+pod. Armed 2026-11-09 05:10 UTC for `resv-shared-s6` → `matrix-campaign-2.yaml --max-hours 14
+--stop-pods --stop-grace-min 60` (the owner's order change and `resv-p95-spill`).
+
 **First look, 2026-11-09 03:30 UTC, six runs in (burstoff and burst, seeds 4–6).** Seeds 4–6 offer
 less load than seeds 1–3. The agent tenant's arrivals are an on/off process (`bursty`: mean on 120 s
 at 33/min, off 180 s at 5.5/min after the ×11 multiplier) with only three or four cycles in an
@@ -192,8 +220,9 @@ seeds.
 |---|---|---|---|
 | 2026-11-08 06:28 – 11-09 00:20 | three stopped phase-2 pods' volumes until terminated | – | ~$0.30 |
 | 2026-11-09 00:23–00:36 | three fresh one-GPU pods (EUR-IS-2): same host, no network between them; terminated | 3 × 0.22 | ~$0.58 |
-| 2026-11-09 00:39–01:20 | one pod with three 4090s (`qka0zggy47mw7e`, EUR-IS-2): bring-up; vLLM's pip install onto the network volume took ~25 min, then one engine per GPU (KV 271,152 tokens each, as in phase 2), push, setup, cluster smoke (148 ok, 2 refused, 0 errors, work on all three engines) | 0.68 × 3 | ~$1.82 |
-| 2026-11-09 01:20 → | the campaign chain: `matrix-campaign.yaml`, 49 runs, `--max-hours 19 --stop-pods --stop-grace-min 60`; runs pulled every 10 min | | $2.67/h |
+| 2026-11-09 00:39–01:20 | one pod with three 4090s (`qka0zggy47mw7e`, EU-RO-1; the EUR-IS-2 request had no 3-GPU instance): bring-up; vLLM's pip install onto the network volume took ~25 min, then one engine per GPU (KV 271,152 tokens each, as in phase 2), push, setup, cluster smoke (148 ok, 2 refused, 0 errors, work on all three engines) | 0.68 × 3 | ~$1.82 |
+| 2026-11-09 01:20 → | the campaign chain: `matrix-campaign.yaml`, 49 runs, `--max-hours 19 --stop-pods --stop-grace-min 60`; runs pulled every 10 min; ~19 min per run | | $2.67/h |
+| 2026-11-09 05:05 | balance $49.92 after 12 runs: $12.41 spent since the plan ($62.33) | | |
 | | | | |
 
 Balance at plan time: $62.35 of $80 (phase 2 spent $17.61; see PHASE2.md §3).

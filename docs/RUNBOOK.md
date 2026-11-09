@@ -381,6 +381,20 @@ bash scripts/pod.sh env-file --gateway a && bash scripts/pod.sh push a && bash s
 `vllm a restart <args>` writes the argument line to every engine (engine i gets `--port 8000+10·i`) and
 restarts them all; `vllm a status` shows each engine's health, model and args, and `nvidia-smi` per GPU.
 
+**Changing the plan while the chain runs.** The chain reads its matrix once at start. To reorder or
+add runs, write a matrix with only the runs still to do (`fresh_runs: false`, so `chain.runs` keeps
+the finished ids) and arm a switch for the run in flight or a later one; `scripts/chain_switch.sh`
+waits on the pod for that run's per-run report, kills the chain between runs (its signal handler
+does not stop the pod) and starts the new matrix. Used 2026-11-09 to run `nopace` first and add
+`resv-p95-spill` (`matrix-campaign-2.yaml`):
+
+```bash
+bash scripts/pod.sh chain a switch resv-shared-s6 config/phase3/matrix-campaign-2.yaml --max-hours 14 --stop-pods --stop-grace-min 60
+```
+
+`chain a status` shows `--- switch pending:` with the watcher's last lines until it fires; the
+watcher logs to `runs/phase2/chain-switch.log` on the pod.
+
 **The chain.** 19 hours of watchdog for about 17 hours of runs; the pods stop an hour after the
 chain ends, so a failure can be caught and the stop cancelled (`chain <gw> stop`):
 

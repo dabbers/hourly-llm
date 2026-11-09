@@ -1,0 +1,104 @@
+# Phase 3 campaign, second chain (docs/PHASE3.md section 3, owner's adjustments of 2026-11-09): the 37
+# runs still to do after stage D, reordered so the `nopace` control runs first and with the new
+# `resv-p95-spill` setting (p95-sized reservations + spill: the configuration that would ship).
+# Started by scripts/chain_switch.sh on the pod the moment the first chain finishes resv-shared s6:
+#   bash scripts/pod.sh chain <gw> switch resv-shared-s6 config/phase3/matrix-campaign-2.yaml --max-hours 14 --stop-pods --stop-grace-min 60
+# fresh_runs is off so chain.runs keeps the first chain's run ids and the poll's pull list stays complete.
+scenario: config/scenarios/mixed-4090.yaml
+config_dir: config/phase2
+expect_replicas: 3
+expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
+expect_calibration: runpod-4090
+report_out: runs/phase3/report
+report_mode: last
+continue_on_fail: true
+fresh_runs: false
+runs:
+  # ---- E. the control first, then the reservation edges ------------------------------------------
+  - label: nopace                        # pacing off, admission on, bursting off: the plain best-effort deployment (control)
+    seeds: [1, 2]
+    env: {SLOTGW_PACING: "false", SLOTGW_BURST: "false"}
+    loadgen_args: ["--no-reservations"]
+  - label: resv-spill                    # (3) + admission.reservation_spill: a reserved tenant whose slots are busy competes on demand
+    seeds: [1, 2, 3]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, REPLICA_A_EXCLUDE: small.8k.60tps, SLOTGW_RESERVATION_SPILL: "true"}
+    loadgen_args: ["--reservation-replica", "runpod-4090-a"]
+  - label: resv-p95                      # reservations sized to the measured peak (chat 44, note-taker 7), no placement rule
+    scenario: config/scenarios/mixed-4090-resv-p95.yaml
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
+    loadgen_args: ["--reservation-replica", "none"]
+  - label: resv-p95-spill                # p95 sizing + spill: the reservation configuration that would actually ship
+    scenario: config/scenarios/mixed-4090-resv-p95.yaml
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_RESERVATION_SPILL: "true"}
+    loadgen_args: ["--reservation-replica", "none"]
+  - label: abort                         # (2) with the abort revocation policy: a revoked context burst is cancelled within a tick
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: abort}
+    loadgen_args: ["--no-reservations"]
+  # ---- F. load sweep: the margin curve against utilisation ---------------------------------------
+  - label: load0.5-burstoff
+    scenario: config/scenarios/mixed-4090-load0.5.yaml
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "false"}
+    loadgen_args: ["--no-reservations"]
+  - label: load0.5-burst
+    scenario: config/scenarios/mixed-4090-load0.5.yaml
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
+    loadgen_args: ["--no-reservations"]
+  - label: load1.5-burstoff
+    scenario: config/scenarios/mixed-4090-load1.5.yaml
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "false"}
+    loadgen_args: ["--no-reservations"]
+  - label: load1.5-burst
+    scenario: config/scenarios/mixed-4090-load1.5.yaml
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
+    loadgen_args: ["--no-reservations"]
+  - label: load2-burstoff                # saturation: queueing and refusals are the result, not a failure
+    scenario: config/scenarios/mixed-4090-load2.yaml
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "false"}
+    loadgen_args: ["--no-reservations"]
+  - label: load2-burst
+    scenario: config/scenarios/mixed-4090-load2.yaml
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
+    loadgen_args: ["--no-reservations"]
+  # ---- G. levers ---------------------------------------------------------------------------------
+  - label: oc1.25                        # seats = calibrated x 1.25, bursting on
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_TPS_OVERCOMMIT: "1.25"}
+    loadgen_args: ["--no-reservations"]
+  - label: oc1.5                         # seats = calibrated x 1.5, bursting on
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_TPS_OVERCOMMIT: "1.5"}
+    loadgen_args: ["--no-reservations"]
+  - label: prefillcap                    # at most 4096 prompt tokens prefilling at once per replica, bursting on
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_MAX_PREFILL_TOKENS: "4096"}
+    loadgen_args: ["--no-reservations"]
+  # ---- I. workload edges -------------------------------------------------------------------------
+  - label: outheavy-burstoff             # short prompts, long answers (prompt : output about 1.5 : 1)
+    scenario: config/scenarios/mixed-4090-outheavy.yaml
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "false"}
+    loadgen_args: ["--no-reservations"]
+  - label: outheavy-burst
+    scenario: config/scenarios/mixed-4090-outheavy.yaml
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
+    loadgen_args: ["--no-reservations"]
+  - label: flash-burstoff                # a two-minute surge at twice the peak rate inside the peak
+    scenario: config/scenarios/mixed-4090-flash.yaml
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "false"}
+    loadgen_args: ["--no-reservations"]
+  - label: flash-burst
+    scenario: config/scenarios/mixed-4090-flash.yaml
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
+    loadgen_args: ["--no-reservations"]

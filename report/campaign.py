@@ -68,7 +68,10 @@ RUN_METRICS: dict[str, tuple[str, Callable]] = {
     "gross_margin_token": ("1 − gpu_cost_usd ÷ per_token_usd", html.fmt_pct),
     "output_tokens_per_gpu_hour": ("output tokens ÷ (replicas used × run hours)", html.fmt_int),
     "floor_violations": ("completed requests delivered below 95% of their shape's tps", html.fmt_int),
-    "floor_violation_rate": ("floor_violations ÷ ok", html.fmt_pct),
+    "floor_violation_rate": ("floor_violations ÷ ok (the decode floor: first to last token, queue and TTFT excluded)", html.fmt_pct),
+    "start_violations": ("completed interactive requests whose first token came more than START_BOUND_S (2 s) after arrival: queue + TTFT", html.fmt_int),
+    "start_violation_rate": ("start_violations ÷ completed interactive requests (the start bound)", html.fmt_pct),
+    "start_p95_s": ("95th percentile of queue + TTFT over completed interactive requests, seconds", html.fmt_f(2)),
     "refusal_rate": ("refused ÷ requests", html.fmt_pct),
     "burst_discount_usd": ("shape bound − shape billed: runtime given away by faster-than-promised delivery", html.fmt_usd),
     "concurrency_p95": ("95th percentile of requests in flight, one-second bins", html.fmt_f(1)),
@@ -97,7 +100,9 @@ TENANT_METRICS: dict[str, tuple[str, Callable]] = {
     "queued_p95_ms": ("95th-percentile queue wait, mean of the tenant's per-shape × delivery rows", html.fmt_int),
     "ttft_p50_ms": ("median time to first token after admission, mean of the per-shape × delivery rows", html.fmt_int),
     "ttft_p95_ms": ("95th-percentile time to first token, mean of the per-shape × delivery rows", html.fmt_int),
-    "floor_violation_share": ("floor violations ÷ requests judged (≥ 30 tokens over ≥ 0.5 s)", html.fmt_pct),
+    "floor_violation_share": ("floor violations ÷ requests judged (≥ 30 tokens over ≥ 0.5 s): the decode floor", html.fmt_pct),
+    "start_violation_share": ("start-bound violations (queue + TTFT > 2 s) ÷ the tenant's completed interactive requests", html.fmt_pct),
+    "start_p95_s": ("95th percentile of queue + TTFT, seconds, mean of the tenant's per-shape × delivery rows", html.fmt_f(2)),
     "delivered_tps_mean": ("mean delivered tokens per second over the judged requests", html.fmt_f(1)),
 }
 
@@ -262,6 +267,8 @@ def _load_one(run_dir: Path, config_dir: Path | None) -> tuple[pd.DataFrame, pd.
         revoked=("revoked", "sum"), context_bursts=("context_bursts", "sum"), output_tokens=("output_tokens", "sum"),
         per_token_usd=("per_token_usd", "sum"), floor_violations=("floor_violations", "sum"),
         floor_judged=("floor_judged", "sum"),
+        start_violations=("start_violations", "sum"), start_judged=("start_judged", "sum"),
+        start_p95_s=("start_p95_s", "mean"),
         queued_p50_ms=("queued_p50_ms", "mean"), queued_p95_ms=("queued_p95_ms", "mean"),
         ttft_p50_ms=("ttft_p50_ms", "mean"), ttft_p95_ms=("ttft_p95_ms", "mean"),
         delivered_tps_mean=("delivered_tps_mean", "mean"),
@@ -272,6 +279,7 @@ def _load_one(run_dir: Path, config_dir: Path | None) -> tuple[pd.DataFrame, pd.
     agg["tenant_usd"] = on_demand.reindex(agg.index).fillna(0.0) + fees.reindex(agg.index).fillna(0.0)
     with np.errstate(divide="ignore", invalid="ignore"):
         agg["floor_violation_share"] = np.where(agg["floor_judged"] > 0, agg["floor_violations"] / agg["floor_judged"], np.nan)
+        agg["start_violation_share"] = np.where(agg["start_judged"] > 0, agg["start_violations"] / agg["start_judged"], np.nan)
     agg = agg.reset_index()
     for col in ("label", "seed", "scenario", "run_dir"):
         agg[col] = agg["load_run"].map(tags[col])
@@ -291,9 +299,10 @@ def _derive(runs: pd.DataFrame) -> pd.DataFrame:
         runs["gross_margin_shape"] = 1.0 - runs["gpu_cost_usd"] / runs["tenant_usd"]
         runs["gross_margin_token"] = 1.0 - runs["gpu_cost_usd"] / runs["per_token_usd"]
         runs["floor_violation_rate"] = runs["floor_violations"] / runs["ok"]
+        runs["start_violation_rate"] = runs["start_violations"] / runs["start_judged"]
         runs["refusal_rate"] = runs["refused"] / runs["requests"]
     cols = ["shape_rev_over_cost", "token_rev_over_cost", "gross_margin_shape", "gross_margin_token",
-            "floor_violation_rate", "refusal_rate"]
+            "floor_violation_rate", "start_violation_rate", "refusal_rate"]
     runs[cols] = runs[cols].replace([np.inf, -np.inf], np.nan)
     return runs
 

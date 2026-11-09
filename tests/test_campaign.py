@@ -201,6 +201,8 @@ def test_campaign_end_to_end(tmp_path):
     r = row.iloc[0]
     assert r["diff"] < 0 and r["diff_ci_lo"] <= r["diff"] <= r["diff_ci_hi"]  # bursting gives runtime away
     assert r["headline"] and not np.isnan(r["p_holm"]) and r["p_holm"] >= r["p_t"]
+    sv = pt[(pt["setting"] == "burst") & (pt["scope"] == "run") & (pt["metric"] == "start_violation_rate")].iloc[0]
+    assert sv["n"] == 3 and sv["mean_baseline"] == 0 and sv["mean_setting"] == 0  # every synthetic start is under 2 s
     fv = pt[(pt["setting"] == "burst") & (pt["scope"] == "run") & (pt["metric"] == "floor_violation_rate")].iloc[0]
     assert fv["diff"] < 0 and fv["p_t"] < 0.05  # 5, 4, 3 fewer violating agent requests in seeds 1-3
     assert np.isnan(pt[pt["scope"] == "tenant"]["p_holm"]).all()

@@ -12,6 +12,7 @@
 #   pod.sh calibrate <pod> [calibrate.py args...]
 #   pod.sh smoke <pod> [scenario]        smoke-4090.yaml (or smoke.yaml) through the pod's gateway; exit code + last 20 lines
 #   pod.sh chain <pod> start [matrix.yaml] [--max-hours N] [--stop-pods] [--stop-grace-min N] | status | log | stop
+#   pod.sh chain <pod> switch <after label-sN> <matrix> [args]   replace the chain between runs (scripts/chain_switch.sh)
 #   pod.sh key <pod>                     copy the local .env to the pod, mode 600 (`chain start --stop-pods` needs it)
 #
 # Environment: RUNPOD_SSH_KEY (default ~/.ssh/id_ed25519), VERBOSE=1 prints every ssh command,
@@ -311,11 +312,25 @@ cmd_chain() {
       printf -v q '%q ' "$matrix" "$@" --self "$pod"   # the chain stops this pod last
       rssh "$pod" "$PRE; cd $REMOTE && (tmux kill-session -t chain 2>/dev/null || true) && tmux new-session -d -s chain \"bash scripts/runchain.sh $q\" && echo 'chain started in tmux session chain (pod.sh chain $pod status|log)'"
       ;;
+    switch)  # switch <after label-sN> <matrix> [runchain args]: replace the chain between runs (scripts/chain_switch.sh)
+      local after=${1:?switch needs the label-sN of the run to let finish}; shift
+      local matrix=${1:?switch needs the new matrix}; shift
+      rssh "$pod" "mkdir -p $REMOTE/runs/phase2 && cat > $REMOTE/runs/phase2/pods.json" <"$PODS"
+      if [[ " $* " == *" --stop-pods "* ]]; then
+        if [ -f "$REPO/.env" ]; then cmd_key "$pod"; else echo "warning: no $REPO/.env; without RUNPOD_API_KEY on the pod the chain cannot stop the pods" >&2; fi
+      fi
+      for f in scripts/chain_switch.sh "$matrix"; do  # the two files the switch needs, without a full push
+        rssh "$pod" "cat > $REMOTE/$f" <"$REPO/$f"
+      done
+      local q
+      printf -v q '%q ' "$after" "$matrix" "$@" --self "$pod"
+      rssh "$pod" "$PRE; cd $REMOTE && (tmux kill-session -t switch 2>/dev/null || true) && tmux new-session -d -s switch \"bash scripts/chain_switch.sh $q\" && sleep 2 && tail -n 3 runs/phase2/chain-switch.log"
+      ;;
     status)
-      rssh "$pod" "cat $REMOTE/runs/phase2/chain.status 2>/dev/null || echo 'no chain.status yet'; echo '--- runs so far:'; cat $REMOTE/runs/phase2/chain.runs 2>/dev/null || true; tmux has-session -t chain 2>/dev/null && echo '--- chain session: running' || echo '--- chain session: none'" ;;
+      rssh "$pod" "cat $REMOTE/runs/phase2/chain.status 2>/dev/null || echo 'no chain.status yet'; echo '--- runs so far:'; cat $REMOTE/runs/phase2/chain.runs 2>/dev/null || true; tmux has-session -t chain 2>/dev/null && echo '--- chain session: running' || echo '--- chain session: none'; tmux has-session -t switch 2>/dev/null && { echo '--- switch pending:'; tail -n 2 $REMOTE/runs/phase2/chain-switch.log; } || true" ;;
     log) rssh "$pod" "tail -n ${LINES:-60} $REMOTE/runs/phase2/chain.log" ;;
     stop) rssh "$pod" "tmux kill-session -t chain 2>/dev/null && echo 'chain session killed (pods left running)' || echo 'no chain session'; tmux kill-session -t gateway 2>/dev/null && echo 'gateway stopped' || true" ;;
-    *) die "chain <pod> start [matrix] [--max-hours N] [--stop-pods] [--stop-grace-min N]|status|log|stop" ;;
+    *) die "chain <pod> start [matrix] [--max-hours N] [--stop-pods] [--stop-grace-min N]|switch <after label-sN> <matrix> [args]|status|log|stop" ;;
   esac
 }
 

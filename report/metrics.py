@@ -19,6 +19,11 @@ LONG_PREFILL_TOKENS = 3000  # a prompt at least this long counts as a "long pref
 FLOOR_TOLERANCE = 0.95  # delivered rate below 95% of the shape's tps is a floor violation
 MIN_JUDGE_TOKENS = 30  # delivered tokens needed before a request's rate is judged
 MIN_JUDGE_STREAM_S = 0.5
+# The start bound (docs/PHASE3.md section 4): queue wait + TTFT, first token minus arrival, judged for
+# completed requests of interactive (non-lazy) shapes against this placeholder; no shape carries a TTFT
+# promise yet, so per_request.csv keeps start_s for any other threshold. The decode floor above never
+# includes it: delivered_tps runs from the first token to the last.
+START_BOUND_S = 2.0
 
 GROUP = ["scenario", "seed", "load_run", "tenant", "shape", "delivery"]
 
@@ -179,6 +184,10 @@ def enrich(df: pd.DataFrame, config: Config) -> pd.DataFrame:
     df["delivered_tps"] = np.where(judge, df["delivered_tokens"] / df["stream_s"].replace(0, np.nan), np.nan)
     df["floor_violation"] = judge & (df["delivered_tps"] < FLOOR_TOLERANCE * df["tps"])
     df["violation_stream_s"] = np.where(df["floor_violation"], df["stream_s"], 0.0)
+    # the start bound: queue + TTFT, interactive shapes only (a lazy shape promises no start)
+    df["start_s"] = np.where(ok, df["t_first_token"] - df["t_arrival"], np.nan)
+    df["start_judged"] = ok & ~df["lazy"] & df["start_s"].notna()
+    df["start_violation"] = df["start_judged"] & (df["start_s"] > START_BOUND_S)
     df["throttled_s"] = df["throttled_ms"].fillna(0) / 1000.0
     t0 = df.groupby("load_run")["t_arrival"].transform("min")
     df["t_rel"] = df["t_arrival"] - t0
@@ -237,10 +246,14 @@ def per_tenant(df: pd.DataFrame) -> pd.DataFrame:
         floor_judged=("delivered_tps", "count"),
         floor_violations=("floor_violation", "sum"),
         violation_stream_s=("violation_stream_s", "sum"),
+        start_judged=("start_judged", "sum"),
+        start_violations=("start_violation", "sum"),
+        start_p50_s=("start_s", _q(0.5)),
+        start_p95_s=("start_s", _q(0.95)),
     )
     out = all_rows.join(ok_rows, how="left")
     counts = ["ok", "reserved_requests", "burst_tokens", "prompt_tokens", "cached_tokens", "output_tokens", "delivered_tokens",
-              "floor_judged", "floor_violations"]
+              "floor_judged", "floor_violations", "start_judged", "start_violations"]
     sums = ["per_token_usd", "prompt_usd", "shape_usd", "bound_usd", "wall_usd", "billed_s", "bound_s", "wall_s",
             "stream_s", "throttled_s", "violation_stream_s"]
     out[counts] = out[counts].fillna(0).astype(int)
@@ -252,6 +265,7 @@ def per_tenant(df: pd.DataFrame) -> pd.DataFrame:
         out["tokens_per_billed_s"] = np.where(out["billed_s"] > 0, out["delivered_tokens"] / out["billed_s"], np.nan)
         out["throttled_share"] = np.where(out["stream_s"] > 0, out["throttled_s"] / out["stream_s"], np.nan)
         out["floor_violation_share"] = np.where(out["stream_s"] > 0, out["violation_stream_s"] / out["stream_s"], np.nan)
+        out["start_violation_share"] = np.where(out["start_judged"] > 0, out["start_violations"] / out["start_judged"], np.nan)
         out["burst_share"] = np.where(out["output_tokens"] > 0, out["burst_tokens"] / out["output_tokens"], np.nan)
         out["cached_share"] = np.where(out["prompt_tokens"] > 0, out["cached_tokens"] / out["prompt_tokens"], np.nan)
     return out.reset_index()
@@ -320,6 +334,9 @@ def per_run(df: pd.DataFrame, loads: list[LoadRun], config: Config, reservations
             "concurrency_max": float(conc.max()),
             "throttled_s": float(ok["throttled_s"].sum()),
             "floor_violations": int(ok["floor_violation"].sum()),
+            "start_judged": int(ok["start_judged"].sum()),
+            "start_violations": int(ok["start_violation"].sum()),
+            "start_p95_s": float(ok.loc[ok["start_judged"], "start_s"].quantile(0.95)) if ok["start_judged"].any() else np.nan,
             "kv_usage_mean": np.nan,
             "kv_usage_p95": np.nan,
             "engine_running_mean": np.nan,
@@ -758,7 +775,7 @@ SAMPLE_COLUMNS = [
     "scenario", "load_run", "tenant", "showcase", "prompt_id", "turn", "shape", "billed_shape", "class_ctx", "delivery",
     "status", "abort_reason", "t_rel", "prompt_tokens", "cached_tokens", "output_tokens", "delivered_tokens",
     "queued_ms", "ttft_ms", "stream_s", "throttled_s", "delivered_tps", "tps", "burst_share", "floor_violation",
-    "shape_usd", "per_token_usd", "prompt_json", "output_text",
+    "start_s", "start_violation", "shape_usd", "per_token_usd", "prompt_json", "output_text",
 ]
 
 

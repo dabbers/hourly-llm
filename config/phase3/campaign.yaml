@@ -7,6 +7,7 @@ settings:
   resv-shared: {desc: "the same reservations, no placement rule (setting 4)"}
   resv-spill: {desc: "resv-split with admission.reservation_spill on"}
   resv-p95: {desc: "reservations sized to the measured peak (chat 44, note-taker 7), no placement rule"}
+  resv-p95-spill: {desc: "resv-p95 with admission.reservation_spill on: p95 sizing + spill, the configuration that would ship"}
   abort: {desc: "burst with revoke policy abort"}
   load0.5-burstoff: {desc: "rate multiplier 5.5 (half load), bursting off"}
   load0.5-burst: {desc: "rate multiplier 5.5, bursting on"}
@@ -30,6 +31,8 @@ pairs:   # [setting, baseline]: paired by seed, difference = setting - baseline
   - [resv-shared, burst]
   - [resv-spill, resv-split]
   - [resv-p95, resv-shared]
+  - [resv-p95-spill, resv-p95]
+  - [resv-p95-spill, burst]
   - [abort, burst]
   - [oc1.25, burst]
   - [oc1.5, burst]
@@ -61,3 +64,4 @@ headline:   # the rows that get Holm-corrected p-values in the headline table
   - [resv-spill, resv-split]
   - [nopace, burstoff]
   - [oc1.5, burst]
+  - [resv-p95-spill, burst]

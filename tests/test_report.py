@@ -99,6 +99,12 @@ def test_report_builds_csvs_and_html(tmp_path):
     assert agent["floor_violation"].all()  # 40 tok/s delivered on a 60 tps shape
     assert (agent["billed_s"] < agent["wall_s"]).all()  # capped: provider's slowness is not billed
     assert (pr[pr["tenant"] == "batch"]["per_token_usd"] > 0).all()
+    # the start bound: queue + TTFT against 2 s, interactive shapes only; the decode floor never includes it
+    assert chat["start_s"].between(0.29, 0.32).all() and not chat["start_violation"].any()
+    assert not agent["start_violation"].any()  # the agent misses its decode floor, not its start
+    note = ok[ok["tenant"] == "notetaker"]
+    assert note["start_s"].between(3.9, 4.1).all() and note["start_violation"].all()  # a 4 s prefill
+    assert not pr[pr["tenant"] == "batch"]["start_violation"].any()  # lazy: no start promise
 
     pt = pd.read_csv(out / "per_tenant.csv")
     assert set(pt["tenant"]) == {"chat", "agent", "batch", "notetaker"}
@@ -109,10 +115,16 @@ def test_report_builds_csvs_and_html(tmp_path):
     assert chat_pt["reserved_requests"] == 12 and chat_pt["burst_tokens"] == 480
     assert chat_pt["burst_share"] == pytest.approx(480 / chat_pt["output_tokens"])
     assert agent_pt["floor_violation_share"] == pytest.approx(1.0)
+    assert agent_pt["start_violation_share"] == 0 and agent_pt["start_judged"] == 12
+    note_pt = pt[(pt["tenant"] == "notetaker") & (pt["load_run"] == "synthetic-s1")].iloc[0]
+    assert note_pt["start_violation_share"] == pytest.approx(1.0) and note_pt["start_p95_s"] == pytest.approx(4.0, abs=0.05)
+    batch_pt = pt[(pt["tenant"] == "batch") & (pt["load_run"] == "synthetic-s1")].iloc[0]
+    assert batch_pt["start_judged"] == 0
 
     summary = pd.read_csv(out / "summary.csv")
     assert len(summary) == 2 and set(summary["seed"]) == {1, 2}
     assert (summary["revoked"] == 1).all() and (summary["context_bursts"] == 1).all() and (summary["reserved_requests"] == 12).all()
+    assert (summary["start_violations"] == 1).all() and (summary["start_judged"] == 25).all()  # 12 chat + 12 agent + 1 note-taker
     assert summary["reservation_usd"].tolist() == pytest.approx([90.0 * 4.5e-6] * 2)
     s2 = summary.set_index("seed").loc[2]
     assert s2["output_tokens_burst"] == 480 and s2["tenant_usd"] == pytest.approx(s2["reservation_usd"] + s2["shape_usd"] - pt[(pt["tenant"] == "chat") & (pt["seed"] == 2)]["shape_usd"].sum())
