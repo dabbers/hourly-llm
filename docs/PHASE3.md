@@ -103,7 +103,9 @@ existing per-run and per-tenant tables and does not change the phase-2 report.
 - **Margin curve:** revenue ÷ GPU cost, gross margin and output per GPU-hour against measured
   utilisation (seat-hours used ÷ offered) at the four load levels, both schemes, with intervals; the
   utilisation where shape revenue meets GPU cost, read from the fitted curve, against the 26 %
-  derived in Q7.
+  derived in Q7. The line is fitted per load series (bursting off, bursting on: only the load changes
+  between the points) beside a pooled line over every run of every setting, which is a campaign-wide
+  tendency, not a controlled curve (`margin_curve.csv`, `family` and `series` columns; added 2026-11-09).
 - **Floor, in two parts** (owner, 2026-11-09): the **decode floor** is the delivered rate from first to
   last token against 95 % of the shape's tps (`floor_violation`, unchanged: queue and TTFT are not in
   it), and the **start bound** is queue wait + TTFT (`start_s` = first token − arrival) against a
