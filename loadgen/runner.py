@@ -26,6 +26,13 @@ from .scenario import PromptFile, Scenario, load_prompts, resolve_prompts_path
 
 log = logging.getLogger("loadgen")
 
+# Read timeout for one request beyond its shape's queue contract: the time allowed for the response
+# itself once admitted (the whole body for a complete request, the gap between chunks for a stream).
+# A request's timeout is this plus the shape's max_queue_s from the gateway's /v1/models, so a lazy
+# request waits the hour its shape allows instead of failing at a blanket limit (phase 3: at 1.5 x
+# load the lazy queue starved for the peak and 600 s timeouts counted as errors).
+GENERATION_ALLOWANCE_S = 600.0
+
 
 @dataclass
 class ClientRecord:
@@ -135,6 +142,7 @@ class LoadRunner:
         self.reservation_replica = reservation_replica  # None: the scenario's `replica:`; "none": unpinned; else this replica
         self.reservations_required = reservations_required  # a refused t=0 reservation ends the run before any load
         self.reservation_log: list[dict[str, Any]] = []
+        self.shape_contracts: dict[str, dict[str, Any]] = {}  # shape name -> the gateway's /v1/models `slotgw` block
         self.gateway_url = gateway_url.rstrip("/")
         self.runs_dir = Path(runs_dir)
         stem = f"{scenario.name}-{label}" if label else scenario.name
@@ -173,11 +181,12 @@ class LoadRunner:
     # ---- lifecycle --------------------------------------------------------------------------
 
     async def run(self) -> dict[str, Any]:
-        timeout = httpx.Timeout(600.0, connect=10.0)
+        timeout = httpx.Timeout(GENERATION_ALLOWANCE_S, connect=10.0)  # admin calls; requests set their own
         limits = httpx.Limits(max_connections=512, max_keepalive_connections=64)
         async with httpx.AsyncClient(base_url=self.gateway_url, timeout=timeout, limits=limits) as client:
             health = await self._preflight(client)
             self.gateway_run_id = str(health.get("run_id") or "unknown")
+            await self._load_shape_contracts(client)
             self.out_dir = self.runs_dir / self.gateway_run_id / "loads" / self.load_run_id
             self.out_dir.mkdir(parents=True, exist_ok=True)
             (self.out_dir / "plan.json").write_text(self.plan.to_json(), encoding="utf-8")
@@ -243,6 +252,9 @@ class LoadRunner:
                 "ended_at": ended.isoformat(),
                 "elapsed_s": round((ended - started).total_seconds(), 3),
                 "tokenizer": tokenizer,
+                "request_timeouts_s": {
+                    tp.shape or "": self.request_timeout(tp.shape) for tp in self.plan.tenants
+                },
                 "counters": self.counters.as_dict(),
                 "client_rows": self._client_sink.rows,
                 "sample_rows": self._sample_sink.rows,
@@ -250,6 +262,32 @@ class LoadRunner:
             (self.out_dir / "loadrun.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
             log.info("done: %s", json.dumps(self.counters.as_dict()))
             return meta
+
+    async def _load_shape_contracts(self, client: httpx.AsyncClient) -> None:
+        """Read every shape's contract (`max_queue_s`, `lazy`, `tps`) from the gateway's /v1/models with
+        the first tenant's key, so each request's timeout follows its shape. A gateway without the field,
+        or no tenant, leaves the table empty: every request then gets GENERATION_ALLOWANCE_S alone."""
+        key = next((spec.api_key for spec in self.scenario.tenants), None)
+        if key is None:
+            return
+        try:
+            r = await client.get("/v1/models", headers={"Authorization": f"Bearer {key}"}, timeout=30)
+            r.raise_for_status()
+            for m in r.json().get("data") or []:
+                self.shape_contracts[str(m.get("id"))] = dict(m.get("slotgw") or {})
+        except (httpx.HTTPError, ValueError, AttributeError) as e:
+            log.warning("shape contracts not read from /v1/models (%s): every request times out after %.0f s",
+                        e, GENERATION_ALLOWANCE_S)
+            return
+        used = sorted({tp.shape for tp in self.plan.tenants if tp.shape})
+        log.info("request timeouts: %s", ", ".join(f"{s} {self.request_timeout(s):.0f} s" for s in used) or "default")
+
+    def request_timeout(self, shape: str | None) -> float:
+        """Read timeout for one request of `shape`: the shape's queue contract (max_queue_s, how long the
+        gateway may hold it before refusing) plus GENERATION_ALLOWANCE_S for the response. The run's drain
+        deadline, not this, ends a request still queued at the end, and that counts as cancelled."""
+        q = (self.shape_contracts.get(shape or "") or {}).get("max_queue_s")
+        return GENERATION_ALLOWANCE_S + (float(q) if q else 0.0)
 
     async def _preflight(self, client: httpx.AsyncClient) -> dict[str, Any]:
         try:
@@ -473,11 +511,12 @@ class LoadRunner:
         self.counters.sent += 1
         self.counters.inflight += 1
         reply = ""
+        timeout = httpx.Timeout(self.request_timeout(tp.shape), connect=10.0)
         try:
             if step.stream:
-                reply = await self._stream(client, body, headers, rec)
+                reply = await self._stream(client, body, headers, rec, timeout)
             else:
-                reply = await self._complete(client, body, headers, rec)
+                reply = await self._complete(client, body, headers, rec, timeout)
             rec.t_done = now()
         except httpx.HTTPError as e:
             rec.status, rec.error, rec.t_done = "error", f"{type(e).__name__}: {e}"[:200], now()
@@ -490,9 +529,12 @@ class LoadRunner:
         self._record(rec)
         return rec.status == "ok", content, reply
 
-    async def _stream(self, client: httpx.AsyncClient, body: dict[str, Any], headers: dict[str, str], rec: ClientRecord) -> str:
+    async def _stream(
+        self, client: httpx.AsyncClient, body: dict[str, Any], headers: dict[str, str], rec: ClientRecord,
+        timeout: httpx.Timeout,
+    ) -> str:
         parts: list[str] = []
-        async with client.stream("POST", "/v1/chat/completions", json=body, headers=headers) as r:
+        async with client.stream("POST", "/v1/chat/completions", json=body, headers=headers, timeout=timeout) as r:
             rec.t_first_byte = now()
             rec.http_status = r.status_code
             rec.request_id = r.headers.get("x-request-id")
@@ -523,8 +565,11 @@ class LoadRunner:
                     self._take_billing(rec, obj["slotgw"])
         return "".join(parts)
 
-    async def _complete(self, client: httpx.AsyncClient, body: dict[str, Any], headers: dict[str, str], rec: ClientRecord) -> str:
-        r = await client.post("/v1/chat/completions", json=body, headers=headers)
+    async def _complete(
+        self, client: httpx.AsyncClient, body: dict[str, Any], headers: dict[str, str], rec: ClientRecord,
+        timeout: httpx.Timeout,
+    ) -> str:
+        r = await client.post("/v1/chat/completions", json=body, headers=headers, timeout=timeout)
         rec.t_first_byte = now()
         rec.http_status = r.status_code
         rec.request_id = r.headers.get("x-request-id")

@@ -126,7 +126,8 @@ for i in $(seq 0 $((ENGINES - 1))); do
   curl -s -m 5 "localhost:$port/v1/models" | head -c 160; echo
   [ -f "/workspace/vllm-$i.args" ] && echo "  args: $(cat "/workspace/vllm-$i.args")"
   m=$(curl -s -m 5 "localhost:$port/metrics" | grep '^vllm:cache_config_info' | head -n 1)
-  nb=$(printf '%s' "$m" | grep -o 'num_gpu_blocks="[0-9]*"' | grep -o '[0-9]*'); bs=$(printf '%s' "$m" | grep -o 'block_size="[0-9]*"' | grep -o '[0-9]*')
+  # labels are anchored at a separator: the line also carries effective_attention_block_size="16"
+  nb=$(printf '%s' "$m" | grep -o '[{,]num_gpu_blocks="[0-9]*"' | head -n 1 | grep -o '[0-9]*'); bs=$(printf '%s' "$m" | grep -o '[{,]block_size="[0-9]*"' | head -n 1 | grep -o '[0-9]*')
   if [ -n "$nb" ] && [ -n "$bs" ]; then echo "  KV: $nb blocks x $bs = $((nb * bs)) tokens"; else echo "  KV: not in /metrics"; fi
 done
 tmux ls 2>/dev/null || echo 'no tmux sessions'
@@ -140,6 +141,10 @@ EOF
       if [ $# -gt 0 ]; then args_q=$(printf '%q' "$*"); fi
       rssh "$pod" "ENGINES=$n ARGS=$args_q START_ORDER='${START_ORDER:-}' STAGGER='${STAGGER:-0}' bash -s" <<'EOF'
 if [ -n "$ARGS" ]; then
+  case "$ARGS" in  # without the port the sed below is a no-op and every engine would bind 8000 (2026-11-09: 15 min lost)
+    *"--port 8000"*) ;;
+    *) echo "restart: the argument line must contain '--port 8000' (engine i gets --port 8000+10*i); nothing restarted" >&2; exit 1 ;;
+  esac
   for i in $(seq 0 $((ENGINES - 1))); do
     echo "$ARGS" | sed "s/--port 8000/--port $((8000 + 10 * i))/" > "/workspace/vllm-$i.args"
     echo "wrote /workspace/vllm-$i.args: $(cat "/workspace/vllm-$i.args")"

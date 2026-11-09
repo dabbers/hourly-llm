@@ -125,6 +125,13 @@ async def test_loadgen_runs_against_gateway_and_tags_the_meter(gateway, meter_ro
     assert meta["counters"]["errors"] == 0
     assert meta["counters"]["ok"] >= 8
     assert meta["tokenizer"]["tokens_per_planned_token"] == pytest.approx(1.0, abs=0.02)
+    # request timeouts follow each shape's queue contract from /v1/models: max_queue_s + the generation allowance
+    assert runner.request_timeout("small.8k.15tps.lazy") == 600.0 + 3600.0
+    assert runner.request_timeout("small.8k.30tps") == 600.0 + 30.0
+    assert runner.request_timeout(None) == 600.0
+    assert meta["request_timeouts_s"] == {
+        "small.8k.30tps": 630.0, "small.8k.60tps": 630.0, "small.16k.30tps": 630.0, "small.8k.15tps.lazy": 4200.0,
+    }
 
     client_rows = _read_csv(out / "client.csv")
     assert len(client_rows) == meta["counters"]["sent"]
@@ -185,3 +192,14 @@ def test_stream_error_events_classify_revocations_as_results():
     LoadRunner._stream_error(r, {"message": "no code at all"})
     assert r.status == "error"
     assert "revoked" in Counters().as_dict()
+
+
+def test_request_timeout_without_contracts_is_the_generation_allowance(tmp_path):
+    """An older gateway (no max_queue_s in /v1/models) or an unreachable listing: every request keeps
+    the blanket allowance; a shape whose contract is known adds its queue time."""
+    sc = tiny_scenario(["batch", "chat"])
+    runner = LoadRunner(sc, build_plan(sc, 1), "http://127.0.0.1:9", runs_dir=tmp_path)
+    assert runner.request_timeout("small.8k.15tps.lazy") == 600.0
+    runner.shape_contracts = {"small.8k.15tps.lazy": {"lazy": True, "max_queue_s": 3600}, "small.8k.30tps": {"lazy": False}}
+    assert runner.request_timeout("small.8k.15tps.lazy") == 4200.0
+    assert runner.request_timeout("small.8k.30tps") == 600.0  # contract listed without a queue time

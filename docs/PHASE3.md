@@ -78,7 +78,9 @@ Time: 51 runs ≈ 16.5 h over two chains (`matrix-campaign.yaml`, runs 1–14 of
 then `matrix-campaign-2.yaml`, 37 runs with `nopace` first, started between runs by `chain switch`,
 `--max-hours 14`), then ≈ 2.4 h for stage I (seven re-runs after an engine restart) and 1.5 h for stage H. About 20 h of
 wall clock from the first paid minute; the chain runs unattended on the gateway pod and survives this
-machine going down.
+machine going down. As run: the second chain was stopped at 11:18 UTC on 2026-11-09 after 17 of its 37 runs
+(section 6, the batch tenant's timeout); stage I went first, then the 22 remaining sweep runs
+(`matrix-campaign-2-resume.yaml`, ≈ 7.5 h) by `chain switch`, and stage H only if the balance allows.
 
 ## 4. How the numbers are analysed
 
@@ -241,6 +243,36 @@ stage D seeds 4–6 against 1–3 on the runs pulled by 08:50 UTC: refusal rate 
 less cluster KV; the capacity effect cannot be separated from the seed effect in this design, so the write-up
 reads refusals and the start bound per KV profile (and paired, per seed) rather than pooled across the two
 pods, as the owner asked. Paired comparisons are unaffected: both arms of a pair share the seed and the engines.
+
+**The batch tenant's timeout (found 2026-11-09 11:15 UTC, from `chain.failed`).** `load1.5-burstoff` s1 and s2
+ran to the end, but the load generator exited 1 with 3 and 12 errors out of 7,992 and 7,908 requests, so the
+chain recorded them as FAILED and went on (`continue_on_fail`). Every error is a client-side `ReadTimeout`
+after 600 s on the batch tenant's `small.8k.15tps.lazy` requests (complete delivery, so the timeout spans
+queue plus generation); none is a gateway error: the gateway answered 200, 429 (`context_exceeds_shape`) and
+503 (`capacity:seat`) only, and its meter has no error rows. At 1.5 × the phase-2 arrival rate the interactive
+queue stayed deep through the 480 s peak (up to 275 waiting), and lazy work is admitted only into capacity no
+interactive request is waiting for (DESIGN.md 4.1), so the lazy queue (the batch tenant's 12 closed-loop
+workers plus a showcase) stood at 12–14 from about t = 330 s to t = 1,030 s; lazy requests waited up to 585 s
+(s1) and 624 s (s2) before admission, inside the shape's 3,600 s contract, and those past the load generator's
+blanket 600 s read timeout were counted as errors. The gateway served and billed them regardless: in s2 eight
+batch requests were admitted after their client had gone (2,789 output tokens delivered to a closed socket),
+because a request waiting in the queue is not watched for a disconnect; that is a finding for the write-up and
+a small gateway fix for after the campaign, and it touches no paid run once the load generator stops giving
+up. The chain was stopped at 11:18 UTC with `load1.5-burst` s1 twelve minutes in (killed; run again later):
+every later load-1.5 and load-2 run would have failed the same way, and a timeout that does not match the
+contract is a flaw in the measuring instrument, not a result. Fix: `/v1/models` now lists each shape's
+`max_queue_s`, and the load generator sets every request's read timeout to that plus a 600 s generation
+allowance (630 s for the interactive shapes, 4,200 s for the lazy ones; `loadrun.json` records
+`request_timeouts_s`), so a request still queued at the drain deadline is cancelled and counted as
+`cancelled`, never as an error; tested against the in-process gateway (`tests/test_loadgen.py`,
+`tests/test_gateway.py`). Nothing else in the gateway changed; the pod ran the code of 2026-11-08 until this
+push, which also brought the load generator's `--reservations-required` and the chain's KV preflight. Order
+change: with the chain stopped and a push due anyway, the engines were restarted at once with GPU 0 last, so
+stage I runs first and the 22 remaining sweep runs follow it (`matrix-campaign-2-resume.yaml`, armed with
+`chain switch` after `resv-split-s6`), all with 289,056 KV tokens on every replica; only the 31 phase-3 runs
+finished before 11:18 carry the short replica A. The two failed runs are pulled and kept
+(`runs/load1.5-burstoff-s1-20261109-102828`, `runs/load1.5-burstoff-s2-20261109-104720`) as the record of
+lazy starvation at 1.5 × load; the campaign report takes the re-runs (latest start per label and seed).
 
 **First look, 2026-11-09 03:30 UTC, six runs in (burstoff and burst, seeds 4–6).** Seeds 4–6 offer
 less load than seeds 1–3. The agent tenant's arrivals are an on/off process (`bursty`: mean on 120 s

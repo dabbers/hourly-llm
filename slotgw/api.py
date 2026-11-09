@@ -302,6 +302,7 @@ def build_router() -> APIRouter:
                     "max_context": s.max_context,
                     "tps": s.tps,
                     "lazy": s.lazy,
+                    "max_queue_s": s.max_queue_s,  # how long the gateway may hold a request before refusing it
                     "price_per_second": s.price_per_second,
                 },
             }

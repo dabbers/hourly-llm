@@ -33,6 +33,9 @@ async def test_models_lists_shapes(gateway):
     assert "small.8k.30tps" in ids and "small.8k.15tps.lazy" in ids
     lazy = next(m for m in r.json()["data"] if m["id"] == "small.8k.15tps.lazy")
     assert lazy["slotgw"]["lazy"] is True
+    assert lazy["slotgw"]["max_queue_s"] == 3600  # the queue contract a client should wait for
+    chat = next(m for m in r.json()["data"] if m["id"] == "small.8k.30tps")
+    assert chat["slotgw"]["max_queue_s"] == 30
 
 
 async def test_complete_response_and_meter(gateway, meter_rows):

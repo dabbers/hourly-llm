@@ -396,13 +396,16 @@ bash scripts/pod.sh chain a switch resv-shared-s6 config/phase3/matrix-campaign-
 watcher logs to `runs/phase2/chain-switch.log` on the pod.
 
 **Stage I: re-running the pinned-reservation runs (PHASE3.md section 6; owner's decision 2026-11-09: re-run,
-with a KV preflight).** When the second chain is DONE (within its 60-minute stop grace): cancel the pod stop,
-ship the repo (the preflight's KV checks, the matrix, `--reservations-required`; never push while a chain
-runs, the push overwrites the running scripts), restart the engines with the same argument line but GPU 0
-last and each engine healthy before the next (GPU 0's engine profiled 6 % less KV when it was the first,
-cold start; GPUs 1 and 2 start first and warm the compile cache), read every engine's KV from `status`
-(289056 tokens on all three, or stop here), start the re-run matrix, and confirm replica A's KV in the first
-run's gateway log:
+with a KV preflight).** Planned for when the second chain was DONE; done at 11:50 UTC on 2026-11-09 instead,
+because that chain was stopped at 11:18 (PHASE3.md section 6, the batch tenant's timeout: the load
+generator's blanket 600 s timeout did not match the lazy shape's 3,600 s contract, fixed and pushed). The
+sequence is the same: stop the chain, ship the repo (never push while a chain runs, the push overwrites the
+running scripts), restart the engines with the same argument line but GPU 0 last and each engine healthy
+before the next (GPU 0's engine profiled 6 % less KV when it was the first, cold start; GPUs 1 and 2 start
+first and warm the compile cache), read every engine's KV from `status` (289056 tokens on all three, or stop
+here), start the re-run matrix, arm the switch to the 22 remaining sweep runs
+(`matrix-campaign-2-resume.yaml`, which stops the pod an hour after it finishes), and confirm replica A's KV
+in the first run's gateway log:
 
 ```bash
 bash scripts/pod.sh chain a stop
@@ -413,8 +416,12 @@ bash scripts/pod.sh push a
 ```
 
 ```bash
-START_ORDER="1 2 0" STAGGER=1 bash scripts/pod.sh vllm a restart --model Qwen/Qwen2.5-7B-Instruct-AWQ --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens 512 --enable-prefix-caching --enable-prompt-tokens-details
+START_ORDER="1 2 0" STAGGER=1 bash scripts/pod.sh vllm a restart --model Qwen/Qwen2.5-7B-Instruct-AWQ --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens 512 --enable-prefix-caching --enable-prompt-tokens-details --port 8000 --host 0.0.0.0
 ```
+
+The argument line must end with `--port 8000 --host 0.0.0.0`: `restart` rewrites the port per engine (8000, 8010,
+8020) and now refuses a line without it (on 2026-11-09 at 11:23 UTC a line without the port put engine 1 on
+8000, the health wait on 8010 ran its 15 minutes and the other two engines never started).
 
 ```bash
 bash scripts/pod.sh vllm a status
@@ -422,6 +429,10 @@ bash scripts/pod.sh vllm a status
 
 ```bash
 bash scripts/pod.sh chain a start config/phase3/matrix-rerun-resv.yaml --max-hours 3
+```
+
+```bash
+bash scripts/pod.sh chain a switch resv-split-s6 config/phase3/matrix-campaign-2-resume.yaml --max-hours 9 --stop-pods --stop-grace-min 60
 ```
 
 ```bash
