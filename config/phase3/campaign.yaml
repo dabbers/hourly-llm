@@ -21,7 +21,7 @@ settings:
   nopace: {desc: "pacing off, admission on, bursting off: the plain best-effort deployment (control)"}
   outheavy-burstoff: {desc: "output-heavy scenario (prompt:output about 1.5:1), bursting off"}
   outheavy-burst: {desc: "output-heavy scenario, bursting on"}
-  flash-burstoff: {desc: "flash-crowd scenario (2 min at 2.5x peak rate), bursting off"}
+  flash-burstoff: {desc: "flash-crowd scenario (2 min at 2x the peak chat rate inside the peak), bursting off"}
   flash-burst: {desc: "flash-crowd scenario, bursting on"}
   chunk256: {desc: "vLLM prefill chunk 256 tokens, bursting on"}
   chunk2048: {desc: "vLLM prefill chunk 2048 tokens (vLLM default), bursting on"}

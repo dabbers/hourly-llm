@@ -329,6 +329,18 @@ code. Risk accepted with the owner's call: if the balance reaches zero before th
 stops the pod, the run in flight is lost and the pod cannot be restarted on its host (no free GPU there); a
 top-up of about $10 before about 22:30 removes it.
 
+**As run (2026-11-09 21:17–21:56 UTC).** The sweep ended `DONE 22` at 21:17:43 with 0 request errors in every
+run (58 phase-3 runs, 405,606 requests, 0 errors; every run local with its meter). The driver killed the chain
+session at 21:17:57 and `chain.log` confirmed "pod stop cancelled". The chunk-256 restart's first attempt came
+back healthy but failed the KV check: engine 1 reported 271,216 KV tokens against 289,680 on engines 0 and 2
+(spread 6.3 %, limit 1 %). The second attempt (21:37–21:55) gave 289,680 on all three (18,105 blocks of 16;
+624 tokens more than chunk 512's 289,056, the smaller chunk's smaller activation peak) and `matrix-chunk256.yaml`
+started at 21:55:51 (`--max-hours 2`). Without the check the chunk-256 runs would have run with one replica 6 %
+short of KV, the confound the preflight was carried over to catch; the retry cost 19 min (≈ $0.85); the cause of
+the short first start was not investigated. Operator note: `pod.sh chain <gw> status` shows the driver's WAITING
+line until the new chain starts, because `stageh.status` is rewritten only at WAITING, RUNNING (after the chain
+start), HANDED-OVER, ABORTED and FAILED; the restart's progress is in `runs/phase2/stageh.log`.
+
 ## 7. Spend log
 
 | When (UTC) | What | Pod-hours | Cost |
@@ -353,6 +365,7 @@ top-up of about $10 before about 22:30 removes it.
 | 2026-11-09 18:13 | balance $15.08 (18:03); sweep 12/22 done, 0 request errors in every run so far (run 13/22 prefillcap s1 running); owner: run what we can until zero, top up where needed → stage H chained onto the sweep by `scripts/stage_h.sh` (armed 18:12:51); forecast sweep DONE ≈ 21:25, stage H DONE ≈ 23:05, pod self-stop ≈ 23:25, balance zero ≈ 23:40 | | |
 | 2026-11-09 18:16 | owner topped up $15 ("to handle lulls where you need my response but I am asleep/busy"): balance $29.41, zero ≈ 05:15 UTC on 2026-11-10; stage H now ends with ≈ $15 left (sweep DONE ≈ 21:25, stage H DONE ≈ 23:05, pod self-stop ≈ 23:25), so a slow engine restart or a retry no longer costs the last run | | +15.00 |
 | 2026-11-09 18:31 | owner: "Ship it, with a few adjustments" (section 9): stage J (`matrix-stage-j.yaml`, resv-p95-spill + resv-p95 seeds 3–4, ≈ $4) chained after stage H as the driver's third step with chunk 512 restored and the KV budgets checked from `/metrics` and again by the matrix preflight (`expect_kv_total` 289,056, `continue_on_fail` off); driver re-armed 18:30:46 (sweep 13/22 done, run 14 prefillcap s2 running). Forecast: sweep DONE ≈ 21:25, stage H ≈ 23:05, stage J DONE ≈ 00:40, pod self-stop ≈ 01:00 UTC on 2026-11-10 with ≈ $11 left; then write-up, terminate, rotate | | |
+| 2026-11-09 21:56 | balance $19.81. **Sweep DONE 22** at 21:17:43, 0 request errors in every run (58 phase-3 runs, 405,606 requests); the driver cancelled the pod stop at 21:17:57. Chunk-256 restart: attempt 1 failed the KV check (engine 1 271,216 vs 289,680 KV tokens), attempt 2 uniform at 289,680; `matrix-chunk256.yaml` started 21:55:51. Forecast: chunk 256 DONE ≈ 23:15, chunk 2048 DONE ≈ 00:55, stage J DONE ≈ 02:35, pod self-stop ≈ 02:55 UTC on 2026-11-10 with ≈ $6 left (each further failed restart attempt ≈ $0.85) | ≈ $0.85 lost | |
 | | | | |
 
 Balance at plan time: $62.35 of $80 (phase 2 spent $17.61; see PHASE2.md §3).
