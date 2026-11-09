@@ -108,9 +108,11 @@ def _row(i: int, load_run: str, scenario: str, seed: int, tenant: str, shape: st
     return rec
 
 
-def _write_run(run_dir: Path, label: str, seed: int, started_at: str = "2026-11-08T00:00:00+00:00") -> None:
+def _write_run(run_dir: Path, label: str, seed: int, started_at: str = "2026-11-08T00:00:00+00:00",
+               plan: bool = True) -> None:
     """One synthetic gateway run with one load run: scenario 'mixed-4090+<label>'. The burst label
-    delivers chat faster than the shape (a burst discount) and has fewer floor violations."""
+    delivers chat faster than the shape (a burst discount) and has fewer floor violations. With `plan`
+    the load run carries a plan.json whose open-loop load grows with the seed (the agent tenant)."""
     scenario = f"mixed-4090+{label}"
     load_run = f"mixed-4090-{label}-s{seed}"
     meter = Meter(run_dir / "meter.sqlite", run_id=f"{label}-s{seed}")
@@ -142,6 +144,15 @@ def _write_run(run_dir: Path, label: str, seed: int, started_at: str = "2026-11-
         w.writerow(["t", "replica", "kv_usage", "running", "waiting", "preemptions", "client_inflight"])
         for s in range(0, 90, 2):
             w.writerow([t0 + s, "local-2080ti", 0.1 + 0.005 * s, 3, 0, 0, 3])
+    if plan:
+        (d / "plan.json").write_text(json.dumps({
+            "scenario": "mixed-4090", "seed": seed, "duration_s": 90,
+            "tenants": [
+                {"name": "chat", "profile_kind": "chat", "sessions": [{"steps": [{}, {}, {}]} for _ in range(10)]},
+                {"name": "agent", "profile_kind": "agent", "sessions": [{"steps": [{}, {}]} for _ in range(5 + seed)]},
+                {"name": "batch", "profile_kind": "batch", "sessions": [{"steps": [{}]} for _ in range(100)]},
+            ],
+        }), encoding="utf-8")
 
 
 def test_campaign_end_to_end(tmp_path):
@@ -153,7 +164,7 @@ def test_campaign_end_to_end(tmp_path):
             dirs.append(d)
     # a duplicate (burst, seed 1) that started later replaces the first; an unknown label is listed and ignored
     dup = tmp_path / "burst-s1-again"
-    _write_run(dup, "burst", 1, started_at="2026-11-08T06:00:00+00:00")
+    _write_run(dup, "burst", 1, started_at="2026-11-08T06:00:00+00:00", plan=False)
     odd = tmp_path / "odd-s1"
     _write_run(odd, "weird", 1)
     out = build_campaign([*dirs, dup, odd], MANIFEST, tmp_path / "campaign", config_dir=REPO / "config")
@@ -164,13 +175,25 @@ def test_campaign_end_to_end(tmp_path):
 
     st = pd.read_csv(out / "settings.csv")
     assert set(st["label"]) == {"burstoff", "burst"}
-    assert (st["n"] == 3).all()
+    assert (st[~st["metric"].str.startswith("plan_")]["n"] == 3).all()
+    assert (st[st["metric"].str.startswith("plan_") & (st["label"] == "burst")]["n"] == 2).all()  # burst-s1 has no plan
     util = st[st["metric"] == "utilisation"].set_index("label")["mean"]
     assert (util > 0).all() and (util < 1).all()
     gm = st[(st["metric"] == "gross_margin_shape") & (st["label"] == "burst")].iloc[0]
     assert gm["ci_lo"] <= gm["mean"] <= gm["ci_hi"]
     runs = pd.read_csv(out / "runs.csv")
     assert len(runs) == 6 and runs[(runs["label"] == "burst") & (runs["seed"] == 1)]["run_dir"].iloc[0] == str(dup)
+    # plan-load covariates: the open-loop tenants' planned sessions and steps (batch is closed loop and
+    # not counted); NaN for the kept burst-s1 run, whose load run has no plan.json
+    with_plan = runs[~((runs["label"] == "burst") & (runs["seed"] == 1))]
+    assert (with_plan["plan_open_sessions"] == 15 + with_plan["seed"]).all()
+    assert (with_plan["plan_open_steps"] == 30 + 2 * (5 + with_plan["seed"])).all()
+    assert (with_plan["plan_agent_steps"] == 2 * (5 + with_plan["seed"])).all()
+    no_plan = runs[(runs["label"] == "burst") & (runs["seed"] == 1)].iloc[0]
+    assert np.isnan(no_plan["plan_open_steps"])
+    load_ci = st[(st["metric"] == "plan_open_steps") & (st["label"] == "burstoff")].iloc[0]
+    assert load_ci["n"] == 3 and load_ci["mean"] == pytest.approx(30 + 2 * (5 + 2))
+    assert "plan_open_steps" not in set(pd.read_csv(out / "paired.csv")["metric"])
 
     pt = pd.read_csv(out / "paired.csv")
     row = pt[(pt["setting"] == "burst") & (pt["baseline"] == "burstoff") & (pt["scope"] == "run") & (pt["metric"] == "tenant_usd")]

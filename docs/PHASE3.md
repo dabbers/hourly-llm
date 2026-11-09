@@ -152,6 +152,27 @@ While it runs: a poll every 20 minutes reads `chain status` (first line) and pul
 run id that is not yet local, so a lost pod costs at most the run in flight. The campaign report is
 rebuilt locally from the pulled runs, never on the pod.
 
+**First look, 2026-11-09 03:30 UTC, six runs in (burstoff and burst, seeds 4–6).** Seeds 4–6 offer
+less load than seeds 1–3. The agent tenant's arrivals are an on/off process (`bursty`: mean on 120 s
+at 33/min, off 180 s at 5.5/min after the ×11 multiplier) with only three or four cycles in an
+18-minute run, so its planned sessions swing by seed: 319/300/404 for seeds 1–3, 144/157/204 for
+4–6, while chat (529–607 sessions) and the note-taker (178–235) are steady. Burstoff therefore bills
+$0.92–1.15 in seeds 4–6 against $1.29–1.42 in 1–3, burst $1.31–1.50 against $1.70–1.80, and
+utilisation runs 33–44% against 48–55%. Within a seed the comparison holds: burst over burstoff is
++42/+26/+31% in seeds 4–6 (phase 2: +35/+31/+26%); over six seeds, +$0.377 [+0.314, +0.439], paired
+t p < 0.0001, Wilcoxon p = 0.031 (the smallest value six pairs allow), Holm-adjusted 0.0003. The
+pairing with phase 2 is intact: the seed-3 plan the pod generated for run 7 is identical to phase 2's
+(534/404/180 sessions) and the load generator is unchanged since 9fd22cc. Consequences: (1) the
+campaign report carries `plan_open_steps` (the plan's open-loop requests) per run and per setting as
+the load covariate, and the write-up compares settings within seeds, never seeds 4–6 against 1–3 as
+if they were one load; (2) the lighter seeds are a gain, not a loss: they add points at 33–44%
+utilisation to the margin curve, which phase 2 could only extrapolate towards break-even; (3) the
+floor-violation worsening under bursting, significant at three seeds (p 0.024), is not at six
+(+9 points, CI −4 to +23, p 0.14): at the lighter load the difference is a few points either way
+(seed 5: 23% bursting vs 32% not). The pod is healthy: 32 vCPUs at a load average of 2, GPUs at
+61–67 °C with no throttle reason, zero preemptions, no failed run, ~19 min per run (DONE expected
+≈ 16:45 UTC).
+
 Stage H: after `DONE`, during the grace hour, `pod.sh chain <gw> stop` cancels the stop; `pod.sh
 vllm <p> restart ... --max-num-batched-tokens 256` on all three; chain `matrix-chunk256.yaml`
 without `--stop-pods`; restart with 2048; chain `matrix-chunk2048.yaml` with `--stop-pods

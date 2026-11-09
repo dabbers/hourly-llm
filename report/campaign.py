@@ -19,6 +19,7 @@ campaign.html, one page over all of it.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -98,6 +99,17 @@ TENANT_METRICS: dict[str, tuple[str, Callable]] = {
     "ttft_p95_ms": ("95th-percentile time to first token, mean of the per-shape × delivery rows", html.fmt_int),
     "floor_violation_share": ("floor violations ÷ requests judged (≥ 30 tokens over ≥ 0.5 s)", html.fmt_pct),
     "delivered_tps_mean": ("mean delivered tokens per second over the judged requests", html.fmt_f(1)),
+}
+
+# Plan-load covariates: what the seed's plan scheduled for the open-loop tenants (chat, agent, note-taker;
+# the batch tenant runs closed loop, so its planned steps are a cap, not demand). They describe the
+# offered load, which varies by seed: the agent tenant's arrivals are an on/off ("bursty") process with
+# only a few cycles per 18-minute run. Listed per run and per setting, never paired: within a seed they
+# are identical by construction.
+PLAN_METRICS: dict[str, tuple[str, Callable]] = {
+    "plan_open_sessions": ("sessions the seed's plan schedules for the open-loop tenants", html.fmt_int),
+    "plan_open_steps": ("requests (steps) the seed's plan schedules for the open-loop tenants: the offered load", html.fmt_int),
+    "plan_agent_steps": ("of which the agent tenant's (bursty arrivals: the seed-to-seed swing)", html.fmt_int),
 }
 
 HEADLINE_METRICS = ["tenant_usd", "per_token_usd", "output_tokens_per_gpu_hour", "gross_margin_shape",
@@ -201,6 +213,25 @@ def _utilisation(sub: pd.DataFrame, weights: dict[str, float], plans: dict[str, 
     return sold / (seats * duration) if seats and duration > 0 else np.nan
 
 
+def _plan_load(run_dir: Path, load_run: str) -> dict[str, float]:
+    """The plan-load covariates of one load run from its plan.json; NaN when the plan is not there."""
+    out: dict[str, float] = {m: np.nan for m in PLAN_METRICS}
+    path = run_dir / "loads" / load_run / "plan.json"
+    if not path.is_file():
+        return out
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    sessions = steps = agent = 0
+    for t in plan.get("tenants", []):
+        if t.get("profile_kind") == "batch":
+            continue
+        n_steps = sum(len(s.get("steps", [])) for s in t.get("sessions", []))
+        sessions += len(t.get("sessions", []))
+        steps += n_steps
+        if t.get("profile_kind") == "agent":
+            agent += n_steps
+    return {"plan_open_sessions": float(sessions), "plan_open_steps": float(steps), "plan_agent_steps": float(agent)}
+
+
 def _load_one(run_dir: Path, config_dir: Path | None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
     """One run directory -> (run rows, tenant rows, completed-request rows, seat-weight basis),
     each row tagged with label, seed, load_run and run_dir."""
@@ -221,6 +252,9 @@ def _load_one(run_dir: Path, config_dir: Path | None) -> tuple[pd.DataFrame, pd.
         label=pr["scenario"].map(label_of),
         run_dir=str(run_dir),
     )
+    plan_loads = {lr: _plan_load(run_dir, lr) for lr in pr["load_run"].unique()}
+    for m in PLAN_METRICS:
+        pr[m] = pr["load_run"].map(lambda lr, m=m: plan_loads[lr][m]).astype(float)
     tags = pr.set_index("load_run")[["label", "seed", "scenario", "run_dir"]]
 
     agg = pt.groupby(["load_run", "tenant"], dropna=False).agg(
@@ -317,7 +351,7 @@ def _ci_rows(frame: pd.DataFrame, keys: list[str], metrics: list[str]) -> pd.Dat
 
 def settings_table(c: Campaign) -> pd.DataFrame:
     """settings.csv: per label and run-level metric, n, mean, sd, ci_lo, ci_hi (95% Student t)."""
-    return _ci_rows(c.runs, ["label"], list(RUN_METRICS))
+    return _ci_rows(c.runs, ["label"], [*RUN_METRICS, *PLAN_METRICS])
 
 
 def tenants_table(c: Campaign) -> pd.DataFrame:
@@ -481,7 +515,7 @@ _fmt_p = html.fmt_f(4)
 
 
 def _metric_fmt(scope: str, metric: str) -> Callable:
-    reg = RUN_METRICS if scope == "run" else TENANT_METRICS
+    reg = {**RUN_METRICS, **PLAN_METRICS} if scope == "run" else TENANT_METRICS
     return reg[metric][1] if metric in reg else html.fmt_f(3)
 
 
@@ -543,9 +577,10 @@ def _overview_section(c: Campaign) -> str:
 def _settings_section(c: Campaign, st: pd.DataFrame) -> str:
     if c.runs.empty:
         return '<p class="muted">no runs</p>'
-    frame = _pm_frame(st, ["label"], HEADLINE_METRICS, RUN_METRICS)
+    shown = [*HEADLINE_METRICS, "plan_open_steps"]  # the offered load last, as the covariate it is
+    frame = _pm_frame(st, ["label"], shown, {**RUN_METRICS, **PLAN_METRICS})
     cols = [("label", "label", html.fmt_text), ("n", "n", html.fmt_int)]
-    cols += [(m, m.replace("_", " "), html.fmt_text) for m in HEADLINE_METRICS]
+    cols += [(m, m.replace("_", " "), html.fmt_text) for m in shown]
     tbl = html.table(frame, cols)
     means = st.pivot(index="label", columns="metric", values="mean").reindex(frame["label"])
     labels = frame["label"].tolist()
@@ -756,6 +791,7 @@ def _definitions_section() -> str:
     items = [f"<dt>{escape(m)}</dt><dd>{escape(d)}</dd>" for m, (d, _) in RUN_METRICS.items()]
     items += [f"<dt>{escape(m)} (tenant)</dt><dd>{escape(d)}</dd>" for m, (d, _) in TENANT_METRICS.items()
               if m not in RUN_METRICS or m == "tenant_usd"]
+    items += [f"<dt>{escape(m)}</dt><dd>{escape(d)}</dd>" for m, (d, _) in PLAN_METRICS.items()]
     methods = [
         ("95% CI", "two-sided Student-t interval for the mean over the runs of a setting (one per seed); none when n < 2."),
         ("paired comparison", ("setting − baseline on the seeds both have; the t-interval, paired t-test and Wilcoxon "
@@ -798,7 +834,7 @@ def build_campaign(run_dirs: list[str | Path], manifest_path: str | Path, out_di
     _write_csv(pred, out / "predictability.csv")
     _write_csv(sw, out / "sweep.csv")
     _write_csv(mc, out / "margin_curve.csv")
-    runs_cols = ["label", "seed", "load_run", "run_dir", "started_at", "duration_s", *RUN_METRICS]
+    runs_cols = ["label", "seed", "load_run", "run_dir", "started_at", "duration_s", *RUN_METRICS, *PLAN_METRICS]
     if not c.runs.empty:
         _write_csv(c.runs[runs_cols], out / "runs.csv")
 
