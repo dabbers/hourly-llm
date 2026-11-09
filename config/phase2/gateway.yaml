@@ -1,7 +1,7 @@
 # Phase 2 gateway knobs: the milestone-4 defaults with text capture on (docs/PHASE2.md section 6)
 # and the post-M4 context-burst class (DESIGN 12). Every key has a default in slotgw/config.py.
 pacing:
-  enabled: true
+  enabled: ${SLOTGW_PACING:-true}
   bucket_depth_s: 1.0
 admission:
   enabled: true
@@ -12,7 +12,7 @@ admission:
   lazy_preempt: ${SLOTGW_LAZY_PREEMPT:-never}
   max_prefill_tokens_in_flight: ${SLOTGW_MAX_PREFILL_TOKENS:-0}
   dispatch_tick_s: 0.25
-  reservation_spill: false
+  reservation_spill: ${SLOTGW_RESERVATION_SPILL:-false}
   health_interval_s: 5.0
 burst:
   enabled: ${SLOTGW_BURST:-true}

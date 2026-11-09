@@ -1,0 +1,63 @@
+# Phase 3 campaign manifest (docs/PHASE3.md section 3): what each label is, which labels are compared
+# pairwise on common seeds, and which labels form a sweep over one variable.
+settings:
+  burstoff: {desc: "on demand, bursting off (phase-2 setting 1)"}
+  burst: {desc: "on demand, tps + context bursts, grace revocation (setting 2)"}
+  resv-split: {desc: "reservations chat 24 / note-taker 4 pinned to replica A, 60 tps shape kept off A (setting 3)"}
+  resv-shared: {desc: "the same reservations, no placement rule (setting 4)"}
+  resv-spill: {desc: "resv-split with admission.reservation_spill on"}
+  resv-p95: {desc: "reservations sized to the measured peak (chat 44, note-taker 7), no placement rule"}
+  abort: {desc: "burst with revoke policy abort"}
+  load0.5-burstoff: {desc: "rate multiplier 5.5 (half load), bursting off"}
+  load0.5-burst: {desc: "rate multiplier 5.5, bursting on"}
+  load1.5-burstoff: {desc: "rate multiplier 16.5, bursting off"}
+  load1.5-burst: {desc: "rate multiplier 16.5, bursting on"}
+  load2-burstoff: {desc: "rate multiplier 22 (saturation), bursting off"}
+  load2-burst: {desc: "rate multiplier 22, bursting on"}
+  oc1.25: {desc: "tps overcommit 1.25, bursting on"}
+  oc1.5: {desc: "tps overcommit 1.5, bursting on"}
+  prefillcap: {desc: "max 4096 prompt tokens prefilling at once per replica, bursting on"}
+  nopace: {desc: "pacing off, admission on, bursting off: the plain best-effort deployment (control)"}
+  outheavy-burstoff: {desc: "output-heavy scenario (prompt:output about 1.5:1), bursting off"}
+  outheavy-burst: {desc: "output-heavy scenario, bursting on"}
+  flash-burstoff: {desc: "flash-crowd scenario (2 min at 2.5x peak rate), bursting off"}
+  flash-burst: {desc: "flash-crowd scenario, bursting on"}
+  chunk256: {desc: "vLLM prefill chunk 256 tokens, bursting on"}
+  chunk2048: {desc: "vLLM prefill chunk 2048 tokens (vLLM default), bursting on"}
+pairs:   # [setting, baseline]: paired by seed, difference = setting - baseline
+  - [burst, burstoff]
+  - [resv-split, burst]
+  - [resv-shared, burst]
+  - [resv-spill, resv-split]
+  - [resv-p95, resv-shared]
+  - [abort, burst]
+  - [oc1.25, burst]
+  - [oc1.5, burst]
+  - [prefillcap, burst]
+  - [nopace, burstoff]
+  - [load0.5-burst, load0.5-burstoff]
+  - [load1.5-burst, load1.5-burstoff]
+  - [load2-burst, load2-burstoff]
+  - [outheavy-burst, outheavy-burstoff]
+  - [flash-burst, flash-burstoff]
+  - [chunk256, burst]
+  - [chunk2048, burst]
+families:   # sweeps: series name -> list of [x, label]
+  load:
+    x_name: "load multiplier (x the phase-2 rate)"
+    series:
+      burstoff: [[0.5, load0.5-burstoff], [1, burstoff], [1.5, load1.5-burstoff], [2, load2-burstoff]]
+      burst: [[0.5, load0.5-burst], [1, burst], [1.5, load1.5-burst], [2, load2-burst]]
+  overcommit:
+    x_name: "tps overcommit"
+    series: {burst: [[1.0, burst], [1.25, oc1.25], [1.5, oc1.5]]}
+  chunk:
+    x_name: "vLLM prefill chunk (tokens)"
+    series: {burst: [[256, chunk256], [512, burst], [2048, chunk2048]]}
+headline:   # the rows that get Holm-corrected p-values in the headline table
+  - [burst, burstoff]
+  - [resv-split, burst]
+  - [resv-shared, burst]
+  - [resv-spill, resv-split]
+  - [nopace, burstoff]
+  - [oc1.5, burst]

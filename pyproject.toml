@@ -11,6 +11,7 @@ dependencies = [
     "pyyaml>=6.0",
     "numpy>=1.26",
     "pandas>=2.2",
+    "scipy>=1.13",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +26,7 @@ slotgw = "slotgw.main:main"
 slotgw-fake-replica = "slotgw.replicas.fake_server:main"
 slotgw-loadgen = "loadgen.main:main"
 slotgw-report = "report.build:main"
+slotgw-campaign = "report.campaign:main"
 slotgw-fetch-prices = "slotgw.prices:main"
 
 [build-system]

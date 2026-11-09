@@ -5,9 +5,13 @@
 #   bash scripts/runchain.sh config/phase2/matrix-ondemand.yaml [--max-hours 5] [--stop-pods] [--stop-grace-min 30] [--self b]
 #
 # Matrix file:
-#   scenario: config/scenarios/mixed-4090.yaml     # loadgen scenario
+#   scenario: config/scenarios/mixed-4090.yaml     # loadgen scenario (a run may name its own scenario:)
 #   config_dir: config/phase2                      # gateway, loadgen and report config directory
-#   report_out: runs/phase2/report                 # report rebuilt here after every run
+#   report_out: runs/phase2/report                 # report rebuilt here after every run (report_mode all)
+#   report_mode: all                               # all = slotgw-report over every run so far after each run (default);
+#                                                  # last = over the finished run only, into runs/<run id>/report; none = no report
+#   continue_on_fail: false                        # true = a failed run is appended to chain.failed and the chain goes on
+#   fresh_runs: false                              # true = start chain.runs empty (its old lines move to chain.runs.prev)
 #   expect_replicas: 3                             # preflight (default 3)
 #   expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ     # preflight (default)
 #   expect_calibration: runpod-4090                # preflight: substring of every ledger's calibration source (optional)
@@ -20,12 +24,18 @@
 #       seeds: [1, 2]
 #       env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
 #       loadgen_args: ["--no-reservations"]
+#     - label: flash-burst
+#       scenario: config/scenarios/mixed-4090-flash.yaml   # this run's scenario instead of the matrix's
+#       seeds: [1]
+#       env: {SLOTGW_BURST: "true"}
+#       loadgen_args: ["--no-reservations"]
 #
 # Per (run, seed): stop any gateway; start one in tmux session `gateway` with run id
 # <label>-s<seed>-<UTC yyyymmdd-HHMMSS> and environment runs/phase2/phase2.env + the run's env; wait
-# for /healthz (120 s); scripts/preflight.py; slotgw-loadgen; then slotgw-report over every run so
-# far (a report failure is logged, not fatal). The first failed preflight or loadgen writes FAILED
-# and stops the chain. A watchdog ends the chain after --max-hours. With --stop-pods and
+# for /healthz (120 s); scripts/preflight.py; slotgw-loadgen; then slotgw-report as report_mode says
+# (a report failure is logged, not fatal). The first failed preflight or loadgen writes FAILED
+# and stops the chain; with continue_on_fail the run is skipped (chain.failed gets a line) and the
+# chain ends with DONE <ok> ok <k> failed. A watchdog ends the chain after --max-hours. With --stop-pods and
 # RUNPOD_API_KEY available (environment or .env), pods are stopped when the chain ends with DONE,
 # FAILED or the watchdog: the other pods first, this one last (--self <letter>, which pod.sh chain
 # passes; else the pods.json entry matching RUNPOD_POD_ID or the hostname; else a). With --stop-grace-min N
@@ -34,8 +44,9 @@
 # wait cancels the stop. A manual kill (pod.sh chain stop) stops the gateway only and leaves the pods running.
 #
 # Files under runs/phase2: chain.log (everything, UTC timestamps), chain.status (one line:
-# RUNNING <label> s<seed> <run id> | DONE <n runs> | FAILED <label> s<seed> <reason>), chain.runs
-# (one run id per line), logs/<label>-s<seed>.log (loadgen), logs/gateway-<run id>.log.
+# RUNNING <label> s<seed> <run id> | DONE <n runs> [ok <k> failed] | FAILED <label> s<seed> <reason>),
+# chain.runs (one run id per line), chain.failed (continue_on_fail: one line per skipped run),
+# logs/<label>-s<seed>.log (loadgen), logs/gateway-<run id>.log.
 set -euo pipefail
 
 usage() { sed -n '2,/^set -euo/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'; }
@@ -56,7 +67,7 @@ if [ -z "$MATRIX" ] || [ ! -f "$MATRIX" ]; then echo "runchain.sh: matrix file m
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-P2=runs/phase2
+P2=${CHAIN_DIR:-runs/phase2}  # chain files, phase2.env and pods.json live here (CHAIN_DIR: a rehearsal elsewhere)
 mkdir -p "$P2/logs"
 LOG=$P2/chain.log; STATUS=$P2/chain.status; RUNS=$P2/chain.runs; WATCHDOG_MARK=$P2/.watchdog
 GATEWAY=http://127.0.0.1:8080
@@ -72,21 +83,30 @@ m = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 SEP = "\x1f"
 def s(v):
     return str(v).lower() if isinstance(v, bool) else str(v)
+mode = str(m.get("report_mode", "all"))
+if mode not in ("all", "last", "none"):
+    sys.exit(f"report_mode must be all, last or none, not {mode!r}")
 print(SEP.join(["HEADER", m["scenario"], m.get("config_dir", "config/phase2"), m.get("report_out", "runs/phase2/report"),
                 str(m.get("expect_replicas", 3)), m.get("expect_model", "Qwen/Qwen2.5-7B-Instruct-AWQ"),
-                m.get("expect_calibration") or ""]))
+                m.get("expect_calibration") or "", mode, s(bool(m.get("continue_on_fail", False))),
+                s(bool(m.get("fresh_runs", False)))]))
 for run in m["runs"]:
     env = " ".join(shlex.quote(f"{k}={s(v)}") for k, v in (run.get("env") or {}).items())
     args = " ".join(shlex.quote(s(a)) for a in (run.get("loadgen_args") or []))
     for seed in run.get("seeds") or [1]:
-        print(SEP.join(["RUN", str(run["label"]), str(seed), env, args]))
+        print(SEP.join(["RUN", str(run["label"]), str(seed), env, args, str(run.get("scenario") or "")]))
 PY
 )
-IFS=$'\x1f' read -r _ SCENARIO CONFIG_DIR REPORT_OUT EXPECT_REPLICAS EXPECT_MODEL EXPECT_CAL <<<"$(printf '%s\n' "$PLAN" | head -n 1)"
+IFS=$'\x1f' read -r _ SCENARIO CONFIG_DIR REPORT_OUT EXPECT_REPLICAS EXPECT_MODEL EXPECT_CAL REPORT_MODE CONTINUE_ON_FAIL FRESH_RUNS \
+  <<<"$(printf '%s\n' "$PLAN" | head -n 1)"
 N_TOTAL=$(printf '%s\n' "$PLAN" | grep -c '^RUN' || true)
 [ "$N_TOTAL" -gt 0 ] || { echo "runchain.sh: $MATRIX has no runs" >&2; exit 2; }
+if [ "$FRESH_RUNS" = true ] && [ -s "$RUNS" ]; then
+  cat "$RUNS" >>"$RUNS.prev"
+  : >"$RUNS"
+fi
 
-N_DONE=0; PREV_RUN_ID=""; RUN_ID=""; CUR_LABEL=""; CUR_SEED=""; END_REASON=""; LG_PID=""
+N_DONE=0; N_FAILED=0; PREV_RUN_ID=""; RUN_ID=""; CUR_LABEL=""; CUR_SEED=""; END_REASON=""; LG_PID=""
 
 stop_gateway() {
   if tmux has-session -t gateway 2>/dev/null; then
@@ -107,7 +127,7 @@ start_gateway() {  # <run id> [KEY=VALUE...]
     echo '#!/usr/bin/env bash'
     echo 'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"'
     printf 'cd %q || exit 1\n' "$PWD"
-    echo 'set -a; [ -f runs/phase2/phase2.env ] && . runs/phase2/phase2.env; set +a'
+    printf 'set -a; [ -f %q ] && . %q; set +a\n' "$P2/phase2.env" "$P2/phase2.env"
     for kv in "$@"; do printf 'export %q\n' "$kv"; done
     printf 'exec uv run slotgw --port 8080 --config-dir %q --runs-dir runs --run-id %q >> %q 2>&1\n' \
       "$CONFIG_DIR" "$run_id" "$P2/logs/gateway-$run_id.log"
@@ -133,6 +153,15 @@ wait_healthz() {  # <seconds>
 }
 
 build_report() {
+  case "$REPORT_MODE" in
+    none) return 0 ;;
+    last)
+      log "report over $RUN_ID -> runs/$RUN_ID/report"
+      if ! uv run slotgw-report "runs/$RUN_ID" --out "runs/$RUN_ID/report" --config-dir "$CONFIG_DIR" >>"$LOG" 2>&1; then
+        log "report failed (continuing); see $LOG"
+      fi
+      return 0 ;;
+  esac
   local dirs=() id
   while read -r id; do [ -n "$id" ] && dirs+=("runs/$id"); done <"$RUNS"
   [ ${#dirs[@]} -gt 0 ] || return 0
@@ -144,16 +173,16 @@ build_report() {
 
 self_letter() {  # this pod's letter: --self, else the pods.json entry whose id is RUNPOD_POD_ID or the hostname; a if unknown
   if [ -n "$SELF" ]; then echo "$SELF"; return; fi
-  uv run python -c 'import json, os, socket
-pods = json.load(open("runs/phase2/pods.json"))["pods"]
+  uv run python -c 'import json, os, socket, sys
+pods = json.load(open(sys.argv[1]))["pods"]
 ids = {os.environ.get("RUNPOD_POD_ID", ""), socket.gethostname()}
 me = [p["name"].rsplit("-", 1)[-1] for p in pods if p["id"] in ids]
-print(me[0] if me else "a")' 2>/dev/null || echo a
+print(me[0] if me else "a")' "$P2/pods.json" 2>/dev/null || echo a
 }
 
 other_letters() {  # every pod letter in pods.json except this pod's
   local me=$1
-  uv run python -c 'import json, sys; me = sys.argv[1]; print(",".join(sorted(p["name"].rsplit("-", 1)[-1] for p in json.load(open("runs/phase2/pods.json"))["pods"] if p["name"].rsplit("-", 1)[-1] != me)))' "$me" 2>/dev/null || true
+  uv run python -c 'import json, sys; me = sys.argv[1]; print(",".join(sorted(p["name"].rsplit("-", 1)[-1] for p in json.load(open(sys.argv[2]))["pods"] if p["name"].rsplit("-", 1)[-1] != me)))' "$me" "$P2/pods.json" 2>/dev/null || true
 }
 
 stop_pods() {
@@ -174,7 +203,14 @@ stop_pods() {
   uv run python scripts/runpod_pods.py stop --only "$me" 2>&1 | tee -a "$LOG" || log "stopping $me failed"
 }
 
-fail() {  # <label> <seed> <reason>
+fail() {  # <label> <seed> <reason>: ends the chain, or with continue_on_fail records the run and returns 1
+  if [ "$CONTINUE_ON_FAIL" = true ]; then
+    N_FAILED=$((N_FAILED + 1))
+    printf '%s %s s%s %s\n' "$(date -u +%FT%TZ)" "$1" "$2" "$3" >>"$P2/chain.failed"
+    log "run $1 s$2 FAILED: $3 (continue_on_fail: skipped, $N_FAILED failed so far)"
+    stop_gateway
+    return 1
+  fi
   set_status "FAILED $1 s$2 $3"
   END_REASON=failed
   exit 1
@@ -221,29 +257,32 @@ rm -f "$WATCHDOG_MARK"
 WATCHDOG_PID=$!
 disown "$WATCHDOG_PID"
 
-log "chain start: $MATRIX, $N_TOTAL run(s), scenario $SCENARIO, config $CONFIG_DIR, max $MAX_HOURS h, stop-pods=$STOP_PODS"
+log "chain start: $MATRIX, $N_TOTAL run(s), scenario $SCENARIO, config $CONFIG_DIR, max $MAX_HOURS h, stop-pods=$STOP_PODS, report $REPORT_MODE, continue_on_fail=$CONTINUE_ON_FAIL"
 
-while IFS=$'\x1f' read -r kind label seed env_q args_q; do
+while IFS=$'\x1f' read -r kind label seed env_q args_q run_scn; do
   [ "$kind" = RUN ] || continue
   CUR_LABEL=$label; CUR_SEED=$seed
   eval "run_env=($env_q)"
   eval "lg_args=($args_q)"
+  RUN_SCENARIO=${run_scn:-$SCENARIO}
   RUN_ID="${label}-s${seed}-$(date -u +%Y%m%d-%H%M%S)"
-  log "=== run $((N_DONE + 1))/$N_TOTAL: $label seed $seed -> $RUN_ID (loadgen args: ${lg_args[*]:-none})"
+  log "=== run $((N_DONE + N_FAILED + 1))/$N_TOTAL: $label seed $seed -> $RUN_ID (scenario $RUN_SCENARIO; loadgen args: ${lg_args[*]:-none})"
 
   stop_gateway
   start_gateway "$RUN_ID" ${run_env[@]+"${run_env[@]}"}
-  wait_healthz 120 || fail "$label" "$seed" "gateway did not answer /healthz in 120 s"
+  if ! wait_healthz 120; then
+    fail "$label" "$seed" "gateway did not answer /healthz in 120 s" || continue
+  fi
 
   if ! uv run python scripts/preflight.py --gateway "$GATEWAY" --expect-replicas "$EXPECT_REPLICAS" \
       --expect-model "$EXPECT_MODEL" --runs-dir runs \
       ${PREV_RUN_ID:+--not-run-id "$PREV_RUN_ID"} ${EXPECT_CAL:+--expect-calibration "$EXPECT_CAL"} 2>&1 | tee -a "$LOG"; then
-    fail "$label" "$seed" "preflight"
+    fail "$label" "$seed" "preflight" || continue
   fi
 
   set_status "RUNNING $label s$seed $RUN_ID"
   LG_LOG=$P2/logs/$label-s$seed.log
-  uv run slotgw-loadgen --scenario "$SCENARIO" --seed "$seed" --label "$label" --config-dir "$CONFIG_DIR" \
+  uv run slotgw-loadgen --scenario "$RUN_SCENARIO" --seed "$seed" --label "$label" --config-dir "$CONFIG_DIR" \
     --gateway "$GATEWAY" --runs-dir runs ${lg_args[@]+"${lg_args[@]}"} >"$LG_LOG" 2>&1 &
   LG_PID=$!
   rc=0
@@ -251,7 +290,7 @@ while IFS=$'\x1f' read -r kind label seed env_q args_q; do
   LG_PID=""
   if [ "$rc" -ne 0 ]; then
     tail -n 20 "$LG_LOG" >>"$LOG"
-    fail "$label" "$seed" "loadgen exit $rc (see $LG_LOG)"
+    fail "$label" "$seed" "loadgen exit $rc (see $LG_LOG)" || continue
   fi
   tail -n 15 "$LG_LOG" >>"$LOG"
   echo "$RUN_ID" >>"$RUNS"
@@ -261,6 +300,10 @@ while IFS=$'\x1f' read -r kind label seed env_q args_q; do
   build_report
 done <<<"$PLAN"
 
-set_status "DONE $N_DONE"
+if [ "$N_FAILED" -gt 0 ]; then
+  set_status "DONE $N_DONE ok $N_FAILED failed"
+else
+  set_status "DONE $N_DONE"
+fi
 END_REASON=done
 exit 0

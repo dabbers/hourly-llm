@@ -271,14 +271,16 @@ def pod_body(
     global_networking: bool = True,
     start_script: str | None = None,
     bootstrap: bool = False,
+    gpu_count: int = 1,
 ) -> dict[str, Any]:
     """The POST /pods body. With `bootstrap` the vLLM image's entrypoint is replaced by pod-bootstrap.sh;
-    without it the image starts as it is (the template path: RunPod's PyTorch image with sshd built in)."""
+    without it the image starts as it is (the template path: RunPod's PyTorch image with sshd built in).
+    `gpu_count` > 1 is the phase-3 topology: one pod, one engine per GPU, all replicas on localhost."""
     body: dict[str, Any] = {
         "name": name,
         "imageName": image,
         "gpuTypeIds": [gpu],
-        "gpuCount": 1,
+        "gpuCount": gpu_count,
         "cloudType": "SECURE",
         "containerDiskInGb": disk_gb,
         "volumeInGb": volume_gb,
@@ -324,6 +326,7 @@ def cmd_create(
     global_networking: bool = True,
     bootstrap: bool = False,
     dry_run: bool = False,
+    gpu_count: int = 1,
     pods_path: Path,
     out: Callable[[str], None] = print,
 ) -> list[dict[str, Any]]:
@@ -336,7 +339,8 @@ def cmd_create(
     env = {"MODEL": model, "VLLM_MAX_NUM_BATCHED_TOKENS": batched_tokens, **(extra_env or {})}
     bodies = [
         pod_body(f"{name_prefix}-{letter}", gpu=gpu, image=image, disk_gb=disk_gb, volume_gb=volume_gb,
-                 datacenters=datacenters, env=env, global_networking=global_networking, bootstrap=bootstrap)
+                 datacenters=datacenters, env=env, global_networking=global_networking, bootstrap=bootstrap,
+                 gpu_count=gpu_count)
         for letter in free[:count]
     ]
     if dry_run:
@@ -356,6 +360,7 @@ def cmd_create(
             "name": body["name"],
             "id": pod_id,
             "gpu": gpu,
+            "gpu_count": gpu_count,
             "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "cost_per_hr": info.get("costPerHr"),
             "internal_dns": f"{pod_id}.runpod.internal",
@@ -520,6 +525,27 @@ def cmd_ports(rp: RunPod, *, pods_path: Path, ports: str, only: str | None = Non
             f"for the new mappings")
 
 
+def cmd_hosts(rp: RunPod, *, pods_path: Path, out: Callable[[str], None] = print) -> list[dict[str, Any]]:
+    """Read-only: the account balance and, per pod, its state and whether its host has a free GPU
+    (a stopped pod is bound to its host; `start` is refused while gpuAvailable is 0)."""
+    me = rp.graphql("query { myself { clientBalance currentSpendPerHr spendLimit } }").get("myself") or {}
+    out("balance $" + f"{float(me.get('clientBalance') or 0):.2f}" + f", spend ${float(me.get('currentSpendPerHr') or 0):.3f}/h"
+        + (f", limit ${me.get('spendLimit')}" if me.get("spendLimit") is not None else ""))
+    rows: list[dict[str, Any]] = []
+    for pod in load_pods(pods_path):
+        q = ('query { pod(input: {podId: "' + pod["id"] + '"}) { desiredStatus gpuCount '
+             "machine { gpuAvailable gpuTypeId dataCenterId } } }")
+        info = rp.graphql(q).get("pod") or {}
+        machine = info.get("machine") or {}
+        row = {"name": pod["name"], "id": pod["id"], "status": info.get("desiredStatus"), "gpus": info.get("gpuCount"),
+               "host_free_gpus": machine.get("gpuAvailable"), "datacenter": machine.get("dataCenterId")}
+        rows.append(row)
+        free = row["host_free_gpus"]
+        verdict = "start possible" if (free or 0) > 0 else "host has no free GPU: start will be refused"
+        out(f"{row['name']} ({row['id']}): {row['status']}, {row['datacenter']}, host free GPUs {free} -> {verdict}")
+    return rows
+
+
 def cmd_terminate(
     rp: RunPod,
     *,
@@ -546,7 +572,8 @@ def env_file_text(pods: list[dict[str, Any]], gateway: str = GATEWAY_LETTER) -> 
     """REPLICA_<X>_URL / REPLICA_<X>_ID lines for config/phase2/replicas.yaml (${REPLICA_B_URL}), as seen
     from the pod that runs the gateway (`gateway` letter): its own engine on localhost, the others over
     global networking. Pick a gateway pod whose public ip differs from every other pod's: two pods on
-    one physical host cannot reach each other on RunPod (stage B, 2026-11-08)."""
+    one physical host cannot reach each other on RunPod (stage B, 2026-11-08). A pod with gpu_count N
+    (phase 3: one pod, one engine per GPU) contributes N replicas on consecutive letters and ports."""
     by_letter = {pod_letter(p): p for p in pods}
     gateway = gateway.lower()
     if gateway not in by_letter:
@@ -555,12 +582,14 @@ def env_file_text(pods: list[dict[str, Any]], gateway: str = GATEWAY_LETTER) -> 
     shared = {p.get("public_ip") for p in pods if p.get("public_ip") and p is not by_letter[gateway] and p.get("public_ip") == by_letter[gateway].get("public_ip")}
     if shared:
         lines.append(f"# WARNING: another pod shares pod {gateway}'s public ip (same host): it will be unreachable from the gateway")
+    letters = iter(LETTERS)
     for letter in sorted(by_letter):
         pod = by_letter[letter]
-        upper = letter.upper()
-        url = "http://127.0.0.1:8000" if letter == gateway else f"http://{pod['id']}.runpod.internal:8000"
-        lines.append(f"REPLICA_{upper}_URL={url}")
-        lines.append(f"REPLICA_{upper}_ID={pod['id']}")
+        host = "127.0.0.1" if letter == gateway else f"{pod['id']}.runpod.internal"
+        for engine in range(int(pod.get("gpu_count") or 1)):  # one engine per GPU: ports 8000, 8001, ...
+            upper = next(letters).upper()
+            lines.append(f"REPLICA_{upper}_URL=http://{host}:{8000 + engine}")
+            lines.append(f"REPLICA_{upper}_ID={pod['id']}")
     return "\n".join(lines) + "\n"
 
 
@@ -589,6 +618,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--bootstrap", action="store_true",
                    help="experimental: override the image's start command with pod-bootstrap.sh (meant for the vLLM image); "
                         "on 2026-11-07 the container stayed idle, so the default installs vLLM over SSH instead")
+    c.add_argument("--gpu-count", type=int, default=1,
+                   help="GPUs per pod (phase 3: one pod with 3 GPUs, one engine per GPU on localhost)")
     c.add_argument("--disk", type=int, default=30, help="container disk GB (erased on stop)")
     c.add_argument("--volume", type=int, default=20, help="persistent volume GB at /workspace (HF cache)")
     c.add_argument("--datacenter", action="append", default=[], help="dataCenterId, repeatable")
@@ -619,6 +650,8 @@ def build_parser() -> argparse.ArgumentParser:
     pp = sub.add_parser("ports", help='set exposed ports, e.g. "8000/tcp,22/tcp" (GraphQL podEditJob; the pod restarts)')
     pp.add_argument("ports")
     pp.add_argument("--only", default=None)
+
+    sub.add_parser("hosts", help="read-only: balance, and per pod whether its host has a free GPU (can it start?)")
 
     t = sub.add_parser("terminate", help="delete pods and their volumes")
     t.add_argument("--yes", action="store_true")
@@ -652,14 +685,15 @@ def main(
                        disk_gb=args.disk, volume_gb=args.volume, datacenters=args.datacenter,
                        extra_env=parse_env_args(args.env), model=args.model, batched_tokens=args.batched_tokens,
                        global_networking=not args.no_global_networking, bootstrap=args.bootstrap, dry_run=True,
-                       pods_path=pods_path)
+                       gpu_count=args.gpu_count, pods_path=pods_path)
             return 0
         rp = RunPod(load_api_key(env, dotenv), client=client)
         if args.cmd == "create":
             cmd_create(rp, count=args.count, name_prefix=args.name_prefix, gpu=args.gpu, image=args.image,
                        disk_gb=args.disk, volume_gb=args.volume, datacenters=args.datacenter,
                        extra_env=parse_env_args(args.env), model=args.model, batched_tokens=args.batched_tokens,
-                       global_networking=not args.no_global_networking, bootstrap=args.bootstrap, pods_path=pods_path)
+                       global_networking=not args.no_global_networking, bootstrap=args.bootstrap, gpu_count=args.gpu_count,
+                       pods_path=pods_path)
         elif args.cmd == "status":
             cmd_status(rp, pods_path=pods_path, all_pods=args.all, as_json=args.json)
         elif args.cmd == "wait-ready":
@@ -671,6 +705,8 @@ def main(
             cmd_start(rp, pods_path=pods_path, only=args.only, zero_gpu=args.zero_gpu)
         elif args.cmd == "ports":
             cmd_ports(rp, pods_path=pods_path, ports=args.ports, only=args.only)
+        elif args.cmd == "hosts":
+            cmd_hosts(rp, pods_path=pods_path)
         elif args.cmd == "terminate":
             cmd_terminate(rp, pods_path=pods_path, yes=args.yes, only=args.only)
         return 0

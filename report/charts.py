@@ -188,3 +188,74 @@ def line_chart(
     parts.append(_legend(names, W - M_RIGHT, 20))
     parts.append("</svg>")
     return "".join(parts)
+
+
+def scatter_chart(
+    title: str,
+    points: dict[str, tuple[list[float], list[float]]],
+    *,
+    lines: dict[str, tuple[list[float], list[float]]] | None = None,
+    subtitle: str = "",
+    x_label: str = "",
+    y_label: str = "",
+    fmt: Callable[[float], str] = fmt_value,
+    x_fmt: Callable[[float], str] = fmt_value,
+    y_ref: float | None = None,
+    y_ref_label: str = "",
+) -> str:
+    """Scatter of (x, y) points per series, each series optionally with a line in its colour (a
+    fit, or the path through its means), and an optional dashed horizontal reference line. Both
+    axes start at 0 and share one unit per axis; NaN points are skipped, y is clipped to the axis."""
+    lines = lines or {}
+    names = list(dict.fromkeys([*points, *lines]))[:MAX_SERIES]
+
+    def clean(xs: list[float], ys: list[float]) -> list[tuple[float, float]]:
+        out = []
+        for x, y in zip(xs, ys, strict=False):
+            if x is None or y is None or math.isnan(float(x)) or math.isnan(float(y)):
+                continue
+            out.append((float(x), float(y)))
+        return out
+
+    pts = {n: clean(*points[n]) for n in names if n in points}
+    lns = {n: clean(*lines[n]) for n in names if n in lines}
+    everything = [p for v in [*pts.values(), *lns.values()] for p in v]
+    if not everything:
+        return '<p class="muted">no data</p>'
+    xmax = max(p[0] for p in everything)
+    ymax = max([p[1] for p in everything] + ([y_ref] if y_ref is not None else []))
+    ticks = nice_ticks(ymax)
+    top = ticks[-1] or 1.0
+    xticks = nice_ticks(xmax, 6)
+    xtop = xticks[-1] or 1.0
+    plot_h = H - M_TOP - M_BOTTOM
+    plot_w = W - M_LEFT - M_RIGHT
+
+    def y_of(v: float) -> float:
+        return M_TOP + plot_h - (min(max(v, 0.0), top) / top) * plot_h
+
+    def x_of(v: float) -> float:
+        return M_LEFT + (min(max(v, 0.0), xtop) / xtop) * plot_w
+
+    parts = [f'<svg viewBox="0 0 {W} {H}" class="chart" role="img" aria-label="{escape(title)}">']
+    parts += _frame(title, subtitle, y_label, ticks, y_of, fmt)
+    for t in xticks:
+        parts.append(f'<text x="{x_of(t):.1f}" y="{H - M_BOTTOM + 18}" class="tick" text-anchor="middle">{escape(x_fmt(t))}</text>')
+    if x_label:
+        parts.append(f'<text x="{M_LEFT + plot_w / 2:.0f}" y="{H - 10}" class="axis" text-anchor="middle">{escape(x_label)}</text>')
+    if y_ref is not None:
+        y = y_of(y_ref)
+        parts.append(f'<line x1="{M_LEFT}" x2="{W - M_RIGHT}" y1="{y:.1f}" y2="{y:.1f}" class="base" stroke-dasharray="4 3"/>')
+        if y_ref_label:
+            parts.append(f'<text x="{W - M_RIGHT}" y="{y - 4:.1f}" class="sub" text-anchor="end">{escape(y_ref_label)}</text>')
+    for si, name in enumerate(names):
+        if lns.get(name):
+            seq = sorted(lns[name])
+            path = " ".join(f"{x_of(x):.1f},{y_of(y):.1f}" for x, y in seq)
+            parts.append(f'<polyline points="{path}" class="line" style="stroke:var(--s{si + 1})"><title>{escape(name)}</title></polyline>')
+        for x, y in pts.get(name, []):
+            tip = f"{name}: {x_fmt(x)}, {fmt(y)}"
+            parts.append(f'<circle cx="{x_of(x):.1f}" cy="{y_of(y):.1f}" r="4" class="dot" style="fill:var(--s{si + 1})"><title>{escape(tip)}</title></circle>')
+    parts.append(_legend(names, W - M_RIGHT, 20))
+    parts.append("</svg>")
+    return "".join(parts)

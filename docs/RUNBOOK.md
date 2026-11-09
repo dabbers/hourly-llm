@@ -329,6 +329,105 @@ scenario's tenant, shape, slots and `replica`, expect 201 (409 `reservation_capa
 slots do not fit that replica's KV), delete it, stop the gateway. A reservation the gateway refuses
 during a run is logged by the load generator as a warning and the run continues without it.
 
+## C2. Phase 3: the campaign (docs/PHASE3.md)
+
+The campaign is one long chain (49 runs, `config/phase3/matrix-campaign.yaml`, stages D–G and I)
+followed by the engine sweep (stage H, two short chains with vLLM restarts in between). Before any
+paid minute, every new chain feature and gateway setting is rehearsed on three fake replicas from WSL
+(`scripts/rehearsal.sh`; tmux, curl, python3 and uv installed there, the Linux venv outside the repo):
+
+```bash
+bash scripts/rehearsal.sh chain config/phase3/matrix-rehearsal.yaml
+```
+
+```bash
+bash scripts/rehearsal.sh status
+```
+
+The rehearsal matrix runs the two-minute smoke under each new setting, one run with a per-run
+`scenario:` override and one run that fails preflight on purpose, which `continue_on_fail` must skip
+(`chain.failed` gets a line, the status ends `DONE 7 ok 1 failed`); `report_mode: last` writes each
+run's report into `runs/<run id>/report`.
+
+**Bring-up.** A stopped pod is bound to its host and starts only while the host has a free GPU;
+`hosts` says, read-only, which pods can start right now (and the balance):
+
+```bash
+py -3.11 -m uv run python scripts/runpod_pods.py hosts
+```
+
+On 2026-11-09 none of the three phase-2 pods could start, and three fresh one-GPU pods landed on one
+host with no network path between them (no global-networking interface, `*.runpod.internal` did not
+resolve, the public port mappings were not reachable from inside), so the campaign runs on **one pod
+with three GPUs** (`create --gpu-count 3`, $2.67/h, the same price as three pods): `vllm install`
+starts one engine per GPU (engine i on GPU i, port 8000+i, `/workspace/vllm-i.args`, tmux `vllm-i`,
+`/root/vllm-i.log`), `env-file` lists them as replicas A, B and C on localhost, and the gateway, meter,
+load generator and chain run on the same pod. Nothing crosses RunPod's inter-pod network any more.
+Everything else is as in stage B:
+
+```bash
+bash scripts/pod.sh create --count 1 --gpu-count 3 --volume 30 --disk 40 && bash scripts/pod.sh wait-ready --ports-only --timeout 900
+```
+
+```bash
+bash scripts/pod.sh vllm a install
+```
+
+```bash
+bash scripts/pod.sh env-file --gateway a && bash scripts/pod.sh push a && bash scripts/pod.sh setup a && bash scripts/pod.sh key a && bash scripts/pod.sh vllm a status && bash scripts/pod.sh smoke a
+```
+
+`vllm a restart <args>` writes the argument line to every engine (engine i gets `--port 8000+i`) and
+restarts them all; `vllm a status` shows each engine's health, model and args, and `nvidia-smi` per GPU.
+
+**The chain.** 19 hours of watchdog for about 17 hours of runs; the pods stop an hour after the
+chain ends, so a failure can be caught and the stop cancelled (`chain <gw> stop`):
+
+```bash
+bash scripts/pod.sh chain <gw> start config/phase3/matrix-campaign.yaml --max-hours 19 --stop-pods --stop-grace-min 60
+```
+
+Poll every 20 minutes and pull each finished run as it appears, so a lost pod costs at most the run
+in flight (`pull <gw> <run id>` brings `runs/<run id>/` with its own report; `chain <gw> status`
+prints the status line first, then the finished ids):
+
+```bash
+bash scripts/pod.sh chain <gw> status
+```
+
+```bash
+bash scripts/pod.sh pull <gw> <run id>
+```
+
+**Stage H.** After `DONE`, inside the grace hour: cancel the stop, restart every engine with the new
+chunk size (the whole argument line; `vllm <p> status` echoes it), chain `matrix-chunk256.yaml`
+without `--stop-pods`, restart with 2048, chain `matrix-chunk2048.yaml` with `--stop-pods
+--stop-grace-min 30`, pull:
+
+```bash
+bash scripts/pod.sh chain <gw> stop
+```
+
+```bash
+for p in a b c; do bash scripts/pod.sh vllm $p restart --model Qwen/Qwen2.5-7B-Instruct-AWQ --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens 256 --enable-prefix-caching --enable-prompt-tokens-details --port 8000 --host 0.0.0.0; done
+```
+
+```bash
+bash scripts/pod.sh chain <gw> start config/phase3/matrix-chunk256.yaml --max-hours 2
+```
+
+**The campaign report** is built here over every run of phases 2 and 3 (confidence intervals,
+paired tests, sweeps; `config/phase3/campaign.yaml` names the settings and pairs):
+
+```bash
+py -3.11 -m uv run slotgw-campaign $(sed 's#^#runs/#' runs/phase2/chain.runs runs/phase3/chain.runs) --manifest config/phase3/campaign.yaml --out runs/phase3/campaign --config-dir config/phase2
+```
+
+(run directories are named by the gateway run id, `<label>-s<seed>-<timestamp>`; the two `chain.runs`
+files list them)
+
+Teardown as in section D once every run is local (`terminate --yes` deletes the one pod and its volume); then rotate the API key.
+
 ## D. Teardown
 
 `stop` keeps the pod: the container disk is erased, the volume (model cache, 20 GB at

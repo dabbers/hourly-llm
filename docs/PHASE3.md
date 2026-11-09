@@ -1,6 +1,8 @@
 # Phase 3 plan: the confidence campaign (milestone 6)
 
-Status: PLANNED 2026-11-08, waiting for the owner's go. Nothing paid has run for this phase.
+Status: APPROVED 2026-11-08 (the owner: the whole campaign as one approval, pods recreated where
+their hosts have no free GPU). Local work (section 5) built and rehearsed 2026-11-08/09; the spend
+log in section 7 says what has run.
 
 Phase 2 (`PHASE2.md`) answered Q5–Q7 with two or three runs per setting. The owner wants the
 remaining RunPod credit (**$62.35** on 2026-11-08 21:40 UTC, loaded only for this project) spent on
@@ -30,6 +32,8 @@ burst off at seed 3" removes the day's randomness and the tests are on the diffe
 | Credit | $62.35; volumes cost $0.017/h | spend up to ~$52 on the campaign, keep ~$10 for reruns and recovery; the optional phase-2 experiments (fp16, A100) only from what is left at the end, with a separate go |
 | Pod A (`9g5ortg8uish1z`, EUR-IS-2) | stopped; its host has a free GPU | start it |
 | Pods B (`9cz2sqjg40w0vl`, US-NC-1) and C (`59fpze6tlfdp2y`, EUR-IS-2) | stopped; both hosts report no free GPU; their data is pulled, their volumes hold only the vLLM venv | at campaign start, try to start them once; if refused, terminate them and create two fresh 4090 pods (letters b and c are reused, so `config/phase2/replicas.yaml` and the calibration files keep working); a fresh pod needs ~20 min of vLLM install and model download (~$0.30) |
+| Host GPUs over the evening | `runpod_pods.py hosts` (read-only, new): A free at 21:40 UTC, C free at 22:20, none of the three at 22:45 | the hosts' free GPUs come and go within the hour; the bring-up probes once and recreates whatever is refused rather than waiting |
+| **Topology** (decided 2026-11-09 00:40 UTC) | three fresh one-GPU pods created in EUR-IS-2 landed on one host with the same public ip and no network path between them: no global-networking interface, `*.runpod.internal` unresolvable, public port mappings unreachable from inside (phase 2's cluster had worked over global networking) | **one pod with three RTX 4090s** ($2.67/h, the same as three pods): one vLLM engine per GPU on ports 8000–8002, the gateway reaches its replicas on localhost, nothing depends on RunPod's inter-pod network for 20 unattended hours. Differences from phase 2 to keep in mind when pairing seeds 4–6 with 1–3: the three engines share one host's CPUs and PCIe, and the gateway-to-replica path has no WAN latency (in phase 2 two of the three replicas were reached from another continent) |
 | Gateway pod | pods on one host cannot reach each other | the pod with a unique public ip runs the gateway, meter, loadgen and chain (`env-file --gateway <letter>`, chain `--self`) |
 | Chain shape | a stopped pod may not restart for hours (the host rents the GPU out) | **one long chain** (~17 h) with the pods up throughout, then one short chain for the engine sweep; pods are stopped by the chain with a 60-minute grace so a failure can be caught and the stop cancelled; the runs are pulled while the chain runs |
 | Cluster | three 4090 replicas, 32 seats each at 30 tps, 7B AWQ, chunk 512 | unchanged for every run except the engine sweep (section 3, stage H) |
@@ -108,22 +112,33 @@ out-heavy and flash runs so readers see long answers under load.
    rebuilt the phase-2 report over every run after every run; over fifty runs that is minutes each
    time); `continue_on_fail: true` (a failed run is logged in `chain.failed` and the chain moves on
    instead of idling three pods until someone notices; status ends `DONE <ok> ok <k> failed`);
-   `fresh_runs: true` (start `chain.runs` empty for the campaign).
+   `fresh_runs: true` (start `chain.runs` empty for the campaign); `CHAIN_DIR` so a rehearsal keeps
+   its files apart from `runs/phase2`. Built.
 2. `config/phase2/gateway.yaml`: `reservation_spill: ${SLOTGW_RESERVATION_SPILL:-false}` and
-   `pacing.enabled: ${SLOTGW_PACING:-true}`; `scripts/preflight.py` told about the two new settings.
+   `pacing.enabled: ${SLOTGW_PACING:-true}`. Preflight needed no change (it checks replicas, model,
+   calibration, empty queues, tokenizer and disk, none of which these settings touch). Built.
 3. Scenarios: `mixed-4090-load0.5 / 1.5 / 2.yaml` (only `rate_multiplier` differs),
-   `mixed-4090-outheavy.yaml`, `mixed-4090-flash.yaml`, `mixed-4090-resv-p95.yaml`; each validated
-   with `--plan-only` and a short run on the three fake 4090-like replicas, the out-heavy rate chosen
-   so its planned peak occupancy matches the base scenario's.
+   `mixed-4090-outheavy.yaml`, `mixed-4090-flash.yaml`, `mixed-4090-resv-p95.yaml`, generated from
+   the base file by exact substitution. A plan replay (each request = 1 s head start + context /
+   20k tok/s + max_tokens / tps, sessions back to back) sized them: base peak 75 streams mean / 97
+   p95 (chat 42, agent 18, note-taker 3, batch 12); out-heavy at rate 14 gives 74 / 87 with a
+   prompt : output ratio of 1.9 : 1 against the base's 21 : 1 in the same replay; the flash at 2 ×
+   gives 83 / 100 during the surge and 107 mean for the two minutes after it (chat sessions started
+   in the surge keep going), so 2.5 × was dropped as too far past saturation; 2 × load gives 144 /
+   177 against 96 seats, deep saturation by design. A unit test shows the 44 + 7 unpinned
+   reservation slots of `resv-p95` spread over the three replicas (and a pinned 44 is refused). Built.
 4. `config/phase3/matrix-campaign.yaml` (49 runs, section 3 order), `matrix-chunk256.yaml`,
-   `matrix-chunk2048.yaml`, `campaign.yaml` (the label → family/value manifest).
+   `matrix-chunk2048.yaml`, `matrix-rehearsal.yaml`, `campaign.yaml` (the label → family/value
+   manifest). Built.
 5. `report/stats.py`, `report/campaign.py`, the `slotgw-campaign` entry point, tests; run over the
    ten phase-2 runs as the first campaign report (n = 2–3, intervals wide: the pipeline check).
-6. Rehearsal on the fake replicas: every new gateway setting (spill, pacing off, overcommit, prefill
-   cap, abort) through the smoke scenario in one fake chain, so the first paid run is not the first
-   time a knob is read.
-7. `docs/RUNBOOK.md` section for the campaign (bring-up decision rule, the long chain, incremental
-   pulls, the engine sweep, teardown); this file's spend log.
+6. Rehearsal on the fake replicas (`scripts/rehearsal.sh`, from WSL: tmux, curl, python3 and uv there,
+   the Linux venv outside the repo): every new gateway setting (spill, unpinned reservation, pacing
+   off, overcommit, prefill cap, abort) through the two-minute smoke in one chain, plus a per-run
+   scenario override and one run that fails preflight on purpose for `continue_on_fail`.
+7. `docs/RUNBOOK.md` section C2 (rehearsal, the `hosts` probe and the bring-up decision rule, the
+   long chain, incremental pulls, the engine sweep, teardown); `scripts/runpod_pods.py hosts`
+   (read-only: balance and whether each pod's host has a free GPU); this file's spend log. Built.
 
 ## 6. Operations
 
@@ -154,7 +169,9 @@ seeds.
 
 | When (UTC) | What | Pod-hours | Cost |
 |---|---|---|---|
-| 2026-11-08 06:28 → | three stopped pods' volumes | – | $0.017/h |
+| 2026-11-08 06:28 – 11-09 00:20 | three stopped phase-2 pods' volumes until terminated | – | ~$0.30 |
+| 2026-11-09 00:23–00:36 | three fresh one-GPU pods (EUR-IS-2): same host, no network between them; terminated | 3 × 0.22 | ~$0.58 |
+| 2026-11-09 00:39 → | one pod with three 4090s (`qka0zggy47mw7e`): bring-up, campaign | | $2.67/h |
 | | | | |
 
 Balance at plan time: $62.35 of $80 (phase 2 spent $17.61; see PHASE2.md §3).

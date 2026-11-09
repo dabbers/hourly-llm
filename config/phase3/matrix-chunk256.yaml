@@ -1,0 +1,18 @@
+# Phase 3 stage H, first half (docs/PHASE3.md): the burst setting with vLLM's prefill chunk halved to
+# 256 tokens (--max-num-batched-tokens 256). Before this chain every pod's engine is restarted with the
+# new argument line (pod.sh vllm <p> restart ... --max-num-batched-tokens 256) and checked with
+# pod.sh vllm <p> status; the pods stay up afterwards for matrix-chunk2048.yaml:
+#   bash scripts/pod.sh chain <gw> start config/phase3/matrix-chunk256.yaml --max-hours 2
+scenario: config/scenarios/mixed-4090.yaml
+config_dir: config/phase2
+expect_replicas: 3
+expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
+expect_calibration: runpod-4090
+report_out: runs/phase3/report
+report_mode: last
+continue_on_fail: true
+runs:
+  - label: chunk256
+    seeds: [1, 2]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
+    loadgen_args: ["--no-reservations"]

@@ -1,0 +1,49 @@
+# Phase 3 rehearsal of every new chain feature and gateway setting on three fake replicas, before a pod
+# is started (docs/PHASE3.md section 5): the two-minute smoke under each new setting, one seed each, a
+# per-run scenario override, and one run that fails preflight on purpose (one replica instead of three)
+# to show continue_on_fail skipping it. Run from WSL (tmux and uv installed there) with the fakes up:
+#   CHAIN_DIR=runs/rehearsal bash scripts/runchain.sh config/phase3/matrix-rehearsal.yaml --max-hours 1
+# runs/rehearsal/phase2.env points REPLICA_*_URL at the three local fakes and sets REPLICA_CURVE.
+scenario: config/scenarios/smoke-4090.yaml
+config_dir: config/phase2
+expect_replicas: 3
+expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
+expect_calibration: runpod-4090
+report_out: runs/rehearsal/report
+report_mode: last
+continue_on_fail: true
+fresh_runs: true
+runs:
+  - label: resv-spill                    # the smoke's pinned chat reservation + reservation_spill on
+    seeds: [1]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, REPLICA_A_EXCLUDE: small.8k.60tps, SLOTGW_RESERVATION_SPILL: "true"}
+    loadgen_args: ["--reservation-replica", "runpod-4090-a"]
+  - label: resv-unpinned                 # reservation with no placement rule (the resv-p95 mechanism)
+    seeds: [1]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
+    loadgen_args: ["--reservation-replica", "none"]
+  - label: broken                        # fails preflight on purpose: one replica, three expected -> skipped
+    seeds: [1]
+    env: {SLOTGW_BURST: "true", SLOTGW_REPLICA_IDS: runpod-4090-a}
+    loadgen_args: ["--no-reservations"]
+  - label: abort
+    seeds: [1]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: abort}
+    loadgen_args: ["--no-reservations"]
+  - label: nopace
+    seeds: [1]
+    env: {SLOTGW_PACING: "false", SLOTGW_BURST: "false"}
+    loadgen_args: ["--no-reservations"]
+  - label: oc1.5
+    seeds: [1]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_TPS_OVERCOMMIT: "1.5"}
+    loadgen_args: ["--no-reservations"]
+  - label: prefillcap
+    seeds: [1]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_MAX_PREFILL_TOKENS: "4096"}
+    loadgen_args: ["--no-reservations"]
+  - label: outheavy-burst                # per-run scenario override
+    scenario: config/scenarios/smoke-4090-outheavy.yaml
+    seeds: [1]
+    env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace}
+    loadgen_args: ["--no-reservations"]

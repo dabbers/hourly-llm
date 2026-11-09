@@ -1,0 +1,42 @@
+# Phase 3 output-heavy mix (docs/PHASE3.md stage I): mixed-4090.yaml with short prompts, long answers
+# and fewer turns per session: prompt : output about 2 : 1 with the resent conversation history counted
+# (the base workload is 15 : 1 measured, 21 : 1 in the same plan replay). rate_multiplier 14 makes the
+# planned peak occupancy match the base scenario's (74 vs 75 streams mean in the replay; long answers
+# hold a seat several times longer). Tests whether the floor finding is a property of prompt-heavy
+# traffic. Reservation slots are kept from the base file; the runs use --no-reservations.
+name: mixed-4090-outheavy
+hour_length_s: 600
+drain_s: 90
+sample_interval_s: 2
+rate_multiplier: 14
+phases:
+  - {name: quiet, duration_s: 180, rate_scale: 0.25}
+  - {name: ramp, duration_s: 120, rate_scale: 0.6}
+  - {name: peak, duration_s: 480, rate_scale: 1.0}
+  - {name: quiet2, duration_s: 300, rate_scale: 0.25}
+tenants:
+  - name: chat
+    api_key: sk-local-chat
+    shape: small.8k.30tps
+    profile: {kind: chat, turns: [1, 3], first_user_tokens: [60, 200], user_tokens_per_turn: [40, 150], output_tokens: [300, 800], think_s: [5, 30]}
+    arrivals: {kind: diurnal, rate_per_min: 4.5}
+    reservation: {slots: 24, replica: runpod-4090-a}   # sized after the burstoff runs: chat's p95 occupancy is 39-46 streams, more than one replica holds; 24 + notetaker's 4x16k fill replica A's 32 seats (262k of 274.6k KV), the rest runs on demand
+    showcase: {prompts: config/prompts/chat.yaml, every_s: 180, offset_s: 30}
+  - name: agent
+    api_key: sk-local-agent
+    shape: small.8k.60tps
+    profile: {kind: agent, steps: [2, 5], first_user_tokens: [300, 800], growth_tokens: [100, 300], output_tokens: [300, 800], pause_s: [1, 5]}
+    arrivals: {kind: bursty, rate_on_per_min: 3, rate_off_per_min: 0.5, mean_on_s: 120, mean_off_s: 180}
+    showcase: {prompts: config/prompts/agent.yaml, every_s: 240, offset_s: 60}
+  - name: notetaker
+    api_key: sk-local-notetaker
+    shape: small.16k.30tps
+    profile: {kind: notetaker, prompt_tokens: [800, 2000], output_tokens: [400, 1000]}
+    arrivals: {kind: hourmark, per_mark: 8, sigma_s: 120, background_per_min: 0.5}
+    reservation: {slots: 4, replica: runpod-4090-a}    # burstoff p95 occupancy 4-7; 4 is what fits replica A beside chat's 24
+    showcase: {prompts: config/prompts/notetaker.yaml, every_s: 300, offset_s: 90}
+  - name: batch
+    api_key: sk-local-batch
+    shape: small.8k.15tps.lazy
+    profile: {kind: batch, prompt_tokens: [200, 800], output_tokens: [400, 1000], concurrency: 12}
+    showcase: {prompts: config/prompts/batch.yaml, every_s: 240, offset_s: 120}

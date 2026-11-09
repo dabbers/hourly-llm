@@ -376,3 +376,32 @@ def test_replica_ids_env_selects_a_subset_of_the_configured_replicas(monkeypatch
     monkeypatch.setenv("SLOTGW_REPLICA_IDS", "nope")
     with pytest.raises(ValueError, match="unknown replicas"):
         load_config(REPO / "config" / "phase2")
+
+
+def test_unpinned_reservation_larger_than_one_replica_spreads_over_the_cluster():
+    """Phase 3 resv-p95: 44 chat slots do not fit one 32-seat replica; with no placement rule the
+    scheduler spreads the holds over the replicas (all or nothing), a pinned 44 is refused."""
+    from dataclasses import dataclass
+
+    from slotgw.admission import ReplicaLedger, ReservationCapacity, Scheduler
+    from slotgw.calibration import ThroughputProfile
+    from slotgw.config import Shape
+
+    @dataclass
+    class Dummy:
+        id: str
+        model_alias: str = "small"
+
+    s30 = Shape(name="small.8k.30tps", model="small", max_context=8192, tps=30, max_queue_s=1)
+    s16k = Shape(name="small.16k.30tps", model="small", max_context=16384, tps=30, max_queue_s=1)
+    prof = ThroughputProfile.from_curve_string("1:154,2:144,4:136,8:113,16:82,24:64,32:54")  # the 4090 curve
+    ledgers = [ReplicaLedger(Dummy(x), prof, 271_152, 64, AdmissionSettings()) for x in "abc"]
+    sched = Scheduler(ledgers, AdmissionSettings())
+    chat = sched.reserve("chat", s30, 44)
+    note = sched.reserve("notetaker", s16k, 7)
+    per_replica = {ledg.id: ledg.reserved_slots for ledg in ledgers}
+    assert sum(per_replica.values()) == 51 and len(chat.slots) == 44 and len(note.slots) == 7
+    assert all(n <= 33 for n in per_replica.values()) and len({h.ledger.id for h in chat.slots}) >= 2
+    with pytest.raises(ReservationCapacity):
+        sched.reserve("chat", s30, 44, replica_id="a")
+    assert sum(ledg.reserved_slots for ledg in ledgers) == 51  # the refused reservation left nothing behind

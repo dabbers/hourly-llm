@@ -34,6 +34,7 @@ class FakeApi:
         self.pods: dict[str, dict] = {}
         self.gets: dict[str, int] = {}
         self.ready_after = ready_after
+        self.host_free_gpus: dict[str, int] = {}  # pod id -> free GPUs on its host (hosts query)
         self.counter = 0
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -70,8 +71,15 @@ class FakeApi:
     def _graphql(self, query: str) -> httpx.Response:
         import re
 
+        if "myself" in query:
+            return httpx.Response(200, json={"data": {"myself": {"clientBalance": 62.33, "currentSpendPerHr": 0.017, "spendLimit": 80}}})
         pod_id = re.search(r'podId: "(\w+)"', query).group(1)
         pod = self.pods[pod_id]
+        if "machine {" in query:
+            free = self.host_free_gpus.get(pod_id, 1)
+            return httpx.Response(200, json={"data": {"pod": {"desiredStatus": pod["desiredStatus"], "gpuCount": pod.get("gpuCount", 1),
+                                                            "machine": {"gpuAvailable": free, "gpuTypeId": "NVIDIA GeForce RTX 4090",
+                                                                        "dataCenterId": "EUR-IS-2"}}}})
         if "podResumeZeroGpu" in query:
             pod["desiredStatus"] = "RUNNING"
             pod["gpuCount"] = 0
@@ -351,3 +359,33 @@ def test_graphql_errors_are_redacted(phase2):
     with pytest.raises(rpods.RunPodError) as e:
         rp.resume_zero_gpu("pod1")
     assert KEY not in str(e.value) and "not enough free GPUs" in str(e.value)
+
+
+def test_hosts_is_a_read_only_probe_of_balance_and_free_host_gpus(phase2, capsys):
+    """Phase 3 bring-up: `hosts` says which stopped pods can start (their host has a free GPU) and the
+    balance, without changing anything (GraphQL queries only)."""
+    api = FakeApi()
+    rpods.main(["create", "--count", "2"], client=api.client(), env=_env_with_key())
+    rpods.main(["stop"], client=api.client(), env=_env_with_key())
+    api.host_free_gpus = {"pod1": 0, "pod2": 2}
+    api.requests.clear()
+    capsys.readouterr()
+    assert rpods.main(["hosts"], client=api.client(), env=_env_with_key()) == 0
+    assert {p for _, p, _ in api.requests} == {"/graphql"} and len(api.requests) == 3
+    assert all(b["query"].lstrip().startswith("query") for _, _, b in api.requests)
+    out = capsys.readouterr().out
+    assert "balance $62.33" in out
+    assert "slotgw-a (pod1): EXITED" in out and "host free GPUs 0 -> host has no free GPU" in out
+    assert "slotgw-b (pod2): EXITED" in out and "host free GPUs 2 -> start possible" in out
+
+
+def test_env_file_lists_one_replica_per_gpu_of_a_multi_gpu_pod():
+    """Phase 3 topology: one pod with three GPUs runs three engines on localhost ports 8000-8002; the
+    env file names them REPLICA_A/B/C as config/phase2/replicas.yaml expects."""
+    text = rpods.env_file_text([{"name": "slotgw-a", "id": "p1", "gpu_count": 3, "public_ip": "1.2.3.4"}], "a")
+    assert "REPLICA_A_URL=http://127.0.0.1:8000" in text
+    assert "REPLICA_B_URL=http://127.0.0.1:8001" in text
+    assert "REPLICA_C_URL=http://127.0.0.1:8002" in text
+    assert text.count("_ID=p1") == 3 and "REPLICA_D_" not in text
+    one_each = rpods.env_file_text([{"name": "slotgw-a", "id": "p1"}, {"name": "slotgw-b", "id": "p2"}], "b")
+    assert "REPLICA_A_URL=http://p1.runpod.internal:8000" in one_each and "REPLICA_B_URL=http://127.0.0.1:8000" in one_each

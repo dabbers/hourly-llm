@@ -7,7 +7,7 @@
 #   pod.sh push <pod>                    copy the repo tree to /workspace/slotgw (tar over ssh)
 #   pod.sh pull <pod> [run_id]           fetch runs/<run_id> (default: all of runs/) into local runs/
 #   pod.sh setup <pod>                   install uv, `uv sync --frozen`, check `uv run slotgw --help`
-#   pod.sh vllm <pod> status|log|restart [vllm args...]
+#   pod.sh vllm <pod> status|log|restart [vllm args...]   one engine per GPU of the pod (pods.json gpu_count)
 #   pod.sh gateway <pod> start [KEY=VALUE...]|stop|log
 #   pod.sh calibrate <pod> [calibrate.py args...]
 #   pod.sh smoke <pod> [scenario]        smoke-4090.yaml (or smoke.yaml) through the pod's gateway; exit code + last 20 lines
@@ -95,40 +95,75 @@ uv run slotgw --help >/dev/null && echo "setup ok: uv $(uv --version | cut -d' '
 EOF
 }
 
+engines() {  # GPUs of pod $1 in pods.json (gpu_count, default 1): the pod runs one engine per GPU
+  (cd "$REPO" && "${UV[@]}" run python - "$PODS" "$1" <<'PY'
+import json, sys
+for p in json.load(open(sys.argv[1], encoding="utf-8"))["pods"]:
+    if p["name"].rsplit("-", 1)[-1].lower() == sys.argv[2].lower():
+        print(int(p.get("gpu_count") or 1)); break
+else:
+    print(1)
+PY
+  ) | tr -d '\r'
+}
+
 cmd_vllm() {
+  # Engine i of a pod runs on GPU i (CUDA_VISIBLE_DEVICES), listens on 8000+i, reads /workspace/vllm-i.args,
+  # lives in tmux session vllm-i and logs to /root/vllm-i.log. A one-GPU pod is the i=0 case.
   local pod=$1 action=${2:-status}
   shift; if [ $# -gt 0 ]; then shift; fi
+  local n; n=$(engines "$pod")
   case "$action" in
     status)
-      rssh "$pod" "curl -s -m 5 localhost:8000/health && echo ' <- /health'; curl -s -m 5 localhost:8000/v1/models; echo; tmux ls 2>/dev/null || echo 'no tmux sessions'; nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null || true" ;;
-    log) rssh "$pod" "grep -v 'it/s\]' /root/vllm.log | tail -n ${LINES:-60}" ;;
+      rssh "$pod" "ENGINES=$n bash -s" <<'EOF'
+for i in $(seq 0 $((ENGINES - 1))); do
+  port=$((8000 + i))
+  if curl -sf -m 5 "localhost:$port/health" >/dev/null; then printf 'engine %s :%s healthy  ' "$i" "$port"; else printf 'engine %s :%s NO HEALTH  ' "$i" "$port"; fi
+  curl -s -m 5 "localhost:$port/v1/models" | head -c 160; echo
+  [ -f "/workspace/vllm-$i.args" ] && echo "  args: $(cat "/workspace/vllm-$i.args")"
+done
+tmux ls 2>/dev/null || echo 'no tmux sessions'
+nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null || true
+EOF
+      ;;
+    log) rssh "$pod" "for f in /root/vllm-*.log; do echo \"=== \$f\"; grep -v 'it/s]' \"\$f\" | tail -n ${LINES:-60}; done" ;;
     restart)
-      if [ $# -gt 0 ]; then
-        printf '%s\n' "$*" | rssh "$pod" "cat > /workspace/vllm.args && echo 'wrote /workspace/vllm.args'"
-      fi
-      rssh "$pod" bash -s <<'EOF'
-tmux kill-session -t vllm 2>/dev/null || true
+      # [args...]: the whole argument line, written for engine 0; engine i gets --port 8000+i
+      local args_q=""
+      if [ $# -gt 0 ]; then args_q=$(printf '%q' "$*"); fi
+      rssh "$pod" "ENGINES=$n ARGS=$args_q bash -s" <<'EOF'
+if [ -n "$ARGS" ]; then
+  for i in $(seq 0 $((ENGINES - 1))); do
+    echo "$ARGS" | sed "s/--port 8000/--port $((8000 + i))/" > "/workspace/vllm-$i.args"
+    echo "wrote /workspace/vllm-$i.args: $(cat "/workspace/vllm-$i.args")"
+  done
+fi
+for i in $(seq 0 $((ENGINES - 1))); do tmux kill-session -t "vllm-$i" 2>/dev/null || true; done
 pkill -f vllm.entrypoints 2>/dev/null || true
 sleep 3
-tmux new-session -d -s vllm /workspace/run-vllm.sh
-echo "vllm started: $(cat /workspace/vllm.args)"
+for i in $(seq 0 $((ENGINES - 1))); do
+  tmux new-session -d -s "vllm-$i" "/workspace/run-vllm.sh $i"
+  echo "engine $i started: $(cat "/workspace/vllm-$i.args")"
+done
 for _ in $(seq 1 180); do
-  if curl -sf -m 3 localhost:8000/health >/dev/null; then echo "vllm healthy"; exit 0; fi
+  ok=0
+  for i in $(seq 0 $((ENGINES - 1))); do curl -sf -m 3 "localhost:$((8000 + i))/health" >/dev/null && ok=$((ok + 1)); done
+  if [ "$ok" -eq "$ENGINES" ]; then echo "all $ENGINES engine(s) healthy"; exit 0; fi
   sleep 5
 done
-echo "vllm did not become healthy in 15 min; see /root/vllm.log" >&2
+echo "not every engine became healthy in 15 min; see /root/vllm-*.log" >&2
 exit 1
 EOF
       ;;
     install)
       # The template path (RUNBOOK stage A): the pod runs RunPod's own PyTorch image, which already
-      # has sshd, so vLLM is installed here into a venv on the persistent volume and run in tmux
-      # exactly as pod-bootstrap.sh would. Idempotent: a second call only restarts the engine.
+      # has sshd, so vLLM is installed here into a venv on the persistent volume and run in tmux, one
+      # engine per GPU. Idempotent: a second call only restarts the engines.
       local version=${VLLM_VERSION:-0.32.0} model=${MODEL:-Qwen/Qwen2.5-7B-Instruct-AWQ} chunk=${VLLM_MAX_NUM_BATCHED_TOKENS:-512}
-      rssh "$pod" "VLLM_VERSION='$version' MODEL='$model' CHUNK='$chunk' bash -s" <<'EOF'
+      rssh "$pod" "VLLM_VERSION='$version' MODEL='$model' CHUNK='$chunk' ENGINES=$n bash -s" <<'EOF'
 set -u
-# Layout learned in stage A: the venv lives on the 20 GB volume (18 GB, persists across restarts); the
-# model cache and the log live on the container disk (/root), because the volume ran out of space with
+# Layout learned in stage A: the venv lives on the volume (18 GB, persists across restarts); the model
+# cache and the logs live on the container disk (/root), because a 20 GB volume ran out of space with
 # the 5.3 GB cache on it and the engine died writing. The model re-downloads in about a minute after a
 # restart. VLLM_USE_FLASHINFER_SAMPLER=0: the image has no ninja/nvcc and vLLM 0.32 would JIT-build
 # FlashInfer sampling kernels at start-up and die; attention stays on FlashAttention.
@@ -141,34 +176,48 @@ if ! /workspace/venv/bin/python -c "import vllm" 2>/dev/null; then
   /workspace/venv/bin/pip install -q --upgrade pip >/dev/null
   /workspace/venv/bin/pip install -q "vllm==$VLLM_VERSION" 2>&1 | tail -3
 fi
-/workspace/venv/bin/python -c "import vllm, torch; print('vllm', vllm.__version__, 'torch', torch.__version__, 'cuda', torch.cuda.is_available())"
-if [ ! -f /workspace/vllm.args ]; then
-  echo "--model $MODEL --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens $CHUNK --enable-prefix-caching --enable-prompt-tokens-details --port 8000 --host 0.0.0.0" > /workspace/vllm.args
-  echo "wrote /workspace/vllm.args"
-fi
+/workspace/venv/bin/python -c "import vllm, torch; print('vllm', vllm.__version__, 'torch', torch.__version__, 'cuda', torch.cuda.is_available(), 'gpus', torch.cuda.device_count())"
+for i in $(seq 0 $((ENGINES - 1))); do
+  if [ ! -f "/workspace/vllm-$i.args" ]; then
+    echo "--model $MODEL --dtype half --max-model-len 16384 --max-num-seqs 64 --gpu-memory-utilization 0.90 --scheduling-policy priority --max-num-batched-tokens $CHUNK --enable-prefix-caching --enable-prompt-tokens-details --port $((8000 + i)) --host 0.0.0.0" > "/workspace/vllm-$i.args"
+    echo "wrote /workspace/vllm-$i.args"
+  fi
+done
 cat > /workspace/run-vllm.sh <<'RUN'
 #!/usr/bin/env bash
-# model cache and log on the container disk; FlashInfer sampler off (see pod.sh vllm install)
-export HF_HOME=/root/hf VLLM_USE_FLASHINFER_SAMPLER=0
+# run-vllm.sh <engine index>: engine i on GPU i, port 8000+i, /workspace/vllm-i.args, /root/vllm-i.log
+i=${1:-0}
+export HF_HOME=/root/hf VLLM_USE_FLASHINFER_SAMPLER=0 CUDA_VISIBLE_DEVICES=$i
 mkdir -p /root/hf
 cd /root || exit 1
-# shellcheck disable=SC2046  # vllm.args is a whitespace-separated argv on purpose
-exec /workspace/venv/bin/python -m vllm.entrypoints.openai.api_server $(cat /workspace/vllm.args) >>/root/vllm.log 2>&1
+# shellcheck disable=SC2046  # the args file is a whitespace-separated argv on purpose
+exec /workspace/venv/bin/python -m vllm.entrypoints.openai.api_server $(cat "/workspace/vllm-$i.args") >>"/root/vllm-$i.log" 2>&1
 RUN
 chmod +x /workspace/run-vllm.sh
 grep -q 'HF_HOME=' /root/.bashrc 2>/dev/null || echo 'export HF_HOME=/root/hf' >>/root/.bashrc
 df -h /workspace / | tail -2
-tmux kill-session -t vllm 2>/dev/null || true
+for i in $(seq 0 $((ENGINES - 1))); do tmux kill-session -t "vllm-$i" 2>/dev/null || true; done
 pkill -f vllm.entrypoints 2>/dev/null || true
 sleep 2
-tmux new-session -d -s vllm /workspace/run-vllm.sh
-echo "vllm started: $(cat /workspace/vllm.args)"
+# engine 0 first: it downloads the model once; the others start when the cache is complete
+tmux new-session -d -s vllm-0 "/workspace/run-vllm.sh 0"
+echo "engine 0 started: $(cat /workspace/vllm-0.args)"
 for _ in $(seq 1 240); do
-  if curl -sf -m 3 localhost:8000/health >/dev/null; then echo "vllm healthy"; curl -s localhost:8000/v1/models | head -c 300; echo; exit 0; fi
+  if curl -sf -m 3 localhost:8000/health >/dev/null; then echo "engine 0 healthy"; break; fi
   sleep 5
 done
-echo "vllm did not become healthy in 20 min; see /root/vllm.log" >&2
-grep -v "it/s\]" /root/vllm.log | tail -20 >&2
+curl -sf -m 3 localhost:8000/health >/dev/null || { echo "engine 0 did not become healthy in 20 min; see /root/vllm-0.log" >&2; grep -v "it/s]" /root/vllm-0.log | tail -20 >&2; exit 1; }
+for i in $(seq 1 $((ENGINES - 1))); do
+  tmux new-session -d -s "vllm-$i" "/workspace/run-vllm.sh $i"
+  echo "engine $i started: $(cat "/workspace/vllm-$i.args")"
+done
+for _ in $(seq 1 120); do
+  ok=0
+  for i in $(seq 0 $((ENGINES - 1))); do curl -sf -m 3 "localhost:$((8000 + i))/health" >/dev/null && ok=$((ok + 1)); done
+  if [ "$ok" -eq "$ENGINES" ]; then echo "all $ENGINES engine(s) healthy"; curl -s localhost:8000/v1/models | head -c 300; echo; exit 0; fi
+  sleep 5
+done
+echo "not every engine became healthy in 10 min after engine 0; see /root/vllm-*.log" >&2
 exit 1
 EOF
       ;;
