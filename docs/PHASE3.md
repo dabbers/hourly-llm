@@ -350,7 +350,13 @@ requests, 0 errors, 0 preemptions); the chunk-2048 restart's first attempt came 
 engine 1 at 270,896 KV tokens against 285,584 on engines 0 and 2 (spread 5.1 %), the KV check failed, and the
 second attempt gave 285,584 on all three at 23:14:28 (17,849 blocks; 3,472 tokens below chunk 512's 289,056,
 the larger chunk's larger activation peak); `matrix-chunk2048.yaml` started at 23:14:28. Fourth occurrence, first
-engine started every time, retry 20 min (≈ $0.90). Operator note: `pod.sh chain <gw> status` shows the driver's WAITING
+engine started every time, retry 20 min (≈ $0.90). **Second outcome (00:14 UTC on 2026-11-10): confirmed too.**
+The chunk-2048 chain ended `DONE 2` at 23:52:16 (15,296 requests, 0 errors, 0 preemptions); the chunk-512 restore's
+first attempt (23:52–00:14, three engines started one after another) gave 289,056 KV tokens on all three against
+the expected 289,056, as predicted for a warm compile cache; `matrix-stage-j.yaml` started at 00:14:30 with
+`--stop-pods --stop-grace-min 20`, run 1/4 `resv-p95-spill s3` PREFLIGHT OK with the KV checks; the driver wrote
+HANDED-OVER and exited. Two predictions written before the events, two confirmed: the cold first start comes up
+short, the warm one does not. Operator note: `pod.sh chain <gw> status` shows the driver's WAITING
 line until the new chain starts, because `stageh.status` is rewritten only at WAITING, RUNNING (after the chain
 start), HANDED-OVER, ABORTED and FAILED; the restart's progress is in `runs/phase2/stageh.log`.
 
@@ -380,6 +386,7 @@ start), HANDED-OVER, ABORTED and FAILED; the restart's progress is in `runs/phas
 | 2026-11-09 18:31 | owner: "Ship it, with a few adjustments" (section 9): stage J (`matrix-stage-j.yaml`, resv-p95-spill + resv-p95 seeds 3–4, ≈ $4) chained after stage H as the driver's third step with chunk 512 restored and the KV budgets checked from `/metrics` and again by the matrix preflight (`expect_kv_total` 289,056, `continue_on_fail` off); driver re-armed 18:30:46 (sweep 13/22 done, run 14 prefillcap s2 running). Forecast: sweep DONE ≈ 21:25, stage H ≈ 23:05, stage J DONE ≈ 00:40, pod self-stop ≈ 01:00 UTC on 2026-11-10 with ≈ $11 left; then write-up, terminate, rotate | | |
 | 2026-11-09 21:56 | balance $19.81. **Sweep DONE 22** at 21:17:43, 0 request errors in every run (58 phase-3 runs, 405,606 requests); the driver cancelled the pod stop at 21:17:57. Chunk-256 restart: attempt 1 failed the KV check (engine 1 271,216 vs 289,680 KV tokens), attempt 2 uniform at 289,680; `matrix-chunk256.yaml` started 21:55:51. Forecast: chunk 256 DONE ≈ 23:15, chunk 2048 DONE ≈ 00:55, stage J DONE ≈ 02:35, pod self-stop ≈ 02:55 UTC on 2026-11-10 with ≈ $6 left (each further failed restart attempt ≈ $0.85) | ≈ $0.85 lost | |
 | 2026-11-09 23:19 | balance $16.01. **Chunk 256 DONE 2** at 22:33 (two seeds, 0 errors; the chunk matrices are two runs each, so the 21:56 forecast was 40 min too long per chunk). Chunk-2048 restart: attempt 1 failed the KV check as predicted (engine 1 270,896 vs 285,584), attempt 2 uniform at 285,584; `matrix-chunk2048.yaml` started 23:14:28. Forecast: chunk 2048 DONE ≈ 23:53, chunk-512 restore (warm cache, one attempt) ≈ 00:14, stage J (4 runs) DONE ≈ 01:30, pod self-stop ≈ 01:50 UTC on 2026-11-10 with ≈ $9 left. First read of chunk 256 against `burst` (seeds 1–2): floor misses 44 → 53 %, start p95 6.7 → 15.8 s, output per GPU-hour −8 %, margin −3 points: the smaller chunk makes the floor worse, the opposite of the hypothesis (section 9 C's premise) | ≈ $0.90 lost | |
+| 2026-11-10 00:16 | balance $13.56. **Chunk 2048 DONE 2** at 23:52 (0 errors). Chunk-512 restore passed the KV check first time (289,056 × 3, warm cache, as predicted); **stage J started 00:14:30** (4 runs, pod stop 20 min after its DONE); the stage-H driver handed over and exited. First read of chunk 2048 against `burst` (seeds 1–2): floor misses 44 → 35 % (p 0.05), delivered tps +12–18 %, output per GPU-hour +4 %, margin +1.4 points, TTFT p95 +22–43 %, start bound unchanged: the larger chunk helps the floor and costs the first token, the mirror of 256; neither replaces the prefill cap. Forecast: stage J DONE ≈ 01:31, pod self-stop ≈ 01:51 UTC with ≈ $9 left; then the final report, the write-up pass, terminate, rotate | | |
 | | | | |
 
 Balance at plan time: $62.35 of $80 (phase 2 spent $17.61; see PHASE2.md §3).
