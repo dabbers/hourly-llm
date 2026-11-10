@@ -184,3 +184,9 @@ short at every cold first engine start, so capacity sold by KV needs a post-star
 report is in `docs/reports/phase3-campaign/`. Next, in order: a start-bound contract with its credit, the
 prefill-aware seat curve, reservation backfill (criteria written, not built), a burst cap for open-loop
 tenants (`docs/DESIGN.md` sections 11–13).
+
+## License
+
+MIT, see `LICENSE`. The served models are third-party: `Qwen/Qwen2.5-7B-Instruct-AWQ` (Apache-2.0) in phases 2
+and 3, `Qwen/Qwen2.5-3B-Instruct-AWQ` (Qwen Research licence) in phase 1; the price snapshot in
+`config/price_references.yaml` is OpenRouter listing data from 2026-11-06.
