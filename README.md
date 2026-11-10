@@ -170,5 +170,17 @@ the M4 lockouts were artifacts of the 8-seat card; the floor problem is not (pro
 keeps the engine prefilling, and 60 tps is missed on 59–83% of requests); bursting adds 32% output
 per GPU-hour for twice the floor violations; a reservation below its tenant's peak is a cap; at the
 7B basket with cache-read pricing the cluster earns 1.6–2.1× its cost. What the output looked like
-is in `docs/SAMPLES.md`. Next, in order: run `reservation_spill`, a prefill-aware seat curve, a
-lending reserve (`docs/DESIGN.md` sections 11–13).
+is in `docs/SAMPLES.md`. Phase 3 (milestone 6, the confidence campaign) ran 2026-11-09 → 11-10 on one RunPod pod with three
+RTX 4090s: 68 runs over 24 settings chained unattended with a KV preflight per run, 0 request errors in
+every kept run, $85.80 of the $150 cap spent over both phases (`docs/PHASE3.md`). Findings (RESULTS.md
+Q8–Q13): a reservation sized at the tenant's p95 with spill makes its bill move 1.4% across seeds against
+9% per token, paid for by the on-demand tenants' waiting (start p95 2× the baseline's) and the provider's
+idle seats, which a reservation price of about 3× the shape rate returns to the provider and no price
+returns to the tenants; the cluster saturates at 65% utilisation from 1.5× load, where the 30 s queue
+contract is met while chat waits 17–30 s to start, so the start bound is the contract to sell, with an
+SLA credit the frontier prices at 4–8 points of margin; the prefill cap fixes the 30 tps floors and the
+engine's chunk size only trades first-token latency for decode steadiness; vLLM's KV budget came out 5–6%
+short at every cold first engine start, so capacity sold by KV needs a post-start gate. The campaign
+report is in `docs/reports/phase3-campaign/`. Next, in order: a start-bound contract with its credit, the
+prefill-aware seat curve, reservation backfill (criteria written, not built), a burst cap for open-loop
+tenants (`docs/DESIGN.md` sections 11–13).

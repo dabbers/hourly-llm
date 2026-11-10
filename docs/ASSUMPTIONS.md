@@ -661,6 +661,170 @@ the runs were pulled from a CPU-only start (`podResumeZeroGpu`, which came back 
 port until `podEditJob` re-added 22/tcp; RUNBOOK section E). Spend for the phase: $17.61 of the
 $80 loaded (PHASE2.md section 3), the stopped pods' volumes $0.017 per hour until terminated.
 
+## Phase 3 measurements: the confidence campaign (2026-11-08 → 2026-11-10)
+
+One RunPod pod (EU-RO-1, three RTX 4090 on one host, $2.68 per hour = $0.893 per GPU-hour; the gateway on
+the same pod), Qwen2.5-7B-Instruct-AWQ on each GPU with the phase-2 engine arguments (calibration
+`runpod-4090`: 32 seats per replica at 30 tps, KV-bound; `--gpu-memory-utilization 0.90`, prefill chunk 512
+unless the setting says otherwise), `mixed-4090.yaml` at the phase-2 rate multiplier of 11 unless the setting
+says otherwise, 18 minutes of timeline plus a 90 s drain, about 1,110 s per run. 68 runs over 24 settings (59 kept in the report; the rest below)
+in seven chains (`config/phase3/matrix-*.yaml`, one fresh gateway and one preflight per run, every chain
+unattended on the pod and pulled from this machine as it went), $85.80 of the $150 cap spent in total over
+phases 2 and 3. Report: `runs/phase3/campaign/` (`campaign.html`; `settings.csv`, `tenants.csv`,
+`paired.csv`, `predictability.csv`, `sweep.csv`, `margin_curve.csv`, `reserved_bills.csv`,
+`reservations.csv`, `capacity.csv`, `scorecard.csv`, `frontier.csv`, `runs.csv`), built from the manifest
+`config/phase3/campaign.yaml` (what each label is, which pairs are compared on common seeds, which labels form
+a sweep); a copy for readers is in `docs/reports/phase3-campaign/` (the page and the CSVs, built 2026-11-10 01:45 UTC over every kept run). The plan, the analysis rules and the
+operations log are `docs/PHASE3.md`.
+
+Seeds: 1–3 of `burstoff`, `burst`, 1–2 of `resv-split`, `resv-shared` are the phase-2 runs (three separate
+pods, 2026-11-08); seeds 4–6 and everything else ran on the campaign pod. Seeds 4–6 plan about half the agent
+tenant's load of seeds 1–3 (its arrivals are an on/off process with three or four cycles per run: 144–204
+planned sessions against 300–404), so pooled service metrics are read per seed group and every comparison is
+paired within a seed (PHASE3.md section 6, "First look"). Every run passed its gate (load-generator errors 0,
+engine preemptions 0, replicas healthy at the preflight) except the two `load1.5-burstoff` runs of 10:28 and
+10:47 UTC, counted FAILED by the load generator's blanket 600 s read timeout on lazy requests that the gateway
+served inside their 3,600 s contract; they are kept on disk as the record of lazy starvation at 1.5 × load
+and the report takes their re-runs (timeouts now follow the shape's queue contract; PHASE3.md section 6).
+
+**The KV budget is not deterministic across engine starts.** The same vLLM build, model, flags and free GPU
+memory gave two KV budgets on this hardware, 5–6 % apart, four times over the project: the stage-A calibration
+pods' first engine (271,152 KV tokens against 289,056 on every later phase-2 engine); GPU 0 of the campaign pod
+at bring-up on 2026-11-09 (271,152 against 289,056 on GPUs 1 and 2: vLLM's memory profile charged that engine
+1.16 GiB of peak activation against 0.21 GiB on the other two); engine 1 at the chunk-256 restart that evening
+(271,216 against 289,680); and engine 1 again at the chunk-2048 restart (270,896 against 285,584), the last one
+predicted in PHASE3.md before it happened. Each time the short engine was the first one started with a cold
+compile cache (a chunk change invalidates it), and each time a restart with the cache warm gave every engine the
+same budget; the mechanism behind the larger profiled peak was not investigated further. The budget is fixed at
+engine start, so a replica is simply 5–6 % smaller until it is restarted. What it did here: the 31 phase-3 runs
+finished before 11:18 UTC ran with replica A 6 % short, and the seven pinned-reservation runs among them
+(`resv-split` s3–s6, `resv-spill` s1–s3) ran *without* the note-taker's 4 slots, because chat's 24 × 8k plus
+the note-taker's 4 × 16k need 262k of a replica's usable KV, which 274.6k holds and 257.6k does not (`409
+reservation_capacity`, seven runs repeated ≈ $6); at the chunk-256 restart the check caught it before any run.
+What a provider takes from it: a reservation sized by KV needs either a safety margin of that order or a
+verification gate after every engine start. This project has the gate: every restart of the campaign (stage I,
+the chunk sweep, the chunk-512 restore for stage J) was followed by a read of every engine's KV budget from
+`/metrics` (within 1 % of each other, and of 289,056 at chunk 512; one retry, then the pod stops), and the
+matrix preflight repeats it before the first run (`expect_kv_total`, `kv_spread_max`, `--reservations-required`).
+Labels pooling the two KV profiles (`burstoff`, `burst`, `resv-split`, `resv-shared`) are flagged in the
+report's Capacity card; the measured effect of 2 % less cluster KV is not separable from the seeds' lighter
+load and is not claimed.
+
+Per run, means over seeds (`settings.csv`; the sweep settings have two seeds, the reservation settings two to
+six; revenue is what tenants paid under shapes, per-token the same requests billed at `basket-7b` with cache
+hits at the cache-read price; GPU cost 3 × $0.893/h × run length; floor misses = requests delivered below
+95 % of the shape's tps from first to last token; start p95 = queue + TTFT):
+
+| setting | n | utilisation | output / GPU-h | revenue shape (per-token) | gross margin shape (per-token) | refused | floor misses | start p95 |
+|---|---|---|---|---|---|---|---|---|
+| `burstoff` | 6 | 44 % | 1.31M | $1.20 ($1.16) | 30 % (28 %) | 3.5 % | 24 % | 4.9 s |
+| `burst` | 6 | 46 % | 1.97M | $1.57 ($1.54) | 48 % (47 %) | 1.8 % | 34 % | 7.8 s |
+| `nopace` (control) | 2 | 43 % | 2.19M | $1.46 ($1.42) | 45 % (43 %) | 3.2 % | 26 % | 5.6 s |
+| `abort` | 2 | 52 % | 1.93M | $1.68 ($1.64) | 52 % (51 %) | 1.5 % | 36 % | 10.8 s |
+| `oc1.25` | 2 | 59 % | 1.82M | $1.79 ($1.72) | 55 % (53 %) | 2.1 % | 58 % | 12.5 s |
+| `oc1.5` | 2 | 60 % | 1.80M | $1.80 ($1.71) | 55 % (53 %) | 2.1 % | 63 % | 13.1 s |
+| `prefillcap` | 2 | 41 % | 1.87M | $1.60 ($1.60) | 50 % (50 %) | 2.7 % | 26 % | 7.6 s |
+| `load0.5-burstoff` | 2 | 28 % | 0.88M | $0.69 ($0.67) | −19 % (−23 %) | 4.1 % | 2 % | 0.9 s |
+| `load0.5-burst` | 2 | 26 % | 2.12M | $1.14 ($1.14) | 30 % (29 %) | 0.6 % | 5 % | 1.6 s |
+| `load1.5-burstoff` | 2 | 64 % | 1.63M | $1.88 ($1.79) | 55 % (53 %) | 7.7 % | 69 % | 31.7 s |
+| `load1.5-burst` | 2 | 64 % | 1.77M | $1.95 ($1.86) | 58 % (56 %) | 7.5 % | 58 % | 32.7 s |
+| `load2-burstoff` | 2 | 65 % | 1.64M | $1.93 ($1.83) | 56 % (54 %) | 10.8 % | 68 % | 32.7 s |
+| `load2-burst` | 2 | 66 % | 1.81M | $2.04 ($1.95) | 59 % (58 %) | 10.5 % | 57 % | 32.9 s |
+| `outheavy-burstoff` | 2 | 61 % | 1.96M | $0.51 ($0.50) | −65 % (−68 %) | 0.1 % | 14 % | 0.4 s |
+| `outheavy-burst` | 2 | 29 % | 3.77M | $0.39 ($0.66) | −107 % (−22 %) | 0.05 % | 0.01 % | 0.6 s |
+| `flash-burstoff` | 2 | 52 % | 1.44M | $1.45 ($1.39) | 43 % (41 %) | 3.9 % | 44 % | 16.3 s |
+| `flash-burst` | 2 | 56 % | 1.84M | $1.81 ($1.75) | 55 % (54 %) | 2.3 % | 48 % | 20.6 s |
+| `chunk256` | 2 | 59 % | 1.73M | $1.68 ($1.59) | 52 % (49 %) | 2.5 % | 53 % | 15.8 s |
+| `chunk2048` | 2 | 53 % | 1.98M | $1.79 ($1.74) | 55 % (54 %) | 2.2 % | 35 % | 7.9 s |
+| `resv-split` | 6 | 43 % | 2.04M | $1.23 ($1.36) | 33 % (39 %) | 4.0 % | 34 % | 31.1 s |
+| `resv-shared` | 6 | 43 % | 1.91M | $1.23 ($1.55) | 33 % (47 %) | 2.8 % | 28 % | 25.7 s |
+| `resv-spill` | 3 | 50 % | 1.97M | $1.51 ($1.53) | 47 % (48 %) | 2.6 % | 35 % | 9.7 s |
+| `resv-p95` | 4 | 36 % | 1.87M | $1.41 ($1.46) | 43 % (44 %) | 2.8 % | 14 % | 13.6 s |
+| `resv-p95-spill` | 4 | 35 % | 1.87M | $1.42 ($1.44) | 43 % (44 %) | 2.8 % | 12 % | 13.4 s |
+
+**Replication (seeds 4–6 of the phase-2 settings).** Bursting on minus off over six seeds: revenue +$0.377
+per run [+0.314, +0.439], gross margin +18 points, output per GPU-hour +50 %, refusals −47 % (all p < 0.001
+after Holm); floor misses +9 points, not significant at six seeds (CI −4 to +23; it was at three). Reservations
+sized at 24 + 4 slots against `burst` over six seeds: revenue −$0.34 per run [−0.38, −0.31], margin −15 points,
+and for `resv-split` refusals +2.2 points (all p < 0.01 Holm): the cap of Q6 on every seed, 182 chat requests
+per run refused `reservation_busy`. RESULTS.md Q8.
+
+**Reservations and bills (RESULTS.md Q8).** The reserved tenants' bill CV across seeds: `resv-split` chat 1.2 %
+against 4.1 % per-token on the same runs, note-taker 0.1 % against 9.9 %; `resv-shared` 0.6 % / 6.9 % and
+0.0 % / 10.2 %; `resv-p95` 0.1 % / 9.1 % and 0.0 % / 7.7 % over four seeds; `resv-p95-spill` 1.4 % / 9.1 % and 0.9 % / 7.7 %; on demand (`burst`) chat 9.7 %
+against 7.7 %, note-taker 11.3 % against 11.1 %. The fee is 97–100 % of a reserved tenant's bill except under
+spill with under-sized slots (`resv-spill`: 57 % and 77 %, CV back at 9.7 %). The p95 reservations hold 51 of 96 seats: on the same four seeds the agent's queue p95 goes from 5.7 s to 15.6 s and the batch tenant's from 6.1 s to 12.8 s, output per GPU-hour −3 %, margin −7 points at the campaign's factor of 2.3; spill on against off at p95 sizing changes nothing measurable (RESULTS.md Q8).
+
+**The load sweep (RESULTS.md Q9).** Revenue ÷ GPU cost against utilisation over the twelve runs of each
+series: bursting off, shape 3.91 × utilisation − 0.26 (r² 0.998; break-even 32 %), per-token 3.66 × utilisation
+− 0.20 (33 %); bursting on, shape 2.58 × utilisation + 0.76 (r² 0.993; 9 %, below the lowest point), per-token
+2.32 × utilisation + 0.83 (7 %). The shape line is above the per-token line at every point (1.01–1.06×).
+Utilisation stops at 64–66 % from 1.5 × load; the interactive queues sit at the 30 s contract (queue p95
+29.9–30.0 s), refusals 7.5–7.7 % at 1.5× and 10.5–10.8 % at 2×, the batch tenant's queue p95 457 s and 759 s
+with bursting off (57 s and 11 s with it on). Bill ÷ quote p95 is 1.00 for every tenant at every load (the
+cap); the share of chat requests billed exactly their quote is 2 % at half load, 27 % at 1×, 75 % at 1.5× and
+2× with bursting off (4 / 41 / 56 / 54 % on); the slot bill per output token against per-token's goes from
+0.99 (0.91 bursting on) at half load to 1.04–1.06 at saturation.
+
+**Levers (RESULTS.md Q10), seeds 1–2 against `burst` seeds 1–2 (utilisation 52.7 %, margin 53.6 %, floor
+misses 44 %, start p95 6.7 s, concurrency p95 79 streams).** `oc1.25` / `oc1.5`: concurrency p95 95 / 105,
+output per GPU-hour −4 / −5 %, revenue +3.4 / +3.5 %, margin +1.5 points, floor misses 58 / 63 %, start p95
+12.5 / 13.1 s, chat delivered 30 / 27 tps on a 30 tps shape. `prefillcap` (4,096 prompt tokens prefilling at
+once per replica): floor misses 26 % (chat 45 → 12 %, note-taker 46 → 9 %, agent 64 → 65 %), chat delivered
+46 tps, TTFT p95 2.9 → 0.85 s, chat queue p95 4.7 → 7.1 s, start p95 7.6 s, utilisation 41 %, revenue −8 %,
+margin −4 points, bursts revoked 0. `abort`: 86 bursts revoked per run against 12 under `grace`, floor misses
+36 % (chat 32 %, note-taker 28 %, agent 64 %), start p95 10.8 s, revenue −3 %. `nopace` against `burstoff`
+seeds 1–2 (utilisation 47.7 %, margin 36.7 %, output 1.42M per GPU-hour): output 2.19M (+54 %), revenue +12 %,
+margin 44.9 %, every tenant delivered at 51–53 tps (the 60 tps agent 57 → 51), floor misses 26 % (22 %), start
+p95 5.6 s (3.3 s), refusals 3.2 % (4.1 %).
+
+**Workload edges (RESULTS.md Q11).** `mixed-4090-outheavy.yaml` (prompt : output 1.5 : 1, rates scaled so
+peak occupancy matches): floor misses 14 % with bursting off (chat 25 %, agent 8 %, note-taker 0.2 %), 0.01 %
+with it on, every tenant delivered at 121–143 tps; requests served 3,242 → 5,483, output 1.84M → 3.41M per run
+(1.96M → 3.77M per GPU-hour), utilisation 61 → 29 %, shape revenue $0.51 → $0.39 (per-token $0.50 → $0.66),
+burst discount $0.006 → $0.33 per run (46 % of the quoted bill), revenue ÷ GPU cost 0.61× → 0.48× under shapes
+and 0.60× → 0.82× per token; the GPU's cost per 1M output tokens $0.45 (bursting off) and $0.24 (on) against
+the basket's $0.175. `mixed-4090-flash.yaml` (the 480 s peak split into 240 s of peak, 120 s at twice the peak
+chat rate and 120 s of peak; the agent's bursts and the note-taker's hour marks do not scale; seeds 1–2): no
+chat or note-taker request refused for capacity; the interactive queue p95 by minute peaks two to three minutes
+after the flash at 17.0 s (bursting off) and 23.6 s (on), maximum 20.8 s / 26.5 s under the 30 s contract, back
+under 2 s by minute 16 with bursting off (10 s with it on); streams in flight at the worst minute 84 / 80 of 96
+seats; start p95 16.3 s / 20.6 s (base scenario 4.9 / 7.8 s), start misses 39 % / 63 % (21 % / 48 %); chat
+requests billed exactly their quote 54 % / 56 % (27 % / 41 %), chat slot bill ÷ per-token bill 1.02 / 1.02
+(1.01 / 0.99); utilisation 52 % / 56 % (44 % / 46 %), gross margin 43 % / 55 % (30 % / 48 %); bursting on
+against off: +28 % output per GPU-hour (p 0.06), +25 % revenue (p 0.015), +12 points of margin (p 0.011),
+floor misses +4 points and start p95 +4 s (not significant at two seeds).
+
+**Engine sweep (RESULTS.md Q12).** `--max-num-batched-tokens` 256 / 512 / 2048 with bursting on, seeds 1–2,
+KV budgets read from `/metrics` after each restart, uniform across the three engines once the compile cache
+was warm: 289,680 tokens at chunk 256, 289,056 at 512, 285,584 at 2048 (the larger chunk's larger activation
+peak during vLLM's memory profile costs 3,472 tokens, 1.2 %; the smaller chunk gains 624). The 256 and 2048
+restarts each needed the one retry (the first engine started short; previous paragraph). Chunk 256 against
+`burst` (chunk 512) on seeds 1–2, paired: floor misses 44 → 53 % (p 0.08), start misses 59 → 67 %, start p95
+6.7 → 15.8 s, interactive queue p95 4.7–5.0 → 12.4 s and TTFT p95 2.6–3.8 → 5.2–6.3 s per tenant (p 0.04–0.08),
+delivered tps chat 36 → 34 (p 0.02) and agent 43 → 40, utilisation 53 → 59 % with output per GPU-hour 1.89M → 1.73M (−8 %, p 0.04),
+revenue −3 % (p 0.02), margin 53.6 → 52.1 % (p 0.04), burst discount −24 %, requests served −5 % (closed-loop
+tenants slowed), batch output −23 %. Chunk 2048 (vLLM's default) against the same runs: floor misses 44 → 35 %
+(p 0.05; chat 45 → 32 %, note-taker 46 → 23 %, agent 64 → 58 %), delivered tps chat 36 → 40, agent 43 → 48,
+note-taker 35 → 42 (p 0.015), TTFT p95 +22–43 % (chat 2.6 → 3.7 s, agent 3.8 → 4.6 s, p 0.04), interactive queue
+p95 +20–25 % (n.s.), start misses 59 → 60 % and start p95 6.7 → 7.9 s (n.s.), utilisation unchanged at 53 %,
+output per GPU-hour 1.89M → 1.98M (+4 %, n.s.), revenue +3 % (p 0.01), margin 53.6 → 55.0 % (p 0.03), burst
+discount +27 % (p 0.02), requests served +3 %, 0 errors in all four chunk runs.
+
+**Scorecard and frontier (RESULTS.md Q13).** `scorecard.csv`, `frontier.csv`: every setting held against
+`burst` on common seeds under the criteria fixed in PHASE3.md section 9 before any price was tried; the
+meters re-priced over reservation factors 1.0 / 2.3 / 3.2 / 4.0 / 5.0 / 6.0 × the shape price and SLA credits
+0 / 50 / 100 % of the runtime price on two bases (the decode floor missed; queue + first token over 2 s), 245 tables. Two settings pass every row, `burst` itself and `chunk2048` at the campaign's prices; no reservation setting passes at any price. The provider's margin row is met from 3.2 × for the p95 reservations (52.2 % against 50.3 % on four common seeds; the reserved tenant's bill 1.24–1.73 × its per-token bill) and from 5 × for the 24 + 4 reservations (51.5 % against 48.1 %; 1.06–1.48 ×), `resv-spill` from 4 ×; under the p95 reservations the on-demand rows fail at every price (agent start p95 16.6 s against 8.1 s, batch 14.5 s against 7.4 s, agent refusals 9.8 % against 7.1 %). A full credit at the campaign's factor costs `burst` 3.7 (floor basis) / 4.0 (start basis) points of margin, `load1.5-burst` 5.7 / 7.9, `load2-burst` 5.4 / 7.4, `flash-burst` 4.7 / 5.0, `chunk2048` 3.4 / 4.3, `resv-p95-spill` 1.4 / 2.4 (RESULTS.md Q13).
+
+Things to know when reading the numbers: the campaign's reservation fee is 2.3 × the shape's price per
+second (`reservation_price_factor`, recorded per run in the meter and in `runs.csv`); refusals in the
+saturation and flash runs are results, not failures; `utilisation` is seat-seconds sold ÷ offered over the run
+including the drain; the gateway ran the code of 2026-11-08 plus the 11:18 UTC push (reservation flag, KV
+preflight, contract-length timeouts) for every run after stage I, and never the abandoned-queue fix of
+2026-11-09 (DESIGN.md section 12), so a queued request whose client had gone was still served and billed (eight
+in `load1.5-burstoff` s2 before the timeout fix; none after it, since the load generator now waits out the
+contract).
+
 ## Environment the numbers depend on
 
 - Docker Desktop 4.2.0 with the WSL driver-store workaround (`scripts/vllm-entrypoint.sh`); WSL kernel

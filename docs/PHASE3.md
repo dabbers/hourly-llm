@@ -80,7 +80,10 @@ then `matrix-campaign-2.yaml`, 37 runs with `nopace` first, started between runs
 wall clock from the first paid minute; the chain runs unattended on the gateway pod and survives this
 machine going down. As run: the second chain was stopped at 11:18 UTC on 2026-11-09 after 17 of its 37 runs
 (section 6, the batch tenant's timeout); stage I went first, then the 22 remaining sweep runs
-(`matrix-campaign-2-resume.yaml`, ≈ 7.5 h) by `chain switch`, and stage H only if the balance allows.
+(`matrix-campaign-2-resume.yaml`, ≈ 7.5 h) by `chain switch`, and stage H only if the balance allows. Stage H ran after the owner's top-up (chunk 256 and 2048, two seeds each,
+21:56–23:52 UTC), then the chunk-512 restore and stage J (section 9 B: four runs, 00:14–01:30 UTC on 2026-11-10); the pod
+stopped itself at 01:50. In all 68 runs were executed on the campaign pod and 59 are in the report (the seven
+pinned-reservation runs that stage I replaced and the two timed-out `load1.5-burstoff` runs stay on disk).
 
 ## 4. How the numbers are analysed
 
@@ -360,6 +363,15 @@ short, the warm one does not. Operator note: `pod.sh chain <gw> status` shows th
 line until the new chain starts, because `stageh.status` is rewritten only at WAITING, RUNNING (after the chain
 start), HANDED-OVER, ABORTED and FAILED; the restart's progress is in `runs/phase2/stageh.log`.
 
+**Stage J (00:14–01:30 UTC on 2026-11-10).** The four runs (`resv-p95-spill` s3 at 00:14, `resv-p95` s3 at 00:33,
+`resv-p95-spill` s4 at 00:52, `resv-p95` s4 at 01:11) ended `DONE 4` at 01:30 with 0 request errors (7,185 / 7,248 /
+6,953 / 6,953 requests) and both reservations granted in each; every run was pulled as it finished and the pod stopped
+itself at about 01:50, as armed. The final report was built at 01:45 over the 78 run directories with meters (69 kept by
+the manifest: the ten phase-2 runs and 59 of the 68 phase-3 runs; 482,123 requests) and copied to
+`docs/reports/phase3-campaign/`. Not pulled: the pod-side `chain.log` and `stageh.log`, because the pod had stopped
+before the copy was attempted; what they held is in this section, in section 7 and in `runs/phase3/poll.log`. The pod
+was terminated at 01:56 UTC with every run local; the balance at the end was $9.16.
+
 ## 7. Spend log
 
 | When (UTC) | What | Pod-hours | Cost |
@@ -387,6 +399,8 @@ start), HANDED-OVER, ABORTED and FAILED; the restart's progress is in `runs/phas
 | 2026-11-09 21:56 | balance $19.81. **Sweep DONE 22** at 21:17:43, 0 request errors in every run (58 phase-3 runs, 405,606 requests); the driver cancelled the pod stop at 21:17:57. Chunk-256 restart: attempt 1 failed the KV check (engine 1 271,216 vs 289,680 KV tokens), attempt 2 uniform at 289,680; `matrix-chunk256.yaml` started 21:55:51. Forecast: chunk 256 DONE ≈ 23:15, chunk 2048 DONE ≈ 00:55, stage J DONE ≈ 02:35, pod self-stop ≈ 02:55 UTC on 2026-11-10 with ≈ $6 left (each further failed restart attempt ≈ $0.85) | ≈ $0.85 lost | |
 | 2026-11-09 23:19 | balance $16.01. **Chunk 256 DONE 2** at 22:33 (two seeds, 0 errors; the chunk matrices are two runs each, so the 21:56 forecast was 40 min too long per chunk). Chunk-2048 restart: attempt 1 failed the KV check as predicted (engine 1 270,896 vs 285,584), attempt 2 uniform at 285,584; `matrix-chunk2048.yaml` started 23:14:28. Forecast: chunk 2048 DONE ≈ 23:53, chunk-512 restore (warm cache, one attempt) ≈ 00:14, stage J (4 runs) DONE ≈ 01:30, pod self-stop ≈ 01:50 UTC on 2026-11-10 with ≈ $9 left. First read of chunk 256 against `burst` (seeds 1–2): floor misses 44 → 53 %, start p95 6.7 → 15.8 s, output per GPU-hour −8 %, margin −3 points: the smaller chunk makes the floor worse, the opposite of the hypothesis (section 9 C's premise) | ≈ $0.90 lost | |
 | 2026-11-10 00:16 | balance $13.56. **Chunk 2048 DONE 2** at 23:52 (0 errors). Chunk-512 restore passed the KV check first time (289,056 × 3, warm cache, as predicted); **stage J started 00:14:30** (4 runs, pod stop 20 min after its DONE); the stage-H driver handed over and exited. First read of chunk 2048 against `burst` (seeds 1–2): floor misses 44 → 35 % (p 0.05), delivered tps +12–18 %, output per GPU-hour +4 %, margin +1.4 points, TTFT p95 +22–43 %, start bound unchanged: the larger chunk helps the floor and costs the first token, the mirror of 256; neither replaces the prefill cap. Forecast: stage J DONE ≈ 01:31, pod self-stop ≈ 01:51 UTC with ≈ $9 left; then the final report, the write-up pass, terminate, rotate | | |
+| 2026-11-10 01:50 | **Stage J DONE 4** at 01:30 (0 request errors in all four runs, 28,339 requests; both reservations granted each time). The pod stopped itself at ≈ 01:50; the final report was built at 01:45 (69 runs kept, 482,123 requests) and copied to `docs/reports/phase3-campaign/`. Balance $9.16: phase 3 cost $68.19 ($62.35 at plan time + $15.00 top-up − $9.16), both phases $85.80 of the $150 cap | | |
+| 2026-11-10 01:56 | pod `qka0zggy47mw7e` terminated with its volume (`pod.sh terminate --yes`) once every run was local and the final report had landed; nothing is left on RunPod. The RunPod API key in `.env` is the owner's to rotate | | |
 | | | | |
 
 Balance at plan time: $62.35 of $80 (phase 2 spent $17.61; see PHASE2.md §3).
@@ -454,6 +468,19 @@ provider's margin criterion at about 4× the shape's price per second, where the
 per-token for a bill that moves under 1 %; the on-demand tenants' waiting time is the cost no price table can
 move, which is what C would address. Final numbers after stage J.
 
+**Final (2026-11-10 01:45 UTC, 69 runs, four seeds of the p95 reservations; RESULTS.md Q13).** 245 price tables (6 factors ×
+{none, floor credit, start credit} × {0.5, 1.0}) over 24 settings. Two settings pass every row: `burst` itself and, at the
+campaign's prices, `chunk2048`; no reservation setting passes at any price. The provider's margin row is met from 3.2 × for
+the p95 reservations (52.2 % against the baseline's 50.3 % on the four common seeds; the reserved tenant's bill 1.24–1.73 ×
+its per-token bill) and from 5 × for the 24 + 4 reservations (51.5 % against 48.1 %; 1.06–1.48 ×), `resv-spill` from 4 ×.
+The on-demand rows fail at every price under the p95 reservations: start p95 2.0–2.1 × the baseline's (agent 16.6 s against
+8.1 s, batch 14.5 s against 7.4 s) and the agent's refusals 9.8 % against 7.1 %. A full credit at the campaign's factor
+costs `burst` 3.7 (floor basis) / 4.0 (start basis) points of margin, `load1.5-burst` 5.7 / 7.9, `load2-burst` 5.4 / 7.4,
+`flash-burst` 4.7 / 5.0, `resv-p95-spill` 1.4 / 2.4; the credit refunds the runtime part of the bill, not the prompt
+charge, which is why crediting 88 % of requests at saturation costs 8 points and not half the revenue. What four seeds
+changed against the two-seed read: the margin threshold for p95 sizing moved from 4 × to 3.2 × and the on-demand start-p95
+ratio from 2.4–2.5 × to 2.0–2.1 × (seed 4 plans about half the agent load); no conclusion moved.
+
 **B. Stage J, four runs tonight (≈ $4).** Two more seeds (3 and 4) of the configuration that would ship,
 `resv-p95-spill`, and of its pair `resv-p95`, interleaved by seed so a lost last run still leaves complete
 pairs (`config/phase3/matrix-stage-j.yaml`). Chained after stage H by the same driver (`scripts/stage_h.sh`, a
@@ -481,6 +508,40 @@ or three paired runs; the pod stops tonight and its host has no free GPU, so a f
 cap and chunk results: if they fix the floor, C is the natural next step; if they do not, the sellable version of
 the scheme is best-effort throughput with SLA credits, which A already models, and C is dropped.
 
+**C. Reservation backfill: the decision (2026-11-10, after stage J).** Recommendation: drop C for this project and
+record it as the next experiment, with the pass criteria as written. Reasons, in order:
+
+1. The premise moved. C was the answer to "the reserved seats sit idle and the on-demand tenants wait"; the
+   campaign found the floor problem is admission's (the prefill cap fixes the 30 tps floors, the chunk size only
+   trades latency for steadiness, Q10 and Q12), the on-demand tenants' waiting under p95 reservations comes from
+   51 of 96 seats being held (Q8; start p95 2.0–2.1 × the baseline's at four seeds, not moved by any price table,
+   Q13), and the contract that fails under load is the start bound (Q9, Q11). Backfill lends idle reserved seats to
+   lazy requests: it returns idle seats to the provider and shortens the lazy queue, which are real, but it does
+   not move the on-demand interactive tenants' start p95 (they are not lazy) and it puts the reserved tenants'
+   start bound at the mercy of the reclaim latency, which is exactly the pass criterion it has to meet.
+2. The budget. Balance at the pod's stop $9.16. C needs a day of code and tests first, so this pod cannot wait
+   for it ($2.68 per hour idle) and cannot be restarted on its host once stopped (no free GPU); a fresh three-GPU
+   pod is ≈ $1.8 of bring-up plus ≈ $5 for a two-seed pair against `resv-p95-spill` with the KV gate, ≈ $7 with no
+   room for a retry. The owner's rule was to run C only if money is genuinely left over; $9.16 is not that.
+3. The write-up does not need it. The thesis holds without C: predictability works for the reserved tenant and is
+   paid for by the on-demand tenants' waiting and the provider's idle seats at the campaign's prices; the frontier
+   shows what price returns the provider's margin and that no price returns the waiting; the sellable version is
+   the start-bound contract with an SLA credit (Q13). C is the experiment that would test whether the idle seats
+   can be recovered without breaking the reserved tenant's start bound; it belongs to the next project, with the
+   criteria below unchanged.
+
+Pass criteria, as fixed on 2026-11-09 before any code (unchanged, for the record): against `resv-p95-spill` on the
+same seeds, the reserved tenants' start p95, start-bound share and floor share not worse; their bill CV ≤ 2 %;
+output per GPU-hour up; the lazy tenant's queue p95 down; a reclaim-latency metric (time from the holder's
+arrival to its first token when a lent seat has to be taken back) reported per request, with the lazy request's
+preemption counted as its cost. If the reserved start p95 or floor misses get worse than the shipping
+configuration, C fails even if utilisation improves.
+
+What a yes would cost and take, if the owner wants it anyway: a day of code (a `backfill` admission mode: a lent
+seat is a lazy request admitted into an idle reserved slot with a preemption hook on the holder's arrival; the
+meter records lent seconds and reclaims), the rehearsal against fake replicas, a fresh pod, two seeds of
+`resv-p95-spill` with backfill on, ≈ $7 and an evening.
+
 **D and E (a small reservation for the bursty agent tenant; lazy aging at 1.5 × load) are skipped** unless
 money is genuinely left over: neither changes the headline.
 
@@ -491,4 +552,9 @@ the result gets better; if not, the sellable version is best-effort throughput w
 runs, stage J and possibly C: stop running experiments and write it up. The pod is terminated and the RunPod API
 key rotated as soon as the last report lands, rather than letting the pod sit (owner's instruction, 2026-11-09
 18:40 UTC; `terminate --yes` deletes the pod and its volume once every run is local).
+
+**Done (2026-11-10).** The final report landed at 01:45 UTC and the pod was terminated at 01:56 UTC. The write-up pass
+is RESULTS.md Q8–Q13 and its preamble and closing section, ASSUMPTIONS.md "Phase 3 measurements", DESIGN.md sections
+11–13, SAMPLES.md "Output samples from phase 3" and the README's status; the campaign report and its CSVs are in
+`docs/reports/phase3-campaign/`. C is dropped (above). Nothing else runs.
 
