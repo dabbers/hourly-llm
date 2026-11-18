@@ -195,7 +195,9 @@ acted on about 1% of requests and moved the cached share by 1–4 points, becaus
 when every replica is full. Stage M (2026-11-18, RESULTS.md Q16, report in `docs/reports/stage-m/`) let a queued
 request that remembers the freed replica go ahead of the head of the queue, for at most 500 ms per passed request:
 the hit rate rose 4.5–13.7 points and queue waits fell, the cached share rose 2.8 and 5.1 points on two of three
-seeds (0.6 on the third, inside the noise), and gross margin fell 1.3–2.4 points where it did. $113.93 of the
+seeds (0.6 on the third, inside the noise), and gross margin fell 1.3–2.4 points where it did. RESULTS.md Q17 extrapolates
+prices from these runs (not measured): a 25% gross margin at the 7B basket prices needs the cluster at the tested load
+for 72% of the hours it pays for, break-even is 54%, and a reserved 30 tps seat costs about $0.025 an hour at 25%. $113.93 of the
 $150 cap spent over all stages.
 
 ## License

@@ -1382,6 +1382,102 @@ Files: `docs/reports/stage-m/` (`campaign.html`, `stage_m_table.csv`, `stage_m_t
 `scripts/stage_l_table.py`. Cost: $8.21 (the pod took 45 minutes to obtain and about 55 minutes of its paid
 time was idle after the app was closed during the engine install).
 
+## Q17. What price holds a 25% gross margin, and how much idle time can it carry?
+
+**Status: an extrapolation from the runs above, written 2026-11-18. Nothing here was run. Three GPUs and
+18-minute runs cannot show a day of real traffic, so the share of the day that is busy is an input, not a
+result.**
+
+**At the 7B basket prices the cluster holds a 25% gross margin if it runs at the load we tested for 72% of the
+hours it pays for, and breaks even at 54%. Below 72% the price has to rise in proportion. Per-second and
+per-token billing need the same price change: time billing does not add margin by itself. A reservation makes
+the margin certain on the capacity it covers, and does not make it larger.**
+
+The question (owner). Assume a host selling at the OpenRouter price makes 25%. What do time-billed prices have
+to be for the same margin, and what happens to that when the GPUs are not busy all the time?
+
+Method (`scripts/margin_at_load.py`, table in `docs/reports/stage-m/margin_at_load.csv`). The six stage M runs
+earned $1.57 to $1.80 per GPU-hour under slots at the 7B basket prices ($0.175 per 1M output tokens, $0.08 per
+1M prompt tokens, $0.015 cached), mean $1.646, against $0.89 of GPU rent. The same requests billed per token
+earned $1.59 to $1.80. A 25% margin needs $1.187 per GPU-hour. The extrapolation assumes the cluster earns the
+measured rate for a share of the hours it pays for and nothing in the rest:
+
+    margin = 1 − 0.89 ÷ (1.646 × busy share × price multiple)
+
+**1. With the GPUs busy all the time, 25% needs about 72% of the basket price.** Per run the multiple is 0.66
+to 0.75 under slots and 0.66 to 0.75 per token; the heaviest seed needs the lowest price.
+
+| | 7B basket (the prices used throughout) | At a 25% margin |
+|---|---|---|
+| Output, per 1M tokens | $0.175 | $0.126 |
+| Prompt, per 1M tokens | $0.08 | $0.058 |
+| 30 tps seat, per hour of use | $0.0189 | $0.0136 |
+| 60 tps seat, per hour of use | $0.0378 | $0.0272 |
+
+A seat's hourly price is its rate times the output price (30 tps is 108,000 tokens an hour). Prompt tokens are
+charged on top under both schemes.
+
+**2. With idle hours, the price rises in proportion.**
+
+| Share of paid hours at the tested load | Price multiple for 25% | 30 tps seat, per hour of use | Output, per 1M | Margin if the price stays at the basket |
+|---|---|---|---|---|
+| 100% | 0.72 | $0.0136 | $0.126 | 46% |
+| 90% | 0.80 | $0.0151 | $0.140 | 40% |
+| 80% | 0.90 | $0.0170 | $0.158 | 32% |
+| 72% | 1.00 | $0.0189 | $0.175 | 25% |
+| 60% | 1.20 | $0.0227 | $0.210 | 10% |
+| 54% | 1.33 | $0.0252 | $0.233 | 0% |
+| 50% | 1.44 | $0.0272 | $0.252 | −8% |
+| 40% | 1.80 | $0.0341 | $0.315 | −35% |
+
+**3. What "busy" can mean on this hardware.**
+
+- "The tested load" is 41–49% on the report's utilisation measure, not 100%. The cluster saturates at 64–66%
+  (Q9), and by then chat waits about 30 s to start. So 80% utilisation is not a state this cluster can be in.
+- Empty seats inside a busy hour are not spare capacity. In the stage M runs 40–50% of seat-seconds were
+  occupied (66–79% of the plan's token capacity was delivered, because bursting lends idle rate), and 16–35% of
+  requests still missed their floor. Prompt processing is the limit (Q5, Q11, Q12), not seats. The idle time
+  that costs the provider is whole quiet hours.
+- Quiet hours are not zero either. In Q9, half the arrival rate earned 1.42 times GPU cost with bursting on (a
+  30% margin) and 0.84 times with it off. That was before cache routing, which cut revenue 19% (Q14); with it
+  the half-load figure would be near 1.15 times, a 13% margin. So a day made only of half-load hours does not
+  reach 25% at basket prices, and a day that mixes tested-load and half-load hours does better than the table,
+  which counts quiet hours as nothing.
+
+**4. Reserved seats.** A reservation is paid whether it is used or not, so its price follows from cost, not
+from traffic. From the decode calibration (47 seats per GPU at 30 tps, 22 at 60, stage L):
+
+| | Seats per GPU | Cost per seat-hour | Price at a 25% margin | Per month, all hours |
+|---|---|---|---|---|
+| 30 tps | 47 | $0.0189 | $0.0252 | about $18 |
+| 60 tps | 22 | $0.0405 | $0.0539 | about $39 |
+
+- A 30 tps seat used all month emits about 78M output tokens, worth about $13.60 at the basket's output price.
+  The reserved seat costs about 1.3 times that at full use and about 2.7 times at half use. That multiple is
+  what the tenant pays for a bill with a ceiling.
+- It is lower than the 3.2 to 5 times of Q13 because this table assumes every seat on the GPU is sold and that
+  the decode ceiling is the real ceiling. Prompt-heavy traffic fits fewer seats (Q5), so real prices sit
+  between the two.
+- A reservation at this price earns exactly 25% on its share of the GPU at any load. It removes the load risk
+  on that share. The on-demand share still needs its 72%.
+
+**5. What a provider can do about idle time, in the order the data supports.**
+
+- Price above the basket only with something the basket does not sell. Slots and tokens earn the same from the
+  same traffic (Q7, Q9, K2), so a multiple above 1.0 on demand needs the rate guarantee to be real, and today
+  16–35% of requests miss the floor.
+- Sell reservations for the base load. This is the one place where hourly billing gives the provider revenue
+  that does not move with traffic.
+- Stop paying for quiet hours. Releasing a GPU has the same effect on the formula as filling it. With three
+  GPUs each step is a third of capacity, and affinity loses its caches on the replica that goes away. This was
+  not tested.
+- Sell quiet hours cheaply. The lazy tier at half price still adds revenue to an hour that would earn nothing.
+
+Limits. Gross margin over GPU rent only ($0.89 per GPU-hour): no staff, storage, network or unsold reserve.
+One load mix, one model, one GPU type. The busy share is assumed, the quiet hours are counted as zero, the
+half-load figure predates cache routing, and the reserved prices use decode ceilings. Whether hosts on
+OpenRouter make 25% is the owner's assumption; only their prices are used.
+
 ## What was not measured, and what to do next
 
 Measured since the phase-2 list: reservation spill (`resv-spill`, `resv-p95-spill`, Q8), the `abort` revocation
@@ -1417,7 +1513,8 @@ and four of the shipping reservation (Q8). Not measured, in order of value:
 - One GPU model, one model size, one price basket: a 4090 at $0.893 per GPU-hour and a 7B AWQ model at the 7B
   basket; the fp16 model, a 120 tps shape and an A100 cross-check (PHASE2.md §3) were skipped for budget. The
   report recomputes the margins for any `gpu_usd_per_hour` and price reference.
-- Affinity that also prefers the remembered replica when a queued request is dispatched (Q15), fp8 KV with a model that carries calibrated KV scales (Q15: 1.98× KV and a 60 tps seat ceiling of 41 against 22, if the text can be made correct), affinity with a cap on prompt-token share and a price that keeps part of the saving (Q14), phase-length reservations, and the gateway fix for requests abandoned in the
+- A full day of traffic and more than three replicas. Q17 extrapolates margin against idle time from 18-minute busy periods; the share of the day that is busy, scaling GPUs down in quiet hours and queue-side affinity at a scale where its pass window binds (Q16) are all unmeasured.
+- fp8 KV with a model that carries calibrated KV scales (Q15: 1.98× KV and a 60 tps seat ceiling of 41 against 22, if the text can be made correct), affinity with a cap on prompt-token share and a price that keeps part of the saving (Q14), phase-length reservations, and the gateway fix for requests abandoned in the
   queue (served and billed to a closed socket in one saturation run; built and tested, not run on hardware).
 
 In order of value: the start-bound contract with its credit; the prefill-aware curve; the backfill decision;
