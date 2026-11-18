@@ -1219,7 +1219,7 @@ calibrations in `calibration/stage-l-fp16-a.yaml`, `stage-l-fp16-flashinfer-a.ya
 
 ## Q16. Does preferring the remembered replica inside the queue get the rest of the cache hits?
 
-**Status: the hypotheses below were written on 2026-11-18, before any stage M run. Results go under them.**
+**Status: run 2026-11-18. The hypotheses below were written before any stage M run; the results follow them.**
 
 Why ask. Q15 left the cached share near 61–63% on the heavy days because the misses happen in the queue: when
 every replica is full, requests wait in one line and the head takes whichever seat frees first, wherever its
@@ -1283,6 +1283,104 @@ M5 is the line I am least sure of: sending more turns back to one replica can ra
 A limit of this test, stated in advance. Three replicas give a queue 6 to 18 deep with seats freeing often, so
 a 500 ms window rarely stops a jump here. With more replicas there are more candidates per freed seat and more
 ways to pass one request repeatedly, so the window would bind more often. This stage does not measure that.
+
+### Results (run 2026-11-18)
+
+Six runs on one pod (three RTX 4090s, 285,584 KV tokens on each replica in every run), 53,066 requests, no
+request errors (every request that did not finish was a designed refusal or revocation).
+
+**The rule works on the thing it targets: the hit rate rose 4.5 to 13.7 points and the queue got shorter, not
+longer. The cached share rose 2.8 and 5.1 points on seeds 1 and 3 and 0.6 on seed 2, which is inside the
+run-to-run noise. Four of the six lines held on every seed; M2 failed on seed 2 and M4 failed on seed 2's agent
+TTFT.**
+
+| | Seed 1 | | Seed 2 | | Seed 3 | |
+|---|---|---|---|---|---|---|
+| | strict | queue | strict | queue | strict | queue |
+| Affinity hit rate | 78.5% | 86.3% | 81.7% | 86.2% | 68.3% | 82.0% |
+| Misses for lack of a seat | 1,156 | 749 | 948 | 709 | 1,756 | 973 |
+| Cached share of prompt tokens | 59.8% | 62.5% | 60.9% | 61.5% | 55.0% | 60.0% |
+| Queue wait p95 (ms) | 1,333 | 1,081 | 1,382 | 1,173 | 4,980 | 1,856 |
+| Start p95 (s) | 2.16 | 1.81 | 2.19 | 2.00 | 5.75 | 2.48 |
+| Chat TTFT p95 (ms) | 1,009 | 861 | 1,034 | 982 | 1,199 | 1,077 |
+| Agent TTFT p95 (ms) | 1,455 | 1,396 | 1,270 | 1,446 | 1,422 | 1,464 |
+| Floor misses, all requests | 18.9% | 16.2% | 18.1% | 16.8% | 35.1% | 24.8% |
+| Output tokens per GPU-hour (millions) | 2.49 | 2.54 | 2.49 | 2.50 | 2.33 | 2.46 |
+| Gross margin, per token | 45.9% | 44.6% | 44.1% | 44.1% | 50.4% | 48.1% |
+| Gross margin, per second | 45.3% | 43.9% | 43.4% | 43.4% | 50.6% | 48.2% |
+| Tenant bill (USD) | 1.469 | 1.431 | 1.420 | 1.421 | 1.625 | 1.549 |
+
+"Strict" is `m-affinity`, "queue" is `m-queue`.
+
+What the rule did (meter columns `queue_jumped`, `queue_passed`, `queue_passed_ms`).
+
+| | Seed 1 | Seed 2 | Seed 3 |
+|---|---|---|---|
+| Jumps | 435 | 447 | 1,065 |
+| Mean position jumped from (0 is the head) | 2.2 | 2.2 | 2.7 |
+| Cached share of the jumpers' prompt tokens | 71% | 73% | 70% |
+| Requests passed at least once | 547 (6%) | 566 (6%) | 1,401 (16%) |
+| Most times one request was passed | 6 | 7 | 8 |
+| First pass to admission, median (ms) | 231 | 272 | 335 |
+| First pass to admission, p95 (ms) | 802 | 875 | 862 |
+| First pass to admission, longest (ms) | 1,376 | 1,538 | 1,636 |
+| Passed requests admitted within 1 s | 98.9% | 97.2% | 97.3% |
+| Hit rate of the passed requests | 47% | 52% | 58% |
+
+The lines.
+
+| # | Line | Result |
+|---|---|---|
+| M1 | hit rate up at least 3 points on each seed | **held**: +7.7, +4.5, +13.7 |
+| M2 | cached share up at least 1.5 (seeds 1, 2) and 3.5 (seed 3) | **failed on seed 2**: +2.8, +0.6, +5.1 |
+| M3 | 95% of passed requests admitted within 1 s of the first pass | **held**: 98.9%, 97.2%, 97.3% |
+| M4 | start p95 and chat and agent TTFT p95 not more than 10% higher | **failed on seed 2's agent TTFT** (+13.9%); start p95 fell 16%, 8% and 57%, chat TTFT p95 fell 15%, 5% and 10%, agent TTFT moved −4%, +14%, +3% |
+| M5 | floor misses not more than 1 point higher | **held**, and my doubt was wrong: −2.7, −1.3, −10.3 points |
+| M6 | both margins fall where the cached share rises | **held**: −1.3 and −1.5 points on seed 1, −2.3 and −2.4 on seed 3, no change on seed 2 where the cached share did not move |
+
+How to read it.
+
+- **The gain is real on seeds 1 and 3 and unproven on seed 2.** The drift read: `m-affinity` repeats stage L's
+  `l-fp16` on another pod the same day, and its cached share came out 0.8, 1.5 and 1.9 points lower (hit rate
+  1.8, 2.9 and 1.7 lower). So identical settings differ by up to 2 points of cached share. Seed 3's +5.1 and the
+  hit-rate gains are clear of that. Seed 1's +2.8 is above it but not by much. Seed 2's +0.6 is inside it.
+- **The replay estimate was about right.** It gave +1.7 to +3.5, +1.7 to +3.3 and +3.8 to +8.0 points; the runs
+  gave +2.8, +0.6 and +5.1. Seeds 1 and 3 landed inside the range, seed 2 below it.
+- **A jump is not a whole extra hit.** There were 435, 447 and 1,065 jumps, and misses for lack of a seat fell by
+  407, 239 and 783. The passed requests are the reason: only 47–58% of them went on to hit, against 82–86% for
+  all requests, because a request that is passed often then takes whichever seat comes. The jumpers cached
+  70–73% of their prompt tokens, below the 82–84% of all hits.
+- **The pass window is a limit on being passed, not on the wait after it.** A passed request can still wait for
+  a seat once the window closes. The longest gap from first pass to admission was 1.4 to 1.6 s, and 1–3% of
+  passed requests took more than 1 s. On three replicas this is small. It is the number to watch at a larger
+  scale.
+- **Seed 3 is the heavy day and it gained most on every measure.** Queue wait p95 fell from 5.0 s to 1.9 s,
+  start p95 from 5.8 s to 2.5 s and floor misses from 35% to 25%. A cache hit skips most of the prefill, so the
+  seat does less work per request and frees sooner. The baseline run was somewhat worse than stage L's seed 3
+  (start p95 4.5 s, floor misses 29%), so part of the difference is the baseline; the queue arm is still better
+  than both.
+- **Seed 2's agent TTFT is noise of the same size as the result.** It rose 176 ms in the queue arm. The same
+  setting and seed gave 969 ms in stage L and 1,270 ms here, a 300 ms difference with no change at all. The
+  line is still marked failed because that was the line.
+- **For the provider it is the K2 trade-off again, smaller.** More cache hits mean more prompt tokens billed at
+  the cached rate: the tenants' bill fell 2.6% and 4.7% on seeds 1 and 3 and gross margin fell 1.3 to 2.4
+  points, while output per GPU-hour rose 2.3% and 5.7% and 133 and 299 more requests were served. On seed 2
+  nothing moved.
+- **What is still missed.** 14–18% of eligible requests still miss, almost all for lack of a seat (749, 709 and
+  973). The no-limit replay line was only 0.4 to 2 points above the 500 ms line, so a longer window or a deeper
+  lookahead has little left to give on this hardware. The rest would need a request to wait for its own replica
+  while another seat is free, which Q15 showed costs more than it returns.
+
+Scale limit, as stated in advance: three replicas, queue 6 to 18 deep. The window rarely stopped a jump here.
+This stage does not show what the rule does with more replicas.
+
+A recurring anomaly, now seen five times: after a cold install one engine came up short of KV cache (270,896
+tokens against 285,584). The staggered restart (engine 0 last) fixed it again before any run, and the chain's
+preflight checks the total.
+
+Files: `docs/reports/stage-m/` (`campaign.html`, `stage_m_table.csv`, `stage_m_table_paired.csv`); table script
+`scripts/stage_l_table.py`. Cost: $8.21 (the pod took 45 minutes to obtain and about 55 minutes of its paid
+time was idle after the app was closed during the engine install).
 
 ## What was not measured, and what to do next
 

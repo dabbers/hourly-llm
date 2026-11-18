@@ -192,7 +192,11 @@ report in `docs/reports/stage-l/`) tried two ways to get the remaining cache hit
 doubles the KV budget and decodes 46% faster at 32 streams but returns unusable text with this model (0 of 30
 sampled replies usable, `docs/SAMPLES.md`), so it was not load-tested; a 500 ms wait for the remembered replica
 acted on about 1% of requests and moved the cached share by 1–4 points, because most misses happen in the queue
-when every replica is full. $105.72 of the $150 cap spent over all stages.
+when every replica is full. Stage M (2026-11-18, RESULTS.md Q16, report in `docs/reports/stage-m/`) let a queued
+request that remembers the freed replica go ahead of the head of the queue, for at most 500 ms per passed request:
+the hit rate rose 4.5–13.7 points and queue waits fell, the cached share rose 2.8 and 5.1 points on two of three
+seeds (0.6 on the third, inside the noise), and gross margin fell 1.3–2.4 points where it did. $113.93 of the
+$150 cap spent over all stages.
 
 ## License
 

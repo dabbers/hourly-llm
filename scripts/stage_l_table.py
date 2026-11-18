@@ -1,9 +1,10 @@
-"""Stage L table: one row per arm and seed from the campaign's runs.csv plus each run's report/per_request.csv
-(TTFT p95 and floor misses by tenant, affinity waits), and the paired differences by seed for chosen pairs.
+"""Stage L and stage M table: one row per arm and seed from the campaign's runs.csv plus each run's report/per_request.csv
+(TTFT p95 and floor misses by tenant, affinity waits) and its meter (stage M: queue jumps and passes), and the paired differences by seed for chosen pairs.
 
 usage: python scripts/stage_l_table.py <campaign dir> [--pairs l-fp8:l-fp16 ...] [--out <csv>]
 """
 import argparse
+import sqlite3
 import sys
 
 import numpy as np
@@ -30,6 +31,28 @@ def per_run(run_dir: str) -> dict:
     aff = ok["affinity"].dropna()
     g = ok.loc[aff.index]
     out["cached_share_hits"] = g.loc[aff == "hit", "cached_tokens"].sum() / max(1, g.loc[aff == "hit", "prompt_tokens"].sum())
+    out["cached_share_misses"] = g.loc[aff != "hit", "cached_tokens"].sum() / max(1, g.loc[aff != "hit", "prompt_tokens"].sum())
+    out.update(queue_stats(run_dir))
+    return out
+
+
+def queue_stats(run_dir: str) -> dict:
+    """Stage M, from the meter: jumps onto the remembered replica, and what being passed cost the others."""
+    m = pd.read_sql("select * from requests where status = 'ok'", sqlite3.connect(f"{run_dir}/meter.sqlite"))
+    free = m[m["reservation_id"].isna() & (m["lazy"] == 0)]
+    out = {"queued_ms_p50": free["queued_ms"].median(), "queued_ms_p95": free["queued_ms"].quantile(0.95),
+           "queued_ms_p99": free["queued_ms"].quantile(0.99), "queued_ms_max": free["queued_ms"].max()}
+    if "queue_jumped" not in m:
+        return out
+    j, p = m[m["queue_jumped"].notna()], m[m["queue_passed"].notna()]
+    out.update(queue_jumps=len(j), jump_prompt_tokens=int(j["prompt_tokens"].sum()),
+               jump_cached_share=j["cached_tokens"].sum() / max(1, j["prompt_tokens"].sum()),
+               jump_positions_mean=j["queue_jumped"].mean() if len(j) else np.nan,
+               passed_requests=len(p), passed_times_max=p["queue_passed"].max() if len(p) else np.nan,
+               passed_ms_p50=p["queue_passed_ms"].median(), passed_ms_p95=p["queue_passed_ms"].quantile(0.95),
+               passed_ms_max=p["queue_passed_ms"].max(),
+               passed_within_1s=(p["queue_passed_ms"] <= 1000).mean() if len(p) else np.nan,
+               passed_hit_rate=(p["affinity"] == "hit").sum() / max(1, p["affinity"].notna().sum()))
     return out
 
 
@@ -47,8 +70,10 @@ def main() -> None:
             "wait_ms_hit_median", "cached_share", "cached_share_hits", "ttft_p95_ms_chat", "ttft_p95_ms_agent", "ttft_p95_ms_all",
             "start_p95_s", "floor_violation_rate", *(f"floor_miss_{x}" for x in TENANTS), "gross_margin_token", "gross_margin_shape",
             "output_tokens_per_gpu_hour", "replica_prompt_share_max", "replica_prompt_shares", "utilisation", "requests", "refused",
-            "tenant_usd", "per_token_usd"]
-    t = t[keep].sort_values(["label", "seed"])
+            "tenant_usd", "per_token_usd", "cached_share_misses", "queued_ms_p50", "queued_ms_p95", "queued_ms_p99", "queued_ms_max",
+            "queue_jumps", "jump_prompt_tokens", "jump_cached_share", "jump_positions_mean", "passed_requests", "passed_times_max",
+            "passed_ms_p50", "passed_ms_p95", "passed_ms_max", "passed_within_1s", "passed_hit_rate"]
+    t = t[[k for k in keep if k in t]].sort_values(["label", "seed"])
     out = a.out or f"{a.campaign}/stage_l_table.csv"
     t.to_csv(out, index=False)
     pd.set_option("display.width", 300, "display.max_columns", 60, "display.float_format", "{:.3f}".format)
