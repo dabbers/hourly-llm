@@ -23,7 +23,7 @@ import asyncio
 import logging
 import math
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -87,6 +87,9 @@ class Hold:
     revoked: bool = False
     pacer: Pacer | None = None  # the running request's pacer, for burst-rate updates
     engine_active: bool = False  # an engine run is in progress (an idle reserved slot is not)
+    # stage K (prefix affinity)
+    conversation: str | None = None
+    affinity: str | None = None  # None = no remembered replica; "hit"; else why it ran elsewhere (seat, kv, unhealthy, ...)
 
 
 class ReplicaLedger:
@@ -340,6 +343,7 @@ class Waiter:
     future: asyncio.Future[Hold]
     last_reason: str = "capacity"
     reasons: dict[str, int] = field(default_factory=dict)
+    conversation: str | None = None
 
 
 @dataclass
@@ -411,6 +415,60 @@ class Scheduler:
         self.abandoned = 0  # waiters whose client went away while queued (never served, never billed)
         self.revocations = 0
         self.bursts_admitted = 0
+        # stage K: conversation -> (replica id, last use), oldest first. Kept whether or not the flag is on,
+        # so a run without affinity still reports how often a turn landed on its last replica by itself.
+        self._affinity: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        self.affinity_hits = 0
+        self.affinity_fallbacks: dict[str, int] = {}
+
+    # ---- prefix affinity (stage K) --------------------------------------------------------------
+
+    def remembered(self, conversation: str | None) -> str | None:
+        """The replica that served the conversation's last turn, if it was used within the TTL."""
+        if conversation is None:
+            return None
+        entry = self._affinity.get(conversation)
+        if entry is None:
+            return None
+        if now() - entry[1] > self.settings.prefix_affinity_ttl_s:
+            del self._affinity[conversation]
+            return None
+        return entry[0]
+
+    def _touch(self, conversation: str | None, replica_id: str) -> None:
+        if conversation is None:
+            return
+        t = now()
+        self._affinity[conversation] = (replica_id, t)
+        self._affinity.move_to_end(conversation)
+        ttl = self.settings.prefix_affinity_ttl_s
+        while self._affinity:
+            key, (_, t_used) = next(iter(self._affinity.items()))
+            if t - t_used <= ttl and len(self._affinity) <= self.settings.prefix_affinity_max_entries:
+                break
+            del self._affinity[key]
+
+    def _affinity_reason(self, shape: Shape, prompt_tokens: int, kv_needed: int | None, remembered: str) -> str:
+        """Why the remembered replica does not take the request now: the failing rule, or "gone"."""
+        for ledg in self.candidates(shape):
+            if ledg.id == remembered:
+                kv = ledg.kv_blocks(kv_needed) if kv_needed is not None else ledg.kv_for(shape)
+                return ledg.check(shape, kv, prompt_tokens) or "score"
+        return "gone"
+
+    def _placed(self, h: Hold, conversation: str | None, remembered: str | None, reason: str | None = None) -> Hold:
+        """Book a placement against the conversation: hit or fallback (with its reason), then remember it.
+        `reason` is why the remembered replica did not fit, taken before the hold changed its ledger."""
+        h.conversation = conversation
+        if remembered is not None:
+            if h.ledger.id == remembered:
+                h.affinity = "hit"
+                self.affinity_hits += 1
+            else:
+                h.affinity = reason or "score"
+                self.affinity_fallbacks[h.affinity] = self.affinity_fallbacks.get(h.affinity, 0) + 1
+        self._touch(conversation, h.ledger.id)
+        return h
 
     # ---- placement ----------------------------------------------------------------------------
 
@@ -424,10 +482,22 @@ class Scheduler:
 
     def place(
         self, shape: Shape, prompt_tokens: int, record: Waiter | _Probe | None = None, kv_needed: int | None = None,
-        replica_id: str | None = None,
+        replica_id: str | None = None, conversation: str | None = None,
     ) -> ReplicaLedger | None:
+        """The replica for a request that fits now, or None. With `prefix_affinity` on, the replica that
+        served the conversation's last turn is taken when it fits; otherwise (and always with the flag
+        off) the lowest (capacity_loss, load) wins. The remembered replica is never waited for."""
+        cands = self.candidates(shape, replica_id)
+        if self.settings.prefix_affinity and conversation is not None and replica_id is None:
+            remembered = self.remembered(conversation)
+            for ledg in cands:
+                if ledg.id == remembered:
+                    kv = ledg.kv_blocks(kv_needed) if kv_needed is not None else ledg.kv_for(shape)
+                    if ledg.check(shape, kv, prompt_tokens) is None:
+                        return ledg
+                    break
         best: tuple[tuple[int, float], ReplicaLedger] | None = None
-        for ledg in self.candidates(shape, replica_id):
+        for ledg in cands:
             reason = ledg.check(shape, ledg.kv_blocks(kv_needed) if kv_needed is not None else ledg.kv_for(shape), prompt_tokens)
             if reason is not None:
                 if record is not None:
@@ -496,7 +566,7 @@ class Scheduler:
             if w.future.done():
                 q.popleft()
                 continue
-            ledg = self.place(w.shape, w.prompt_tokens, record=w, kv_needed=w.kv_needed)
+            ledg = self.place(w.shape, w.prompt_tokens, record=w, kv_needed=w.kv_needed, conversation=w.conversation)
             if ledg is None and cls == "interactive":
                 ledg = self._preempt_for(w.shape, w.prompt_tokens)
             if ledg is None:
@@ -504,9 +574,12 @@ class Scheduler:
                     self._revoke_for(w)
                 return False
             q.popleft()
-            w.future.set_result(
-                ledg.hold(w.request_id, w.shape, self._kv_needed(ledg, w), w.prompt_tokens, w.preemptable, w.burst_ctx)
-            )
+            remembered = self.remembered(w.conversation)
+            reason = None
+            if remembered is not None and ledg.id != remembered:
+                reason = self._affinity_reason(w.shape, w.prompt_tokens, w.kv_needed, remembered)
+            h = ledg.hold(w.request_id, w.shape, self._kv_needed(ledg, w), w.prompt_tokens, w.preemptable, w.burst_ctx)
+            w.future.set_result(self._placed(h, w.conversation, remembered, reason))
             if w.burst_ctx:
                 self.bursts_admitted += 1
         return True
@@ -658,6 +731,7 @@ class Scheduler:
         max_wait_s: float | None = None,
         kv_tokens: int | None = None,
         burst_ctx: bool = False,
+        conversation: str | None = None,
     ) -> Hold:
         """Return a Hold on some replica, waiting up to the shape's max_queue_s. A tenant with a
         reservation covering the shape takes one of its slots (or waits for one); a context burst
@@ -673,6 +747,7 @@ class Scheduler:
                     slot.ledger.occupy(slot, request_id, prompt_tokens)
                     res.served += 1
                     self._refresh_burst()
+                    self._touch(conversation, slot.ledger.id)  # a reserved slot is where it is: remembered, not scored
                     return slot
                 if not self.settings.reservation_spill:
                     return await self._wait_reservation(res, request_id, shape, prompt_tokens, timeout)
@@ -683,16 +758,21 @@ class Scheduler:
         ahead = [self.queues[c] for c in QUEUE_ORDER[: QUEUE_ORDER.index(cls) + 1]]
         others_waiting = any(bool(q) for q in ahead)
         if not others_waiting and not front:
-            ledg = self.place(shape, prompt_tokens, kv_needed=kv_tokens)
+            ledg = self.place(shape, prompt_tokens, kv_needed=kv_tokens, conversation=conversation)
             if ledg is not None:
+                remembered = self.remembered(conversation)
+                reason = None
+                if remembered is not None and ledg.id != remembered:
+                    reason = self._affinity_reason(shape, prompt_tokens, kv_tokens, remembered)
                 kv = ledg.kv_blocks(kv_tokens) if kv_tokens is not None else ledg.kv_for(shape)
-                h = ledg.hold(request_id, shape, kv, prompt_tokens, preemptable, burst_ctx)
+                h = self._placed(ledg.hold(request_id, shape, kv, prompt_tokens, preemptable, burst_ctx), conversation, remembered, reason)
                 if burst_ctx:
                     self.bursts_admitted += 1
                 self._refresh_burst()
                 return h
         loop = asyncio.get_running_loop()
-        w = Waiter(request_id, shape, prompt_tokens, kv_tokens, preemptable, burst_ctx, now(), loop.create_future())
+        w = Waiter(request_id, shape, prompt_tokens, kv_tokens, preemptable, burst_ctx, now(), loop.create_future(),
+                   conversation=conversation)
         if front:
             queue.appendleft(w)
         else:
@@ -727,6 +807,8 @@ class Scheduler:
                 self._dispatch_reservation(res)
         else:
             h.ledger.release(h)
+        if h.conversation is not None and h.conversation in self._affinity:
+            self._touch(h.conversation, h.ledger.id)  # idle time counts from the end of the turn
         self.dispatch()
 
     def mark_prefill_done(self, h: Hold) -> None:
@@ -744,6 +826,12 @@ class Scheduler:
             "abandoned": self.abandoned,
             "revocations": self.revocations,
             "bursts_admitted": self.bursts_admitted,
+            "prefix_affinity": {
+                "enabled": self.settings.prefix_affinity,
+                "hits": self.affinity_hits,
+                "fallbacks": dict(self.affinity_fallbacks),
+                "remembered": len(self._affinity),
+            },
             "burst": self.burst.model_dump(),
             "reservations": [r.snapshot() for r in self.reservations.values() if r.t_end is None],
             "ledgers": {ledg.id: ledg.snapshot() for ledg in self.ledgers},

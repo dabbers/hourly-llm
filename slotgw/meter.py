@@ -107,6 +107,9 @@ class RequestRecord:
     cached_tokens: int = 0  # prompt tokens vLLM served from its prefix cache (priced at the cache-read rate)
     billed_shape: str | None = None  # the shape whose tps and price applied: the request's own, or the burst class of a context burst
     showcase: str | None = None  # X-Slotgw-Showcase: a real prompt whose text is kept for the report's output samples
+    # stage K
+    conversation_id: str | None = None  # X-Slotgw-Conversation: stable across the turns of one conversation
+    affinity: str | None = None  # None = no remembered replica; "hit" = ran on it; else why not (seat, kv, unhealthy, score, ...)
 
     @property
     def ttft_ms(self) -> float | None:
@@ -162,6 +165,7 @@ class Meter:
         for col, typ in (
             ("load_run", "TEXT"), ("scenario", "TEXT"), ("seed", "INTEGER"), ("delivered_tokens", "INTEGER"),
             ("reservation_id", "TEXT"), ("cached_tokens", "INTEGER"), ("billed_shape", "TEXT"), ("showcase", "TEXT"),
+            ("conversation_id", "TEXT"), ("affinity", "TEXT"),
         ):
             if col not in have:  # meter files written before the column existed
                 self._conn.execute(f"ALTER TABLE requests ADD COLUMN {col} {typ}")

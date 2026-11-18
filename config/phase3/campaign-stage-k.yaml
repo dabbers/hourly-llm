@@ -1,0 +1,11 @@
+# Stage K manifest: the two arms of the cache-aware routing experiment (config/phase3/matrix-stage-k.yaml),
+# paired by seed, difference = k-affinity - k-base.
+settings:
+  k-base: {desc: "on demand, bursting on, prefill chunk 2048, placement by (capacity_loss, load) as in phase 3"}
+  k-affinity: {desc: "k-base with admission.prefix_affinity on: a conversation returns to its last replica when that fits now"}
+pairs:
+  - [k-affinity, k-base]
+headline:
+  - [k-affinity, k-base]
+scorecard:
+  baseline: k-base

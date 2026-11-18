@@ -11,6 +11,7 @@ admission:
   lazy_max_share: 0.5
   lazy_preempt: ${SLOTGW_LAZY_PREEMPT:-never}
   max_prefill_tokens_in_flight: ${SLOTGW_MAX_PREFILL_TOKENS:-0}
+  prefix_affinity: ${SLOTGW_PREFIX_AFFINITY:-false}       # stage K: a conversation's next turn returns to its last replica when that fits now (never waits)
   dispatch_tick_s: 0.25
   reservation_spill: ${SLOTGW_RESERVATION_SPILL:-false}
   health_interval_s: 5.0

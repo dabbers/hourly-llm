@@ -69,6 +69,17 @@ RUN_METRICS: dict[str, tuple[str, Callable]] = {
     "context_bursts": ("requests over their shape's context admitted as bursts into free KV", html.fmt_int),
     "output_tokens": ("output tokens of completed requests", html.fmt_int),
     "cached_share": ("prompt tokens vLLM served from its prefix cache ÷ prompt tokens", html.fmt_pct),
+    "affinity_hit_rate": (
+        ("stage K: requests placed on the replica that served their conversation's last turn ÷ requests "
+         "that had one remembered (with the flag off: what placement by load does by itself)"),
+        html.fmt_pct,
+    ),
+    "affinity_fallbacks": ("requests with a remembered replica that ran elsewhere (no free seat, no free KV, unhealthy, ...)", html.fmt_int),
+    "affinity_fallback_seat": ("of which: the remembered replica had no free seat", html.fmt_int),
+    "affinity_fallback_kv": ("of which: the remembered replica had no free KV for the shape", html.fmt_int),
+    "affinity_fallback_unhealthy": ("of which: the remembered replica was unhealthy", html.fmt_int),
+    "replica_request_share_max": ("the busiest replica's share of completed requests (1 ÷ replicas = even)", html.fmt_pct),
+    "replica_prompt_share_max": ("the busiest replica's share of prompt tokens (1 ÷ replicas = even)", html.fmt_pct),
     "per_token_usd": ("revenue under per-token billing: reference list prices, lazy at the batch discount", html.fmt_usd),
     "tenant_usd": ("revenue under shape billing: on-demand shape bills plus reservation fees", html.fmt_usd),
     "reservation_usd": ("of which reservation fees: slots × duration × the shape's price per second", html.fmt_usd),
@@ -241,7 +252,8 @@ def _utilisation(sub: pd.DataFrame, weights: dict[str, float], plans: dict[str, 
 
 
 CAPACITY_METRICS = ["refusal_rate", "start_violation_rate", "start_p95_s", "utilisation", "plan_agent_steps"]
-RUN_EXTRA = ["kv_profile", "kv_total_min", "reservation_factor"]  # per-run facts beside the metrics: the replicas' KV budgets, the fee factor
+RUN_EXTRA = ["kv_profile", "kv_total_min", "reservation_factor",
+             "affinity_fallback_reasons", "replica_request_shares", "replica_prompt_shares"]  # per-run facts beside the metrics: the replicas' KV budgets, the fee factor
 CAPACITY_COLUMNS = ["label", "kv_profile", "n", "seeds", *CAPACITY_METRICS]
 
 

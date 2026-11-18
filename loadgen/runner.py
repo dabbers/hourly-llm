@@ -491,6 +491,8 @@ class LoadRunner:
             "X-Slotgw-Run": self.load_run_id,
             "X-Slotgw-Scenario": self.scenario_label,
             "X-Slotgw-Seed": str(self.plan.seed),
+            # one id for every turn of a session (chat, agent); one-step sessions (note-taker, batch) get their own
+            "X-Slotgw-Conversation": f"{self.load_run_id}:{session.id}",
         }
         if showcase:
             headers["X-Slotgw-Showcase"] = showcase

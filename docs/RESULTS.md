@@ -845,6 +845,50 @@ Sources: `runs/phase3/campaign/campaign.html` ("Scorecard and re-pricing frontie
 `frontier.csv` (one row per setting × factor × credit × basis; `campaign_table` marks the prices the runs
 were billed at); the criteria and the first read over 50 runs in PHASE3.md §9 A.
 
+## Q14. Does sending a conversation back to the replica that served its last turn fix the prefill problem?
+
+**Status: built, tested and rehearsed on fake replicas; not yet run on hardware. The hypothesis below was
+written on 2026-11-18, before any run. The results go under it and nothing above this line changes.**
+
+Why ask. `Scheduler.place()` scored candidates by `(capacity_loss, load)` only, and vLLM's prefix cache lives
+on one engine, so a chat or agent turn that lands on another replica prefills its whole history again. The
+campaign's cached share was 33–46% of prompt tokens at about 15 prompt tokens per output token, and prefill
+was the main cause of the floor misses (Q5, Q10, Q12).
+
+What changes (stage K, one variable: routing).
+
+- The load generator sends `X-Slotgw-Conversation` (one id per session: every turn of a chat or an agent run
+  shares it; a note-taker or batch request has its own). The gateway keeps it on the request record.
+- `admission.prefix_affinity` (`SLOTGW_PREFIX_AFFINITY`, default off). On: the scheduler remembers
+  conversation → replica from the last placement (forgotten after 120 s idle, counted from the end of the
+  turn) and places the next turn there if that replica fits it now (healthy, free seat, free KV for the shape,
+  and the other admission rules). If it does not fit, the request is placed by `(capacity_loss, load)` at
+  once; it never waits or queues for the remembered replica. Off: placement is the phase-3 code path
+  (tested: the same stream of admissions lands on the same replicas with and without conversation ids).
+- The remembered replica is tracked in both arms, so the baseline reports the hit rate that placement by
+  load gives by itself. Per run: affinity hit rate (placed on the remembered replica ÷ requests that had
+  one), fallbacks by reason (`seat`, `kv`, `unhealthy`; `score` appears only with the flag off: the replica
+  fitted and load chose another), and each replica's share of requests and of prompt tokens.
+
+The experiment. `config/phase3/matrix-stage-k.yaml`: `k-base` (on demand, bursting on, affinity off) and
+`k-affinity` (the same with affinity on), seeds 1–4 for both, interleaved by seed; scenario
+`mixed-4090.yaml`, `--no-reservations`; engines at prefill chunk 2048 (`--max-num-batched-tokens 2048`),
+prefix caching on, fp16 KV, everything else as in the campaign; the KV preflight before every run. Seeds
+1–3 are the heavy-agent days. Budget: about $10 of GPU time.
+
+Hypothesis (before running), `k-affinity` against `k-base` on the same seeds:
+
+| # | Line | Holds if |
+|---|---|---|
+| H1 | cached share of prompt tokens rises | from about 40% to 65% or more |
+| H2 | chat and agent TTFT p95 fall | both lower in the paired difference |
+| H3 | floor misses fall | all-request floor misses lower, and the agent tenant's below the 58% no earlier lever beat |
+| H4 | the start does not pay for it | start p95 not more than 10% worse |
+| H5 | the provider does not pay for it | gross margin and output per GPU-hour not below the baseline's |
+| H6 | no replica is overloaded | no replica takes more than 45% of prompt tokens |
+
+Results: pending the run.
+
 ## What was not measured, and what to do next
 
 Measured since the phase-2 list: reservation spill (`resv-spill`, `resv-p95-spill`, Q8), the `abort` revocation

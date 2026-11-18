@@ -7,6 +7,7 @@ import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -59,7 +60,8 @@ def read_meter(path: Path) -> pd.DataFrame:
         conn.close()
     if "reservation_id" not in df:  # meter files written before milestone 4
         df["reservation_id"] = None
-    for col, default in (("cached_tokens", 0), ("billed_shape", None), ("showcase", None)):  # before phase 2
+    for col, default in (("cached_tokens", 0), ("billed_shape", None), ("showcase", None),  # before phase 2
+                         ("conversation_id", None), ("affinity", None)):  # before stage K
         if col not in df:
             df[col] = default
     return df
@@ -282,6 +284,49 @@ def concurrency_series(ok: pd.DataFrame, t0: float, t1: float) -> np.ndarray:
     return np.cumsum(delta)[:n]
 
 
+AFFINITY_REASONS = ("seat", "kv", "unhealthy")  # the fallback reasons with their own column; the rest is "other"
+
+
+def affinity_stats(sub: pd.DataFrame) -> dict[str, Any]:
+    """Stage K, over every placed request of a run that had a remembered replica (`affinity` set by the
+    scheduler): how many ran on it, and why the others did not. With the flag off nothing is steered, so
+    the hit rate is what (capacity_loss, load) placement gives by itself and the reason is mostly "score"."""
+    aff = sub["affinity"].dropna() if "affinity" in sub else pd.Series(dtype=object)
+    aff = aff[aff.astype(str) != ""]
+    n, hits = len(aff), int((aff == "hit").sum())
+    fb = aff[aff != "hit"].value_counts()
+    out: dict[str, Any] = {
+        "affinity_eligible": n,
+        "affinity_hits": hits,
+        "affinity_hit_rate": hits / n if n else np.nan,
+        "affinity_fallbacks": n - hits,
+    }
+    for r in AFFINITY_REASONS:
+        out[f"affinity_fallback_{r}"] = int(fb.get(r, 0))
+    out["affinity_fallback_other"] = int(n - hits - sum(out[f"affinity_fallback_{r}"] for r in AFFINITY_REASONS))
+    out["affinity_fallback_reasons"] = " · ".join(f"{k} {int(v)}" for k, v in fb.items())
+    return out
+
+
+def replica_shares(ok: pd.DataFrame) -> dict[str, Any]:
+    """Each replica's share of a run's completed requests and prompt tokens, and the largest of each."""
+    g = ok.groupby("replica").agg(n=("request_id", "size"), prompt=("prompt_tokens", "sum")) if len(ok) else pd.DataFrame()
+    if g.empty or g["prompt"].sum() == 0:
+        return {"replica_request_share_max": np.nan, "replica_prompt_share_max": np.nan,
+                "replica_request_shares": "", "replica_prompt_shares": ""}
+    req, prompt = g["n"] / g["n"].sum(), g["prompt"] / g["prompt"].sum()
+
+    def short(replica: str) -> str:
+        return str(replica).rsplit("-", 1)[-1]
+
+    return {
+        "replica_request_share_max": float(req.max()),
+        "replica_prompt_share_max": float(prompt.max()),
+        "replica_request_shares": " · ".join(f"{short(k)} {v:.1%}" for k, v in req.items()),
+        "replica_prompt_shares": " · ".join(f"{short(k)} {v:.1%}" for k, v in prompt.items()),
+    }
+
+
 def per_run(df: pd.DataFrame, loads: list[LoadRun], config: Config, reservations: pd.DataFrame | None = None) -> pd.DataFrame:
     """One row per load run: totals, both bills, GPU cost, concurrency and sampled replica state."""
     metas = {lr.id: lr for lr in loads}
@@ -320,6 +365,8 @@ def per_run(df: pd.DataFrame, loads: list[LoadRun], config: Config, reservations
             "prompt_tokens": int(ok["prompt_tokens"].sum()),
             "cached_tokens": int(ok["cached_tokens"].sum()),
             "cached_share": float(ok["cached_tokens"].sum() / ok["prompt_tokens"].sum()) if ok["prompt_tokens"].sum() else np.nan,
+            **affinity_stats(sub),
+            **replica_shares(ok),
             "output_tokens": int(ok["output_tokens"].sum()),
             "delivered_tokens": int(ok["delivered_tokens"].sum()),
             "per_token_usd": float(ok["per_token_usd"].sum()),
@@ -452,6 +499,10 @@ def per_replica(
                 "ok": len(ok),
                 "output_tokens": int(ok["output_tokens"].sum()),
                 "prompt_tokens": int(ok["prompt_tokens"].sum()),
+                "request_share": len(ok) / len(ok_all) if len(ok_all) else np.nan,
+                "prompt_share": float(ok["prompt_tokens"].sum() / ok_all["prompt_tokens"].sum()) if ok_all["prompt_tokens"].sum() else np.nan,
+                "cached_share": float(ok["cached_tokens"].sum() / ok["prompt_tokens"].sum()) if ok["prompt_tokens"].sum() else np.nan,
+                "affinity_hit_rate": affinity_stats(run[run["replica"] == replica])["affinity_hit_rate"],
                 "seat_seconds": seat_s,
                 "slots": slots,
                 "slot_plan": ";".join(f"{n}x{name}" for name, n in plan.items()),

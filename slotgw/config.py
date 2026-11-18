@@ -179,6 +179,11 @@ class AdmissionSettings(BaseModel):
     dispatch_tick_s: float = Field(default=0.25, gt=0)
     health_interval_s: float = Field(default=5.0, gt=0)
     reservation_spill: bool = False  # a reserved tenant whose slots are busy may compete on demand
+    # stage K: a conversation's next turn goes back to the replica that served its last one when that replica
+    # fits it now (vLLM's prefix cache lives on one engine); it never waits for it. Off = the placement of phase 3.
+    prefix_affinity: bool = False
+    prefix_affinity_ttl_s: float = Field(default=120.0, gt=0)  # a conversation idle this long is forgotten
+    prefix_affinity_max_entries: int = Field(default=100_000, ge=1)
 
 
 class BurstSettings(BaseModel):

@@ -212,8 +212,10 @@ def test_campaign_end_to_end(tmp_path):
     st = pd.read_csv(out / "settings.csv")
     assert set(st["label"]) == {"burstoff", "burst", "resv-shared", "resv-spill"}
     assert list(dict.fromkeys(st["label"])) == ["burstoff", "burst", "resv-shared", "resv-spill"]  # manifest order, not run-dir order
-    assert (st[~st["metric"].str.startswith("plan_") & (st["label"] != "resv-spill")]["n"] == 3).all()
-    assert (st[st["label"] == "resv-spill"]["n"] == 2).all()
+    # affinity_hit_rate has no value in runs whose requests carry no conversation id (before stage K)
+    counted = ~st["metric"].str.startswith("plan_") & (st["metric"] != "affinity_hit_rate")
+    assert (st[counted & (st["label"] != "resv-spill")]["n"] == 3).all()
+    assert (st[(st["label"] == "resv-spill") & (st["metric"] != "affinity_hit_rate")]["n"] == 2).all()
     assert (st[st["metric"].str.startswith("plan_") & (st["label"] == "burst")]["n"] == 2).all()  # burst-s1 has no plan
     util = st[st["metric"] == "utilisation"].set_index("label")["mean"]
     assert (util > 0).all() and (util < 1).all()

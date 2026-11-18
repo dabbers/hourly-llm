@@ -148,6 +148,7 @@ def _load_tags(request: Request, rec: RequestRecord) -> None:
     seed = request.headers.get("x-slotgw-seed")
     rec.seed = int(seed) if seed and seed.lstrip("-").isdigit() else None
     rec.showcase = request.headers.get("x-slotgw-showcase") or None
+    rec.conversation_id = (request.headers.get("x-slotgw-conversation") or "")[:200] or None
 
 
 def _store_text(state: GatewayState, rec: RequestRecord, payload: dict[str, Any], text: str) -> None:
@@ -432,6 +433,7 @@ def build_router() -> APIRouter:
                     state.scheduler.admit(
                         request_id, billed_shape, prompt_tokens, tenant=tenant.name, preemptable=preemptable,
                         kv_tokens=need if burst_ctx else None, burst_ctx=burst_ctx,
+                        conversation=rec.conversation_id,
                     ),
                 )
             except ClientGone as e:
@@ -463,6 +465,7 @@ def build_router() -> APIRouter:
             replica = state.replica_by_id(hold.ledger.id)
             rec.replica = replica.id
             rec.reservation_id = hold.reservation_id if hold.reserved else None
+            rec.affinity = None if hold.reserved else hold.affinity
             hold.pacer = pacer
             state.scheduler.dispatch()  # lends this request its burst rate
         rec.t_admitted = now()

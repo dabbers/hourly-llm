@@ -1,0 +1,28 @@
+# Stage K (cache-aware routing, one variable): on demand + bursting with vLLM's prefill chunk at 2048, once with
+# the phase-3 placement (k-base) and once with soft prefix affinity (k-affinity: a conversation's next turn goes
+# back to the replica that served its last one when that replica fits it now, never waiting for it). Everything
+# else is the phase-3 campaign: prefix caching on, fp16 KV, the same prices, shapes and tenants. Mirrors
+# matrix-chunk2048.yaml. Engines are started with the chunk first (VLLM_MAX_NUM_BATCHED_TOKENS=2048 at install,
+# or START_ORDER="1 2 0" STAGGER=1 pod.sh vllm <gw> restart ... with --max-num-batched-tokens 2048), and the KV
+# preflight runs before every run (kv_spread_max; a cold first start has come back short on one GPU four times:
+# restart that engine and re-check before spending a run). Arms are interleaved by seed so a lost last run still
+# leaves complete pairs; seeds 1-3 are the heavy-agent days, 4 the light one.
+#   bash scripts/pod.sh chain <gw> start config/phase3/matrix-stage-k.yaml --max-hours 3 --stop-pods --stop-grace-min 20
+scenario: config/scenarios/mixed-4090.yaml
+config_dir: config/phase2
+expect_replicas: 3
+expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
+expect_calibration: runpod-4090
+kv_spread_max: 0.01          # the chunk size moves the absolute KV budget; the engines must still agree within 1 %
+report_out: runs/stage-k/report
+report_mode: last
+continue_on_fail: false      # a failed preflight stops the chain: nothing more is spent on a confounded pair
+runs:
+  - {label: k-base,     seeds: [1], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "false"}, loadgen_args: ["--no-reservations"]}
+  - {label: k-affinity, seeds: [1], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true"},  loadgen_args: ["--no-reservations"]}
+  - {label: k-base,     seeds: [2], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "false"}, loadgen_args: ["--no-reservations"]}
+  - {label: k-affinity, seeds: [2], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true"},  loadgen_args: ["--no-reservations"]}
+  - {label: k-base,     seeds: [3], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "false"}, loadgen_args: ["--no-reservations"]}
+  - {label: k-affinity, seeds: [3], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true"},  loadgen_args: ["--no-reservations"]}
+  - {label: k-base,     seeds: [4], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "false"}, loadgen_args: ["--no-reservations"]}
+  - {label: k-affinity, seeds: [4], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true"},  loadgen_args: ["--no-reservations"]}

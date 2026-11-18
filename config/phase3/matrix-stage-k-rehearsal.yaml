@@ -1,0 +1,15 @@
+# Stage K rehearsal on three fake replicas (scripts/rehearsal.sh): the two-minute smoke once per arm, to show
+# the conversation header, the affinity columns and the stage-K report before a pod is started.
+#   bash scripts/rehearsal.sh chain config/phase3/matrix-stage-k-rehearsal.yaml
+scenario: config/scenarios/smoke-4090.yaml
+config_dir: config/phase2
+expect_replicas: 3
+expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
+expect_calibration: runpod-4090
+report_out: runs/rehearsal/report
+report_mode: last
+continue_on_fail: false
+fresh_runs: true
+runs:
+  - {label: k-base,     seeds: [1], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "false"}, loadgen_args: ["--no-reservations"]}
+  - {label: k-affinity, seeds: [1], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true"},  loadgen_args: ["--no-reservations"]}
