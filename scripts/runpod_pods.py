@@ -63,6 +63,10 @@ class RunPodError(Exception):
         self.body = body
 
 
+class RunPodUnreachable(RunPodError):
+    """The REST host could not be reached at all (DNS, connection refused): the call falls back to GraphQL."""
+
+
 # ---- secrets ---------------------------------------------------------------------------------
 
 
@@ -107,6 +111,20 @@ def redact_env(env: dict[str, str]) -> dict[str, str]:
     return {k: (REDACTED if SECRET_NAME_RE.search(k) else v) for k, v in env.items()}
 
 
+GQL_POD_FIELDS = "id name desiredStatus costPerHr gpuCount runtime { ports { ip isIpPublic privatePort publicPort } }"
+
+
+def gql_pod_view(info: dict[str, Any]) -> dict[str, Any]:
+    """A GraphQL pod in the shape of GET /pods/{id}: publicIp and portMappings from runtime.ports."""
+    ports = [p for p in ((info.get("runtime") or {}).get("ports") or []) if p.get("isIpPublic")]
+    return {
+        "id": info.get("id"), "name": info.get("name"), "desiredStatus": info.get("desiredStatus"),
+        "costPerHr": info.get("costPerHr"), "gpuCount": info.get("gpuCount"),
+        "publicIp": ports[0]["ip"] if ports else "",
+        "portMappings": {str(p["privatePort"]): p["publicPort"] for p in ports},
+    }
+
+
 # ---- client ----------------------------------------------------------------------------------
 
 
@@ -121,6 +139,8 @@ class RunPod:
         headers = {"Authorization": f"Bearer {self._key}", "Content-Type": "application/json"}
         try:
             r = self.client.request(method, path, json=json, headers=headers)
+        except httpx.ConnectError as e:
+            raise RunPodUnreachable(f"{method} {path}: {redact(str(e), self._key)}") from None
         except httpx.HTTPError as e:
             raise RunPodError(f"{method} {path}: {redact(str(e), self._key)}") from None
         if r.status_code >= 400:
@@ -133,26 +153,81 @@ class RunPod:
         except ValueError:
             return {"raw": redact(r.text[:500], self._key)}
 
+    # Each call tries the REST API and, when its host cannot be reached at all (on 2026-11-17 rest.runpod.io
+    # did not resolve while api.runpod.io did), repeats the operation through the GraphQL API with the same
+    # key. An HTTP error from REST is an answer, not an outage, and is never retried this way.
+
     def create_pod(self, body: dict[str, Any]) -> dict[str, Any]:
-        return self.request("POST", "/pods", json=body)
+        try:
+            return self.request("POST", "/pods", json=body)
+        except RunPodUnreachable:
+            return self._gql_create(body)
 
     def get_pod(self, pod_id: str) -> dict[str, Any]:
-        return self.request("GET", f"/pods/{pod_id}")
+        try:
+            return self.request("GET", f"/pods/{pod_id}")
+        except RunPodUnreachable:
+            info = self.graphql('query { pod(input: {podId: "' + pod_id + '"}) { ' + GQL_POD_FIELDS + " } }").get("pod")
+            if not info:
+                raise RunPodError(f"graphql: pod {pod_id} not found", 404) from None
+            return gql_pod_view(info)
 
     def list_pods(self) -> list[dict[str, Any]]:
-        data = self.request("GET", "/pods")
+        try:
+            data = self.request("GET", "/pods")
+        except RunPodUnreachable:
+            me = self.graphql("query { myself { pods { " + GQL_POD_FIELDS + " } } }").get("myself") or {}
+            return [gql_pod_view(p) for p in me.get("pods") or []]
         if isinstance(data, dict):
             data = data.get("pods") or data.get("data") or []
         return list(data)
 
     def stop_pod(self, pod_id: str) -> Any:
-        return self.request("POST", f"/pods/{pod_id}/stop")
+        try:
+            return self.request("POST", f"/pods/{pod_id}/stop")
+        except RunPodUnreachable:
+            return self.graphql('mutation { podStop(input: {podId: "' + pod_id + '"}) { id desiredStatus } }')["podStop"]
 
     def start_pod(self, pod_id: str) -> Any:
-        return self.request("POST", f"/pods/{pod_id}/start")
+        try:
+            return self.request("POST", f"/pods/{pod_id}/start")
+        except RunPodUnreachable:
+            pod = self.graphql('query { pod(input: {podId: "' + pod_id + '"}) { gpuCount } }').get("pod") or {}
+            q = ('mutation { podResume(input: {podId: "' + pod_id + '", gpuCount: ' + str(int(pod.get("gpuCount") or 1))
+                 + "}) { id desiredStatus } }")
+            return self.graphql(q)["podResume"]
 
     def terminate_pod(self, pod_id: str) -> Any:
-        return self.request("DELETE", f"/pods/{pod_id}")
+        try:
+            return self.request("DELETE", f"/pods/{pod_id}")
+        except RunPodUnreachable:
+            return self.graphql('mutation { podTerminate(input: {podId: "' + pod_id + '"}) }')
+
+    def _gql_create(self, body: dict[str, Any]) -> dict[str, Any]:
+        """POST /pods as podFindAndDeployOnDemand. Not carried over: globalNetworking (one pod needs none)
+        and a replaced entrypoint (the bootstrap path is refused rather than silently dropped)."""
+        if body.get("dockerEntrypoint") or body.get("dockerStartCmd"):
+            raise RunPodError("the REST API is unreachable and the GraphQL fallback does not do --bootstrap")
+        env = ", ".join("{key: " + json.dumps(str(k)) + ", value: " + json.dumps(str(v)) + "}"
+                        for k, v in (body.get("env") or {}).items())
+        fields = [
+            "cloudType: " + str(body.get("cloudType") or "SECURE"),
+            "gpuCount: " + str(int(body.get("gpuCount") or 1)),
+            "gpuTypeId: " + json.dumps(body["gpuTypeIds"][0]),
+            "name: " + json.dumps(body["name"]),
+            "imageName: " + json.dumps(body["imageName"]),
+            "containerDiskInGb: " + str(int(body["containerDiskInGb"])),
+            "volumeInGb: " + str(int(body["volumeInGb"])),
+            "volumeMountPath: " + json.dumps(body.get("volumeMountPath") or "/workspace"),
+            "ports: " + json.dumps(",".join(body.get("ports") or [])),
+            "supportPublicIp: true",
+            "env: [" + env + "]",
+        ]
+        dcs = body.get("dataCenterIds") or []
+        if dcs:
+            fields.append("dataCenterId: " + json.dumps(dcs[0]))
+        q = "mutation { podFindAndDeployOnDemand(input: {" + ", ".join(fields) + "}) { id costPerHr desiredStatus } }"
+        return self.graphql(q).get("podFindAndDeployOnDemand") or {}
 
     def graphql(self, query: str) -> dict[str, Any]:
         """RunPod's GraphQL API (same key); raises RunPodError on HTTP or GraphQL errors, redacted."""

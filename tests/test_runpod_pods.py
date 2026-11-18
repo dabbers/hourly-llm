@@ -389,3 +389,40 @@ def test_env_file_lists_one_replica_per_gpu_of_a_multi_gpu_pod():
     assert text.count("_ID=p1") == 3 and "REPLICA_D_" not in text
     one_each = rpods.env_file_text([{"name": "slotgw-a", "id": "p1"}, {"name": "slotgw-b", "id": "p2"}], "b")
     assert "REPLICA_A_URL=http://p1.runpod.internal:8000" in one_each and "REPLICA_B_URL=http://127.0.0.1:8000" in one_each
+
+
+def test_rest_unreachable_falls_back_to_graphql(tmp_path):
+    """rest.runpod.io did not resolve on 2026-11-17: create, status, stop and terminate go through GraphQL."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "rest.runpod.io":
+            raise httpx.ConnectError("[Errno 11001] getaddrinfo failed", request=request)
+        q = json.loads(request.content)["query"]
+        seen.append(q)
+        pod = {"id": "p1", "name": "slotgw-a", "desiredStatus": "RUNNING", "costPerHr": 2.68, "gpuCount": 3,
+               "runtime": {"ports": [{"ip": "1.2.3.4", "isIpPublic": True, "privatePort": 22, "publicPort": 40022},
+                                     {"ip": "10.0.0.1", "isIpPublic": False, "privatePort": 19123, "publicPort": 1}]}}
+        if "podFindAndDeployOnDemand" in q:
+            return httpx.Response(200, json={"data": {"podFindAndDeployOnDemand": {"id": "p1", "costPerHr": 2.68}}})
+        if "podStop" in q:
+            return httpx.Response(200, json={"data": {"podStop": {"id": "p1", "desiredStatus": "EXITED"}}})
+        if "podTerminate" in q:
+            return httpx.Response(200, json={"data": {"podTerminate": None}})
+        if "myself" in q:
+            return httpx.Response(200, json={"data": {"myself": {"pods": [pod]}}})
+        return httpx.Response(200, json={"data": {"pod": pod}})
+
+    rp = rpods.RunPod(KEY, client=httpx.Client(transport=httpx.MockTransport(handler), base_url=rpods.API_URL))
+    pods_path = tmp_path / "pods.json"
+    created = rpods.cmd_create(rp, count=1, gpu_count=3, volume_gb=30, disk_gb=40, pods_path=pods_path, out=lambda s: None)
+    assert created[0]["id"] == "p1" and created[0]["gpu_count"] == 3
+    deploy = next(q for q in seen if "podFindAndDeployOnDemand" in q)
+    assert "gpuCount: 3" in deploy and 'ports: "8000/tcp,22/tcp"' in deploy and "volumeInGb: 30" in deploy and KEY not in deploy
+    info = rp.get_pod("p1")
+    assert info["publicIp"] == "1.2.3.4" and info["portMappings"] == {"22": 40022}
+    assert rpods.apply_status({"id": "p1"}, info)["ssh_port"] == 40022
+    assert [p["id"] for p in rp.list_pods()] == ["p1"]
+    assert rp.stop_pod("p1")["desiredStatus"] == "EXITED"
+    rp.terminate_pod("p1")
+    assert any("podTerminate" in q for q in seen)
