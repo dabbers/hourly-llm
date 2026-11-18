@@ -895,8 +895,9 @@ headline lines are 0.002–0.12.
 
 Short answer: yes for the tenant, and the provider pays for it. Affinity took the cached share from 37% to
 61%, cut chat and agent TTFT p95 by 36–39% and halved the floor misses, on the same three GPUs with 19% more
-output. Because the same work then takes fewer billed seconds, revenue fell 19% and gross margin fell 12
-points. Three of the six lines held, H1 missed its level, H5 failed on margin and H6 failed on one seed.
+output. Revenue fell 19% and gross margin fell 12 points, because both price lists charge a cached prompt
+token 19% of a fresh one (K2 below; the first version of this paragraph blamed the billed seconds, which are
+an eighth of the loss). Three of the six lines held, H1 missed its level, H5 failed on margin and H6 failed on one seed.
 
 | # | Verdict | `k-base` | `k-affinity` | Paired difference (95% CI) |
 |---|---|---|---|---|
@@ -929,17 +930,64 @@ overcommit, prefill-cap and chunk-size levers all left (Q10, Q12); it is still f
 did not move (1.8% → 1.4%, interval crosses zero).
 
 What the provider paid. GPU cost was identical. Tenant revenue fell from $1.70 to $1.37 per run (−19.3%,
-−$0.38 to −$0.27): chat's bill fell 35% for the same requests and the agent's 23% for 6% more requests,
-because a turn that prefills from cache holds its seat for fewer seconds and per-second billing charges the
-seconds. The burst discount also grew ($0.098 → $0.163 per run). The closed-loop batch tenant refilled part
-of the freed capacity (+47% requests, +$0.08), not all of it: utilisation fell from 45.5% to 38.3%. The
-per-token reference bill fell too (−17.4%), since that basket prices cache reads below fresh prompt tokens, so
-the loss is not special to the shape price: a provider that passes cache savings through earns less per
-conversation either way. Under shape pricing the gain reaches the tenant automatically and in full.
+−$0.38 to −$0.27): chat's bill fell 35% for the same requests and the agent's 23% for 6% more requests. The
+burst discount also grew ($0.098 → $0.163 per run). The closed-loop batch tenant refilled part of the freed
+capacity (+47% requests, +$0.08), not all of it: utilisation fell from 45.5% to 38.3%. The per-token
+reference bill fell by almost as much (−17.4%). Where the money went is K2's subject.
 
-Reading it against the framing of this write-up: affinity is a service improvement that the price list gives
-away. It is worth shipping only with a way to resell the 7 points of utilisation it frees (more tenants per
-GPU, which this fixed-traffic experiment does not test) or with a price that keeps some of the saving. Both
+**K2. Is it per-second billing that makes the provider pay? (offline re-pricing of the same eight runs, no
+GPU time; `scripts/stage_k2_reprice.py`, table in `docs/reports/stage-k/k2_reprice.csv`)**
+
+Hypothesis (written before computing): per-token margin is the same or higher with affinity on every seed,
+while per-second margin is lower on every seed.
+
+Result: half held. Per-second margin is lower on every seed. Per-token margin is also lower on every seed,
+by almost as much. Per-second billing is not what penalises the provider here.
+
+| Seed | Per-token margin, base → affinity | Difference | Per-second margin, base → affinity | Difference |
+|---|---|---|---|---|
+| 1 | 55.8% → 46.8% | −9.0 points | 56.2% → 46.1% | −10.1 points |
+| 2 | 54.6% → 44.4% | −10.2 | 55.3% → 43.7% | −11.6 |
+| 3 | 56.7% → 49.7% | −7.0 | 57.5% → 49.6% | −7.9 |
+| 4 | 37.2% → 19.5% | −17.7 | 36.8% → 17.0% | −19.9 |
+| mean | 51.1% → 40.1% | −11.0 | 51.5% → 39.1% | −12.4 |
+
+Revenue per million output tokens, mean of four seeds: per token $0.890 → $0.616 (−31%), per second
+$0.900 → $0.608 (−32%).
+
+Why it did not hold. This traffic sends about 15 prompt tokens per output token, so prompt tokens are most
+of the bill under both schemes, and both charge a cache hit 19% of a fresh prompt token ($0.015 against
+$0.08 per million in the basket; the shape price's prompt charge uses the same ratio, DESIGN 8).
+
+| Mean per run | `k-base` | `k-affinity` | Change |
+|---|---|---|---|
+| Per-token bill | $1.680 | $1.388 | −$0.292 |
+| of which fresh input | $1.262 | $0.813 | −$0.449 |
+| of which cache reads | $0.144 | $0.266 | +$0.122 |
+| of which output | $0.274 | $0.309 | +$0.035 |
+| Per-second (shape) bill | $1.698 | $1.370 | −$0.328 |
+| of which prompt charge | $1.491 | $1.204 | −$0.288 |
+| of which seconds | $0.207 | $0.167 | −$0.040 |
+
+- The prompt charge is 88% of the shape bill and carries $0.288 of its $0.328 loss. The per-token bill loses
+  $0.327 on prompt tokens and gets $0.035 back on output.
+- The seconds are where the claim is true: billed seconds fell 16% (42,233 → 35,636 s) while output rose
+  19%, so the provider was paid $0.04 less for delivering more. That is one eighth of the loss, and it is
+  the whole gap between the two schemes: 1.4 margin points.
+- The same runs priced per token with no cache discount (a cache hit charged as fresh input) give the
+  hypothesised result: margin up on every seed (+2.5, +3.5, +4.2, +2.0 points; mean 64.7% → 67.7%). The
+  claim holds for a provider that keeps the cache saving, and fails for one that passes it on at market
+  cache-read prices, whichever unit it bills in.
+
+So the decision affinity forces is the cache-read price, not the billing unit. At the basket's 19% the
+tenants get the saving and the provider gets a lower margin on fuller service; at 100% the provider keeps it
+and the tenants get only the speed. The level in between that leaves the margin where it was is about 64% of
+the fresh price per token and nearer 70% per second on these runs (unmeasured in the sense of Q13: it holds behaviour fixed).
+
+Reading it against the framing of this write-up: affinity is a service improvement that the cache-read
+price gives away, under either billing scheme. It is worth shipping only with a way to resell the 7 points of utilisation it frees (more tenants per
+GPU, which this fixed-traffic experiment does not test) or with a cache-read price that keeps some of the
+saving. Both
 are unmeasured. H6 says it also needs a cap or a rebalancing rule on prompt-token share before it runs
 unattended.
 
