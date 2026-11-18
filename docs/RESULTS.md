@@ -1217,6 +1217,73 @@ Files: paired report and per-run tables in `docs/reports/stage-l/` (`campaign.ht
 `stage_l_table_paired.csv`, `k2_reprice.csv`), every quality sample in `docs/reports/stage-l/quality/`,
 calibrations in `calibration/stage-l-fp16-a.yaml`, `stage-l-fp16-flashinfer-a.yaml` and `stage-l-fp8-a.yaml`.
 
+## Q16. Does preferring the remembered replica inside the queue get the rest of the cache hits?
+
+**Status: the hypotheses below were written on 2026-11-18, before any stage M run. Results go under them.**
+
+Why ask. Q15 left the cached share near 61–63% on the heavy days because the misses happen in the queue: when
+every replica is full, requests wait in one line and the head takes whichever seat frees first, wherever its
+conversation's cache is. In the four `l-fp16` runs, 82–92% of all affinity misses on seeds 1–3 were requests
+that had queued (880 of 1,077, 688 of 822, 1,524 of 1,665). Seed 4 never queues.
+
+The rule (`admission.prefix_affinity_queue_lookahead`, 8 here, default 0 = strict first-in, first-out).
+
+- The head of the interactive queue is placed as before. If it gets the replica it remembers, nothing changes.
+- If it would take a seat on another replica, the gateway looks at the next 7 waiters for one that remembers
+  that replica and fits on it. That waiter takes the seat. The head keeps its place, and still gets its own
+  remembered replica first when a seat frees there.
+- The limit is a time, not a count (`admission.prefix_affinity_pass_window_ms`, 500 here). A waiter can be
+  passed only during the 500 ms after it is first passed. After that nothing behind it goes first. The owner
+  asked for a time limit because a tenant pays for a rate and a request should not sit in the queue for the
+  sake of someone else's cache.
+- If the head fits nowhere, nobody overtakes it. That would be backfill, a different experiment.
+- The lazy and burst queues are not changed.
+
+What the stage L records say before running it (`scripts/stage_m_replay.py`, written with the hypothesis). The
+script replays each `l-fp16` meter: at every dispatch out of the queue, was there a waiter within the lookahead
+that remembered the freed replica and went on to miss? It is a first-order count. It does not replay what a
+swap does to later dispatches. The low end counts only swaps between requests of the same shape, which
+certainly fit; the high end counts every shape. Hits cached 84% of their prompt tokens and misses 8–9%.
+
+| Limit | Seed 1 | Seed 2 | Seed 3 |
+|---|---|---|---|
+| 3 passes per waiter | +1.9 to +4.0 | +1.9 to +3.7 | +4.5 to +9.3 |
+| nobody passed once the head has waited 1 s | +1.4 to +3.0 | +1.1 to +2.3 | +0.7 to +1.5 |
+| nobody passed once the head has waited 2 s | +2.2 to +4.4 | +2.1 to +4.0 | +2.0 to +4.0 |
+| **500 ms pass window (run)** | **+1.7 to +3.5** | **+1.7 to +3.3** | **+3.8 to +8.0** |
+| no limit | +2.3 to +4.6 | +2.1 to +4.0 | +4.9 to +10.0 |
+
+Estimated gain in cached share, in points. A limit on total wait switches the rule off under load: on seed 3
+the median queue wait is 2.3 s with no reordering at all. The pass window limits what the rule adds instead.
+
+The experiment. Two arms, seeds 1–3, all six runs fresh on one pod, interleaved by seed: `m-affinity` (the
+`k-affinity` and `l-fp16` settings: chunk 2048, affinity on, fp16 KV, strict queue) and `m-queue` (the same
+with lookahead 8 and a 500 ms pass window). The 500 ms arrival-side wait of Q15 is off in both. Seed 4 is not
+run: with no queue the rule cannot act (unit test `test_queue_is_strict_fifo_with_the_lookahead_off` and the
+empty-queue path are the evidence, not a paid run). One setting is run, not a sweep, to keep the spend near $6.
+
+How much the runs move by themselves. In Q15 two arms that differed in about 1% of requests differed by −0.4
+to +4.3 points of cached share on the same seed. So a gain of 2 points on one seed is not evidence by itself.
+Two reads that do not depend on that comparison are fixed here: the number of jumps (each jump is a hit that
+the replay says would have been a miss), and `m-affinity` against stage L's `l-fp16` as the drift read.
+
+Hypothesis (mine): `m-queue` against `m-affinity` on the same seeds.
+
+| # | Line | Holds if |
+|---|---|---|
+| M1 | affinity hit rate rises | by at least 3 points on each of seeds 1–3 |
+| M2 | cached share rises | by at least 1.5 points on seeds 1 and 2 and at least 3.5 on seed 3 |
+| M3 | the limit holds | 95% of passed requests are admitted within 1 s of their first pass |
+| M4 | waiting does not get worse | start p95 and chat and agent TTFT p95 not more than 10% higher |
+| M5 | floor misses do not rise | all-request floor misses not more than 1 point higher on any seed |
+| M6 | margins | both margins fall where the cached share rises, as in K2 |
+
+M5 is the line I am least sure of: sending more turns back to one replica can raise prefill contention there.
+
+A limit of this test, stated in advance. Three replicas give a queue 6 to 18 deep with seats freeing often, so
+a 500 ms window rarely stops a jump here. With more replicas there are more candidates per freed seat and more
+ways to pass one request repeatedly, so the window would bind more often. This stage does not measure that.
+
 ## What was not measured, and what to do next
 
 Measured since the phase-2 list: reservation spill (`resv-spill`, `resv-p95-spill`, Q8), the `abort` revocation

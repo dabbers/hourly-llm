@@ -1,0 +1,10 @@
+# Stage M manifest (RESULTS Q16): queue-side affinity, affinity on in both arms, paired by seed (seeds 1-3).
+settings:
+  m-affinity: {desc: "stage K's k-affinity run again: chunk 2048, affinity on, fp16 KV, strict FIFO queue"}
+  m-queue: {desc: "m-affinity with queue-side affinity: lookahead 8, 500 ms pass window"}
+pairs:
+  - [m-queue, m-affinity]
+headline:
+  - [m-queue, m-affinity]
+scorecard:
+  baseline: m-affinity

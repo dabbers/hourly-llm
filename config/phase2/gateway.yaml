@@ -13,6 +13,8 @@ admission:
   max_prefill_tokens_in_flight: ${SLOTGW_MAX_PREFILL_TOKENS:-0}
   prefix_affinity: ${SLOTGW_PREFIX_AFFINITY:-false}       # stage K: a conversation's next turn returns to its last replica when that fits now (never waits)
   prefix_affinity_wait_ms: ${SLOTGW_PREFIX_AFFINITY_WAIT_MS:-0}   # stage L: wait this long for the remembered replica before running elsewhere (0 = never)
+  prefix_affinity_queue_lookahead: ${SLOTGW_PREFIX_AFFINITY_QUEUE_LOOKAHEAD:-0}   # stage M: a queued turn among the first N may take a freed seat on its remembered replica ahead of the head (0 = strict FIFO)
+  prefix_affinity_pass_window_ms: ${SLOTGW_PREFIX_AFFINITY_PASS_WINDOW_MS:-500}   # stage M: a waiter can be passed only this long after it is first passed
   dispatch_tick_s: 0.25
   reservation_spill: ${SLOTGW_RESERVATION_SPILL:-false}
   health_interval_s: 5.0

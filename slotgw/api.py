@@ -467,6 +467,7 @@ def build_router() -> APIRouter:
             rec.reservation_id = hold.reservation_id if hold.reserved else None
             rec.affinity = None if hold.reserved else hold.affinity
             rec.affinity_wait_ms = None if hold.reserved else hold.affinity_wait_ms
+            rec.queue_jumped, rec.queue_passed, rec.queue_passed_ms = hold.queue_jumped, hold.queue_passed, hold.queue_passed_ms
             hold.pacer = pacer
             state.scheduler.dispatch()  # lends this request its burst rate
         rec.t_admitted = now()

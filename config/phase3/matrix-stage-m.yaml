@@ -1,0 +1,23 @@
+# Stage M (RESULTS Q16): queue-side affinity. Affinity on in both arms, engines at prefill chunk 2048, fp16 KV.
+# Two arms interleaved by seed: m-affinity (stage K's k-affinity, strict FIFO queue) and m-queue (a waiter among the
+# first 8 of the interactive queue may take a freed seat on its remembered replica ahead of the head; nobody is
+# passed for more than 500 ms after the first pass). Seeds 1-3 only: seed 4 never queues (Q15), so the rule cannot act.
+#   VLLM_MAX_NUM_BATCHED_TOKENS=2048 bash scripts/pod.sh vllm <gw> install   (then a warm restart if the KV check fails)
+#   bash scripts/pod.sh chain <gw> start config/phase3/matrix-stage-m.yaml --max-hours 3 --stop-pods --stop-grace-min 40
+scenario: config/scenarios/mixed-4090.yaml
+config_dir: config/phase2
+expect_replicas: 3
+expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
+expect_calibration: runpod-4090
+expect_kv_total: 285584       # chunk 2048, fp16 KV (stages K and L)
+kv_spread_max: 0.01
+report_out: runs/stage-m/report
+report_mode: last
+continue_on_fail: false
+runs:
+  - {label: m-affinity, seeds: [1], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "0", SLOTGW_PREFIX_AFFINITY_QUEUE_LOOKAHEAD: "0", SLOTGW_PREFIX_AFFINITY_PASS_WINDOW_MS: "500"}, loadgen_args: ["--no-reservations"]}
+  - {label: m-queue,    seeds: [1], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "0", SLOTGW_PREFIX_AFFINITY_QUEUE_LOOKAHEAD: "8", SLOTGW_PREFIX_AFFINITY_PASS_WINDOW_MS: "500"}, loadgen_args: ["--no-reservations"]}
+  - {label: m-affinity, seeds: [2], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "0", SLOTGW_PREFIX_AFFINITY_QUEUE_LOOKAHEAD: "0", SLOTGW_PREFIX_AFFINITY_PASS_WINDOW_MS: "500"}, loadgen_args: ["--no-reservations"]}
+  - {label: m-queue,    seeds: [2], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "0", SLOTGW_PREFIX_AFFINITY_QUEUE_LOOKAHEAD: "8", SLOTGW_PREFIX_AFFINITY_PASS_WINDOW_MS: "500"}, loadgen_args: ["--no-reservations"]}
+  - {label: m-affinity, seeds: [3], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "0", SLOTGW_PREFIX_AFFINITY_QUEUE_LOOKAHEAD: "0", SLOTGW_PREFIX_AFFINITY_PASS_WINDOW_MS: "500"}, loadgen_args: ["--no-reservations"]}
+  - {label: m-queue,    seeds: [3], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "0", SLOTGW_PREFIX_AFFINITY_QUEUE_LOOKAHEAD: "8", SLOTGW_PREFIX_AFFINITY_PASS_WINDOW_MS: "500"}, loadgen_args: ["--no-reservations"]}

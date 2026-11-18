@@ -111,6 +111,9 @@ class RequestRecord:
     conversation_id: str | None = None  # X-Slotgw-Conversation: stable across the turns of one conversation
     affinity: str | None = None  # None = no remembered replica; "hit" = ran on it; else why not (seat, kv, unhealthy, score, ...)
     affinity_wait_ms: float | None = None  # stage L: waited this long for the remembered replica before being placed
+    queue_jumped: int | None = None  # stage M: queue positions it went past to take its remembered replica
+    queue_passed: int | None = None  # stage M: times a waiter behind it was admitted first
+    queue_passed_ms: float | None = None  # stage M: from the first time it was passed to its own admission
 
     @property
     def ttft_ms(self) -> float | None:
@@ -167,6 +170,7 @@ class Meter:
             ("load_run", "TEXT"), ("scenario", "TEXT"), ("seed", "INTEGER"), ("delivered_tokens", "INTEGER"),
             ("reservation_id", "TEXT"), ("cached_tokens", "INTEGER"), ("billed_shape", "TEXT"), ("showcase", "TEXT"),
             ("conversation_id", "TEXT"), ("affinity", "TEXT"), ("affinity_wait_ms", "REAL"),
+            ("queue_jumped", "INTEGER"), ("queue_passed", "INTEGER"), ("queue_passed_ms", "REAL"),
         ):
             if col not in have:  # meter files written before the column existed
                 self._conn.execute(f"ALTER TABLE requests ADD COLUMN {col} {typ}")

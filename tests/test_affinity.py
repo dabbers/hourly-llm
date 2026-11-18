@@ -296,3 +296,173 @@ async def test_wait_that_ends_with_nothing_free_queues_the_request():
     assert h1.ledger is other
     for h in (*held, *held_other, h1):
         sc.release(h)
+
+
+# ---- stage M: queue-side affinity (a queued turn may take a freed seat on its remembered replica) ----
+
+
+async def _queued(sc: Scheduler, *reqs):
+    """Queue requests in order (both replicas must be full); returns their admit tasks."""
+    tasks = []
+    for rid, conv, shape in reqs:
+        tasks.append(asyncio.create_task(sc.admit(rid, shape, 500, conversation=conv)))
+        await asyncio.sleep(0.005)
+    assert sc.queue_lengths()["interactive"] == len(reqs)
+    return tasks
+
+
+def _full_pair(**kw):
+    sc = sched(n=2, prefix_affinity=True, **kw)
+    a, b = sc.ledgers
+    return sc, a, b, _fill(sc, a), _fill(sc, b)
+
+
+async def test_queued_turn_takes_the_freed_seat_on_its_remembered_replica_and_the_head_keeps_its_place():
+    sc, a, b, held_a, held_b = _full_pair(prefix_affinity_queue_lookahead=8)
+    sc._touch("head", b.id)
+    sc._touch("back", a.id)
+    t_head, t_back = await _queued(sc, ("h", "head", S8_60), ("k", "back", S8_60))
+    a.release(held_a.pop())
+    sc.dispatch()
+    h_back = await asyncio.wait_for(t_back, 0.2)
+    assert h_back.ledger is a and h_back.affinity == "hit" and h_back.queue_jumped == 1 and h_back.queue_passed is None
+    assert not t_head.done() and sc.queue_lengths()["interactive"] == 1
+    await asyncio.sleep(0.03)
+    b.release(held_b.pop())
+    sc.dispatch()
+    h_head = await asyncio.wait_for(t_head, 0.2)
+    assert h_head.ledger is b and h_head.affinity == "hit" and h_head.queue_jumped is None
+    assert h_head.queue_passed == 1 and 25 <= h_head.queue_passed_ms < 500
+    assert sc.snapshot()["prefix_affinity"]["queue_jumps"] == 1
+
+
+@pytest.mark.parametrize("look", [0, 1])
+async def test_queue_is_strict_fifo_with_the_lookahead_off(look):
+    sc, a, b, held_a, held_b = _full_pair(prefix_affinity_queue_lookahead=look)
+    sc._touch("head", b.id)
+    sc._touch("back", a.id)
+    t_head, t_back = await _queued(sc, ("h", "head", S8_60), ("k", "back", S8_60))
+    a.release(held_a.pop())
+    sc.dispatch()
+    h_head = await asyncio.wait_for(t_head, 0.2)
+    assert h_head.ledger is a and h_head.affinity == "seat" and h_head.queue_passed is None
+    assert not t_back.done() and sc.queue_jumps == 0
+    t_back.cancel()
+
+
+async def test_nobody_jumps_when_the_head_remembers_the_freed_replica_or_the_waiter_is_beyond_the_lookahead():
+    sc, a, b, held_a, held_b = _full_pair(prefix_affinity_queue_lookahead=2)
+    for conv, home in (("c0", a), ("c1", a), ("c2", b), ("c3", a)):
+        sc._touch(conv, home.id)
+    t0, t1, t2, t3 = await _queued(sc, *((f"q{i}", f"c{i}", S8_60) for i in range(4)))
+    a.release(held_a.pop())
+    sc.dispatch()
+    h0 = await asyncio.wait_for(t0, 0.2)
+    assert h0.queue_jumped is None  # the head remembered it: plain FIFO
+    assert not t1.done() and sc.queue_jumps == 0
+    a.release(held_a.pop())
+    sc.dispatch()
+    await asyncio.wait_for(t1, 0.2)  # now the head is c2 (remembers b); c3 remembers a
+    b_seat = held_b.pop()
+    a.release(h0)
+    sc.dispatch()
+    assert (await asyncio.wait_for(t3, 0.2)).queue_jumped == 1  # within the lookahead of 2
+    b.release(b_seat)
+    sc.dispatch()
+    assert (await asyncio.wait_for(t2, 0.2)).queue_passed == 1
+
+
+async def test_pass_window_ends_the_passing_and_the_head_takes_the_next_seat():
+    sc, a, b, held_a, held_b = _full_pair(prefix_affinity_queue_lookahead=8, prefix_affinity_pass_window_ms=40)
+    sc._touch("head", b.id)
+    for i in range(3):
+        sc._touch(f"back{i}", a.id)
+    t_head, *t_back = await _queued(sc, ("h", "head", S8_60), *((f"k{i}", f"back{i}", S8_60) for i in range(3)))
+    a.release(held_a.pop())
+    sc.dispatch()
+    k0 = await asyncio.wait_for(t_back[0], 0.2)  # first pass: the window starts
+    await asyncio.sleep(0.01)
+    a.release(held_a.pop())
+    sc.dispatch()
+    await asyncio.wait_for(t_back[1], 0.2)  # still inside the window
+    assert not t_head.done()
+    await asyncio.sleep(0.06)  # window over
+    a.release(k0)
+    sc.dispatch()
+    h_head = await asyncio.wait_for(t_head, 0.2)
+    assert h_head.ledger is a and h_head.affinity == "seat" and h_head.queue_passed == 2 and h_head.queue_passed_ms >= 60
+    assert not t_back[2].done() and sc.queue_jumps == 2
+    t_back[2].cancel()
+
+
+async def test_a_passed_waiter_in_the_middle_blocks_jumps_over_it_after_its_window():
+    sc, a, b, held_a, held_b = _full_pair(prefix_affinity_queue_lookahead=8, prefix_affinity_pass_window_ms=40)
+    for conv, home in (("c0", b), ("c1", b), ("c2", a), ("c3", a)):
+        sc._touch(conv, home.id)
+    t0, t1, t2, t3 = await _queued(sc, *((f"q{i}", f"c{i}", S8_60) for i in range(4)))
+    a.release(held_a.pop())
+    sc.dispatch()
+    await asyncio.wait_for(t2, 0.2)  # passes c0 and c1
+    b.release(held_b.pop())
+    sc.dispatch()
+    await asyncio.wait_for(t0, 0.2)  # c0 leaves on its own replica; c1 is the head, first passed a while ago
+    await asyncio.sleep(0.06)
+    assert held_a, "the filler must leave a second seat to free"
+    a.release(held_a.pop())
+    sc.dispatch()
+    h1 = await asyncio.wait_for(t1, 0.2)
+    assert h1.ledger is a and h1.queue_passed == 1 and not t3.done()
+    t3.cancel()
+
+
+async def test_nobody_overtakes_a_head_that_fits_nowhere():
+    sc = sched(n=2, kv_total=30_000, prefix_affinity=True, prefix_affinity_queue_lookahead=8)  # usable 28,500: three 8k holds
+    a, b = sc.ledgers
+    held_a = [a.hold(f"a{i}", S8_30, 8192, 100) for i in range(3)]
+    held_b = [b.hold(f"b{i}", S8_30, 8192, 100) for i in range(3)]
+    sc._touch("back", a.id)
+    t_head, t_back = await _queued(sc, ("h", "head", S16_30), ("k", "back", S8_30))
+    a.release(held_a.pop())
+    sc.dispatch()
+    await asyncio.sleep(0.02)
+    assert a.check(S8_30, a.kv_for(S8_30), 500) is None  # the waiter behind would fit
+    assert not t_head.done() and not t_back.done() and sc.queue_jumps == 0
+    t_head.cancel()
+    t_back.cancel()
+    del held_b
+
+
+@pytest.mark.parametrize("look", [8, 0])
+async def test_gateway_meters_queue_jumps_and_passes(tmp_path, look):
+    """Eight conversations on six seats through the real HTTP path: the queue forms, and with the lookahead on
+    some turns jump to their remembered replica; every jump is a hit and the passed waiters are metered."""
+    import httpx
+
+    from .test_multi_replica import TWO_SEATS, Cluster
+
+    settings = AdmissionSettings(prefix_affinity=True, prefix_affinity_queue_lookahead=look, prefix_affinity_pass_window_ms=500)
+    cluster = Cluster([TWO_SEATS] * 3, settings, 10.0, tmp_path / "meter.sqlite")
+
+    async def conversation(c, k: int) -> None:
+        await asyncio.sleep(0.03 * k)
+        for i in range(4):
+            r = await c.post("/v1/chat/completions", headers={"Authorization": "Bearer sk-local-chat", "X-Slotgw-Conversation": f"conv-{k}"},
+                             json={"model": "small.8k.30tps", "messages": [{"role": "user", "content": f"turn {i}"}], "max_tokens": 12 + 3 * k})
+            assert r.status_code == 200, r.text
+
+    try:
+        async with httpx.AsyncClient(base_url=cluster.gateway.url, timeout=60) as c:
+            await asyncio.gather(*(conversation(c, k) for k in range(8)))
+        rows = cluster.rows()
+    finally:
+        cluster.stop()
+    assert len(rows) == 32 and all(r["status"] == "ok" for r in rows)
+    jumped = [r for r in rows if r["queue_jumped"] is not None]
+    passed = [r for r in rows if r["queue_passed"] is not None]
+    if look:
+        assert jumped and passed
+        assert all(r["affinity"] == "hit" and 1 <= r["queue_jumped"] < look for r in jumped)
+        assert all(r["queue_passed"] >= 1 and r["queue_passed_ms"] >= 0 for r in passed)
+        assert sum(r["queue_jumped"] for r in jumped) == sum(r["queue_passed"] for r in passed)
+    else:
+        assert not jumped and not passed

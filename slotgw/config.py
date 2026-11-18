@@ -188,6 +188,12 @@ class AdmissionSettings(BaseModel):
     # for the remembered one before it runs elsewhere. 0 = never wait (stage K). Only requests that would be
     # placed at once wait; a request that has to queue is dispatched as before.
     prefix_affinity_wait_ms: float = Field(default=0.0, ge=0)
+    # stage M: when the head of the interactive queue is about to take a seat on a replica it does not remember,
+    # a waiter among the first `lookahead` that remembers that replica (and fits) takes the seat instead; the head
+    # keeps its place. 0 or 1 = strict first-in, first-out (stages K and L). A waiter can be passed only during the
+    # pass window that starts the first time it is passed; after that nothing behind it goes first.
+    prefix_affinity_queue_lookahead: int = Field(default=0, ge=0)
+    prefix_affinity_pass_window_ms: float = Field(default=500.0, ge=0)
 
 
 class BurstSettings(BaseModel):

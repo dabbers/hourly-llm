@@ -62,7 +62,8 @@ def read_meter(path: Path) -> pd.DataFrame:
         df["reservation_id"] = None
     for col, default in (("cached_tokens", 0), ("billed_shape", None), ("showcase", None),  # before phase 2
                          ("conversation_id", None), ("affinity", None),  # before stage K
-                         ("affinity_wait_ms", np.nan)):  # before stage L
+                         ("affinity_wait_ms", np.nan),  # before stage L
+                         ("queue_jumped", np.nan), ("queue_passed", np.nan), ("queue_passed_ms", np.nan)):  # before stage M
         if col not in df:
             df[col] = default
     return df

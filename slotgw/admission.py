@@ -92,6 +92,10 @@ class Hold:
     conversation: str | None = None
     affinity: str | None = None  # None = no remembered replica; "hit"; else why it ran elsewhere (seat, kv, unhealthy, ...)
     affinity_wait_ms: float | None = None  # stage L: time spent waiting for the remembered replica (hit or not)
+    # stage M (queue-side affinity)
+    queue_jumped: int | None = None  # queue positions this request went past to take its remembered replica
+    queue_passed: int | None = None  # times a waiter behind it took a seat first while it queued
+    queue_passed_ms: float | None = None  # from the first time it was passed to its own admission
 
 
 class ReplicaLedger:
@@ -346,6 +350,8 @@ class Waiter:
     last_reason: str = "capacity"
     reasons: dict[str, int] = field(default_factory=dict)
     conversation: str | None = None
+    passed: int = 0  # stage M: times a waiter behind this one was admitted first
+    t_first_passed: float | None = None
 
 
 @dataclass
@@ -424,6 +430,7 @@ class Scheduler:
         self.affinity_fallbacks: dict[str, int] = {}
         self.affinity_waits = 0  # stage L: requests that waited for their remembered replica
         self.affinity_wait_hits = 0  # of which: it fitted before the wait ran out
+        self.queue_jumps = 0  # stage M: queued requests admitted past the head, onto their remembered replica
 
     # ---- prefix affinity (stage K) --------------------------------------------------------------
 
@@ -598,8 +605,31 @@ class Scheduler:
                             log.info("burst %s on %s scheduled for revocation in %.0fs", v.request_id, ledg.id, grace)
                     return
 
+    def _queue_jumper(self, q: deque[Waiter], ledg: ReplicaLedger) -> int | None:
+        """Stage M: the head of the interactive queue is about to take a seat on `ledg`, which is not the
+        replica it remembers. The position of the first waiter behind it (within the lookahead) that
+        remembers `ledg` and fits there now, or None. Nobody is passed for longer than the pass window:
+        a waiter first passed more than `prefix_affinity_pass_window_ms` ago blocks every jump over it."""
+        look = self.settings.prefix_affinity_queue_lookahead
+        if not self.settings.prefix_affinity or look < 2:
+            return None
+        t = now()
+        window = self.settings.prefix_affinity_pass_window_ms / 1000.0
+        for pos in range(min(look, len(q))):
+            c = q[pos]
+            if c.future.done():
+                continue
+            if pos > 0 and self.remembered(c.conversation) == ledg.id:
+                if ledg.check(c.shape, self._kv_needed(ledg, c), c.prompt_tokens) is None:
+                    return pos
+            if c.t_first_passed is not None and t - c.t_first_passed > window:
+                return None  # this waiter has been passed for long enough: nothing behind it goes first
+        return None
+
     def _dispatch_queue(self, cls: str) -> bool:
-        """Admit the head of one queue while it fits; True if the queue is empty afterwards."""
+        """Admit the head of one queue while it fits; True if the queue is empty afterwards. With queue-side
+        affinity on (stage M), a waiter a few places back takes the seat instead when it remembers that
+        replica and the head does not; the head keeps its place."""
         q = self.queues[cls]
         while q:
             w = q[0]
@@ -607,6 +637,23 @@ class Scheduler:
                 q.popleft()
                 continue
             ledg = self.place(w.shape, w.prompt_tokens, record=w, kv_needed=w.kv_needed, conversation=w.conversation)
+            if ledg is not None and cls == "interactive" and ledg.id != self.remembered(w.conversation):
+                pos = self._queue_jumper(q, ledg)
+                if pos is not None:
+                    c = q[pos]
+                    t = now()
+                    for i in range(pos):
+                        if not q[i].future.done():
+                            q[i].passed += 1
+                            if q[i].t_first_passed is None:
+                                q[i].t_first_passed = t
+                    del q[pos]
+                    h = ledg.hold(c.request_id, c.shape, self._kv_needed(ledg, c), c.prompt_tokens, c.preemptable, c.burst_ctx)
+                    self._stamp_passed(h, c)
+                    h.queue_jumped = pos
+                    self.queue_jumps += 1
+                    c.future.set_result(self._placed(h, c.conversation, ledg.id))
+                    continue
             if ledg is None and cls == "interactive":
                 ledg = self._preempt_for(w.shape, w.prompt_tokens)
             if ledg is None:
@@ -619,10 +666,17 @@ class Scheduler:
             if remembered is not None and ledg.id != remembered:
                 reason = self._affinity_reason(w.shape, w.prompt_tokens, w.kv_needed, remembered)
             h = ledg.hold(w.request_id, w.shape, self._kv_needed(ledg, w), w.prompt_tokens, w.preemptable, w.burst_ctx)
+            self._stamp_passed(h, w)
             w.future.set_result(self._placed(h, w.conversation, remembered, reason))
             if w.burst_ctx:
                 self.bursts_admitted += 1
         return True
+
+    @staticmethod
+    def _stamp_passed(h: Hold, w: Waiter) -> None:
+        if w.passed:
+            h.queue_passed = w.passed
+            h.queue_passed_ms = (now() - w.t_first_passed) * 1000.0
 
     def dispatch(self) -> None:
         """Admit queued waiters in priority order: interactive FIFO first, lazy only when no
@@ -879,6 +933,9 @@ class Scheduler:
                 "wait_ms": self.settings.prefix_affinity_wait_ms,
                 "waits": self.affinity_waits,
                 "wait_hits": self.affinity_wait_hits,
+                "queue_lookahead": self.settings.prefix_affinity_queue_lookahead,
+                "pass_window_ms": self.settings.prefix_affinity_pass_window_ms,
+                "queue_jumps": self.queue_jumps,
                 "remembered": len(self._affinity),
             },
             "burst": self.burst.model_dump(),
