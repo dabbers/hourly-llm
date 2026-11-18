@@ -221,6 +221,7 @@ class RunPod:
             "volumeMountPath: " + json.dumps(body.get("volumeMountPath") or "/workspace"),
             "ports: " + json.dumps(",".join(body.get("ports") or [])),
             "supportPublicIp: true",
+            "startSsh: true",  # REST starts sshd with the account keys by default; GraphQL only when asked
             "env: [" + env + "]",
         ]
         dcs = body.get("dataCenterIds") or []

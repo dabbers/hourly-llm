@@ -418,7 +418,7 @@ def test_rest_unreachable_falls_back_to_graphql(tmp_path):
     created = rpods.cmd_create(rp, count=1, gpu_count=3, volume_gb=30, disk_gb=40, pods_path=pods_path, out=lambda s: None)
     assert created[0]["id"] == "p1" and created[0]["gpu_count"] == 3
     deploy = next(q for q in seen if "podFindAndDeployOnDemand" in q)
-    assert "gpuCount: 3" in deploy and 'ports: "8000/tcp,22/tcp"' in deploy and "volumeInGb: 30" in deploy and KEY not in deploy
+    assert "gpuCount: 3" in deploy and 'ports: "8000/tcp,22/tcp"' in deploy and "volumeInGb: 30" in deploy and "startSsh: true" in deploy and KEY not in deploy
     info = rp.get_pod("p1")
     assert info["publicIp"] == "1.2.3.4" and info["portMappings"] == {"22": 40022}
     assert rpods.apply_status({"id": "p1"}, info)["ssh_port"] == 40022
