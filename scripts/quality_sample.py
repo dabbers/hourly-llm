@@ -70,6 +70,44 @@ def compare(a) -> None:
     print(f"identical {same}/{len(x)}; word-match mean {sum(ratios) / len(ratios):.3f}, min {min(ratios):.2f}")
 
 
+def degenerate(text: str) -> str:
+    """A reason the reply is unusable on its face, or "" (a mechanical screen; the verdicts were also read by hand)."""
+    words = text.split()
+    if len(words) < 3:
+        return "empty"
+    tail = words[-60:]
+    if len(tail) >= 30 and len(set(tail)) / len(tail) < 0.35:
+        return "repeats in a loop"
+    return ""
+
+
+def clip(text: str, n: int) -> str:
+    text = text.strip()
+    return text if len(text) <= n else text[:n].rstrip() + f" [... {len(text) - n} more characters]"
+
+
+def markdown(a) -> None:
+    """Side-by-side replies for docs/SAMPLES.md: the reference sample against one other sample, prompt by prompt."""
+    prompts = {p["id"]: p for p in json.load(open(a.prompts, encoding="utf-8"))["prompts"]}
+    x, y = (json.load(open(f, encoding="utf-8"))["replies"] for f in (a.a, a.b))
+    out, bad = [], 0
+    for p, q in zip(x, y, strict=True):
+        assert p["id"] == q["id"]
+        fam, turn = p["id"].rsplit("#", 1)
+        user = next(m["content"] for m in reversed(prompts[p["id"]]["messages"]) if m["role"] == "user")
+        why = degenerate(q["output"])
+        bad += bool(why)
+        verdict = f"**clearly worse: {why}**" if why else ("identical" if p["output"] == q["output"] else "differs, readable")
+        out += [f"#### {p['tenant']} · {fam} · turn {turn}", "",
+                f"prompt {p['prompt_tokens']} tokens · {a.name_a} {p['output_tokens']} tokens ({p['finish']}) · "
+                f"{a.name_b} {q['output_tokens']} tokens ({q['finish']}) · {verdict}", "",
+                "**last user message**", "", "```text", clip(user, 300), "```", "",
+                f"**{a.name_a}**", "", "```text", clip(p["output"], a.chars), "```", "",
+                f"**{a.name_b}**", "", "```text", clip(q["output"], a.chars), "```", ""]
+    open(a.out, "w", encoding="utf-8", newline="\n").write("\n".join(out))
+    print(f"{len(x)} prompts, {bad} flagged clearly worse -> {a.out}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -77,8 +115,11 @@ def main() -> None:
     r = sub.add_parser("run"); r.add_argument("--url", default="http://127.0.0.1:8000"); r.add_argument("--prompts", default=PROMPTS)
     r.add_argument("--out", required=True); r.add_argument("--label", default="")
     c = sub.add_parser("compare"); c.add_argument("a"); c.add_argument("b")
+    m = sub.add_parser("markdown"); m.add_argument("a"); m.add_argument("b"); m.add_argument("--out", required=True)
+    m.add_argument("--prompts", default=PROMPTS); m.add_argument("--name-a", dest="name_a", default="fp16")
+    m.add_argument("--name-b", dest="name_b", default="fp8"); m.add_argument("--chars", type=int, default=600)
     a = ap.parse_args()
-    {"build": build, "run": run, "compare": compare}[a.cmd](a)
+    {"build": build, "run": run, "compare": compare, "markdown": markdown}[a.cmd](a)
 
 
 if __name__ == "__main__":

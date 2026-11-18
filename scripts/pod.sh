@@ -177,6 +177,14 @@ cat > /workspace/run-vllm.sh <<'RUN'
 # run-vllm.sh <engine index>: engine i on GPU i, port 8000+10*i, /workspace/vllm-i.args, /root/vllm-i.log
 i=${1:-0}
 export HF_HOME=/root/hf VLLM_USE_FLASHINFER_SAMPLER=0 CUDA_VISIBLE_DEVICES=$i
+# --kv-cache-dtype fp8 (stage L) moves attention to FlashInfer, which JIT-builds its kernels at first start. It
+# needs ninja (in the venv), an nvcc that matches the venv's CUDA headers (the image's /usr/local/cuda is 12.4, too
+# old), and libcudart.so to link against. Done by hand on the stage L pod, once, before the fp8 start:
+#   pip install 'nvidia-cuda-nvcc==13.0.*' 'nvidia-cuda-crt==13.0.*' 'nvidia-nvvm==13.0.*'
+#   ln -sf libcudart.so.13 $CUDA_HOME/lib/libcudart.so; ln -s lib $CUDA_HOME/lib64
+# fp16 runs never touch this path (FlashAttention, no JIT build).
+export CUDA_HOME=/workspace/venv/lib/python3.11/site-packages/nvidia/cu13
+export PATH=/workspace/venv/bin:$CUDA_HOME/bin:$PATH
 mkdir -p /root/hf
 cd /root || exit 1
 # shellcheck disable=SC2046  # the args file is a whitespace-separated argv on purpose

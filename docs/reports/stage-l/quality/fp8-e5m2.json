@@ -1,0 +1,307 @@
+{
+ "url": "http://127.0.0.1:8010",
+ "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+ "label": "fp8-e5m2",
+ "replies": [
+  {
+   "id": "chat-compare-commute#0",
+   "tenant": "chat",
+   "turn": 0,
+   "output": "It current commute from September, The trip is 9 km fairly h h and h fairly h h h h h h h and it fairly h and h and h h and h and h h and h and h and 9 km fairly h and h h and 9 and h and 9 and 9 and 9 and 9 and 9 km fairly and h and 9 and  9 km fairly and h and 9 km fairly and 9 km fairly and 9 and 9 km fairly and 9 km fairly and 9 and 9 and 9 and 9 and  9 and 9 and  9 km fairly and 9 and 9 km fairly and 9 and 9 and  9 km fairly and 9 and 9 and  9 and 9 and  9 and  9 and  9 and  9 km fairly and  9 and 9 and  9 and  9 and  9 and  9 and  9 and  9 and  9 km fairly and  9 km fairly and  9 and 9 and  9 and  9 and  9 and  9 and  9 and  9 km fairly and  9 km fairly and  9 and  9 and  9 and  9 and  9 and  9 and  9 km fairly and  9 and  9 and  9 and  9 and  9 and  9 km fairly and  9 and  9 and  9 km fairly and  9 and  9 and  9 and  9 and  9 and  9 and  9 km fairly and  9 and  9 and  9 and  9 km fairly and  9 and  9 and  9 and ",
+   "finish": "length",
+   "prompt_tokens": 221,
+   "output_tokens": 400,
+   "s": 2.34
+  },
+  {
+   "id": "chat-compare-commute#1",
+   "tenant": "chat",
+   "turn": 1,
+   "output": "To, So bike is the trip,- bike would be cheaper, compared bike would be cheap\n\n- bike would be cheaper and efficient time\n\n- bike would be cheaper and cost time\n\n- bike would be cheaper and time\n\n- bike would be cheaper and time\n\n- bike would be cheaper and time\n\n- bike would be cheaper and time\n\n- bike would be cheaper and time\n\n - bike bike would be cheaper and time\n\n - bike would be cheaper and time\n\n - bike would be cheaper and time\n\n - bike would be cheaper and time\n\n - bike would be cheaper and time\n\n - bike would would cheaper and time\n\n - bike would be cheaper and time\n\n - bike bike would be cheaper and time\n\n - i bike would be cheaper and time\n\n - i bike would be cheaper and time\n\n - bike would be cheapest and time\n\n - bike would be cheapest and time\n\n - bike would be cheapest and time\n\n - bike would be cheapest and time\n\n - bike would be cheapest and time\n\n - bike bike would be cheapest and time\n\n - bike would be cheapest and time\n\n - bike would be cheapest and time\n\n - bike would be cheapest and time\n\n - bike would be cheapest and time\n\n - bike would would cheapest and time\n\n - bike would be cheapest and time\n\n - bike would be cheapest and time\n\n - bike would would cheapest and time\n\n - bike would would cheapest and time\n\n - bike would would be cheapest and time\n\n - bike would would be cheapest and time\n\n - bike would would be cheapest and time\n\n - bike would would would be cheapest and time\n\n - bike would would would be cheapest and time\n\n - bike would would would be cheapest and time\n\n - bike would would would would be cheapest and time\n\n - bike would would would would be be cheapest and time\n\n - bike would would would wouldto be be cheapest and time\n\n - bike would would would would would be cheapest and time\n\n - bike would would would wouldwouldto be cheapest and time",
+   "finish": "length",
+   "prompt_tokens": 632,
+   "output_tokens": 400,
+   "s": 2.35
+  },
+  {
+   "id": "chat-compare-commute#2",
+   "tenant": "chat",
+   "turn": 2,
+   "output": "**** ** commute ** 9 9 ** km **  ** ** 9 ** and ** 9 9-minute shuttle **  ** ** ** ** **  ** **  ** **  **  **  **  ** **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  **  \\  \\  \\  \\  \\  \\  \\  \\  \\  \\  \\  \\  \\  \\  \\  \\  \\",
+   "finish": "length",
+   "prompt_tokens": 1064,
+   "output_tokens": 400,
+   "s": 2.37
+  },
+  {
+   "id": "chat-compare-commute#3",
+   "tenant": "chat",
+   "turn": 3,
+   "output": "'re commuting 9 9 9 9 9 9 9  9  9  9  9  9  9  9  9  9   you  9   you   9    you     you     you     you     you      you     you      you      you      you      you      you      you      you      you      you      you       you      you      you      you      you      you      you       you      you      you      you      you      you      you       you      you      you      you      you      you      you      you      you      you   you     you    you     you     you      you      you      you      you  you      you      you      you you     you     you  you     you  you     you  you you you you you you you you you you",
+   "finish": "length",
+   "prompt_tokens": 1458,
+   "output_tokens": 400,
+   "s": 2.37
+  },
+  {
+   "id": "chat-debug-snippet#1",
+   "tenant": "chat",
+   "turn": 1,
+   "output": "The issue issue` error` between``\"``\" between``\"`\"between```\" between``\"`\"`\"```\"``\"``````\"`\"````\"````\"``\"````\"`\"`````\"`\"`\"`\"```\"``\"``\"````\"```\"`\"`\"`\"``\"```\"```\"```\"```\"```\"```\"`\"```\"```\"`\"``\"```\"\"`\"`\"`\"```\"`\"`\"`\"`\"````\"```\"`\"`\"```\"`\"```\"`\"``\"`\"```\"\"`\"`\"`\"```\"`\"```\"`````\"`\"```\"```\"```\"\"`\"`\"```\"```\"``\"```\"`\"```\"````\"```\"`\"`\"`````\"`\"`\"`\"```\"````\"```\"```\"```\"`\"\"`\"```\"`\"`\"```\"```\"```\"```\"`\"`\"```\"```\"```\"```\"```\"```\"```\"```\"```\"`\"``\"```\"`\"```\"```\"`\"```\"```\"```\"```\"```\"`\"```\"```\"```\"```\"```\"```\"```\"```\"`\"```\"``\"```\"```",
+   "finish": "length",
+   "prompt_tokens": 646,
+   "output_tokens": 400,
+   "s": 2.37
+  },
+  {
+   "id": "chat-debug-snippet#2",
+   "tenant": "chat",
+   "turn": 2,
+   "output": "To between between the ``between_tag(item, tags=[]):\n     tags is\"[]:\n         tags.append(tag)\n between tags is tags is tuple:\n     tags = between tags= tags = between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between tags between",
+   "finish": "length",
+   "prompt_tokens": 1105,
+   "output_tokens": 400,
+   "s": 2.37
+  },
+  {
+   "id": "chat-debug-snippet#3",
+   "tenant": "chat",
+   "turn": 3,
+   "output": "'re've between the between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between",
+   "finish": "length",
+   "prompt_tokens": 1403,
+   "output_tokens": 400,
+   "s": 2.36
+  },
+  {
+   "id": "chat-explain-caching#0",
+   "tenant": "chat",
+   "turn": 0,
+   "output": " Sure! I will try try break will will explain times a cache works to an eleven-year-old times in do use use use use compare like times a cache is is a place where where put a temporary storage storage storage storage places times a cache is is a place where where times a temporary storage storage storage places times a cache is is a place where times a temporary storage storage a cache cache is is a place place times a temporary times a cache cache is is a place place times a temporary times a cache cache is is a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times a cache cache times a temporary times",
+   "finish": "length",
+   "prompt_tokens": 142,
+   "output_tokens": 400,
+   "s": 2.33
+  },
+  {
+   "id": "chat-explain-caching#2",
+   "tenant": "chat",
+   "turn": 2,
+   "output": "Sure for your eleven-year-old,,, a cache cache is is storyom is a temporary storage storage that for storing data in a computer cache. is a cache for storing a cache cache for storing data in in\n\nA a cache is is a temporary for storing a cache cache cache for storing data. a temporary storage a cache for storing data in a page cache cache for storing data data\n\nTo a cache cache cache cache for storing data a temporary cache cache cache cache cache cache cache cache for storing data data data\n\n A a page cache cache for storing data data data data page\n\n A a temporary page page for storing data data data data page page\n\n A a page page for storing data page page page page page page page page page page page page page page page page page page\n\n page a page page for storing data page page page page page page page page\n\n page a page page for storing data page page page page page page page page page page page page page page page page page page page page page page page\n\n page a page page for storing data page page page page page page page page page page page page page\n\n page a page page for storing data page page page page\n\npage a page page for storing data page page page page page page page page page page page page page page page page\n\npage a page page for storingdata page page page page page page page page page page page page\n\npage a page page for storing data page page page page page page\n\npage a page page for storing data page page page page page\n\npage a page page for storing data page page page page page\n\npage a page page for storing data page page page page page page page page page page page\n\npage a page page for storing page page page page page\n\npage a page page for storing data page page page page page page page page page page page page page page page page page page page page page page page page page page page page page\n\npage a page page for storing page page page page page",
+   "finish": "length",
+   "prompt_tokens": 616,
+   "output_tokens": 400,
+   "s": 2.36
+  },
+  {
+   "id": "chat-explain-caching#3",
+   "tenant": "chat",
+   "turn": 3,
+   "output": " The the current setup, the TTL (Time-to-L))) the page would would expire the prices for the page to become outdated for too long.. between the page page would the prices to be be the page to between the page page to between the page to between the page to between the page to between the page to between the page to between the page tobetween the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page tobetween the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the page to between the",
+   "finish": "length",
+   "prompt_tokens": 839,
+   "output_tokens": 400,
+   "s": 2.35
+  },
+  {
+   "id": "chat-revise-paragraph#0",
+   "tenant": "chat",
+   "turn": 0,
+   "output": " The spring event happening on Saturday, the 1 1  is  going  is  at  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times  is  times We",
+   "finish": "stop",
+   "prompt_tokens": 217,
+   "output_tokens": 199,
+   "s": 1.18
+  },
+  {
+   "id": "chat-revise-paragraph#1",
+   "tenant": "chat",
+   "turn": 1,
+   "output": " Our spring event is will is be happening on Saturday, June 1, at at at at at at at\n\nOn Saturday, June June be happening at at at at times times an adult supervision. tools will times we a formal tone. a professional manner times a proper for the text; times a clear for the paragraph; times a plain text times rather than padded text times for the sake of of the paragraph; times a clear for the community for the paragraph; times a clear for the text for the paragraph; times a plain text rather than padded text for the sake of of the paragraph; times a text for the paragraph rather than padded text for the sake of of the paragraph; times a text for the paragraph rather than padded text for the sake of of the paragraph; times a plain text rather than padded text for the sake of of the paragraph; times a text for the paragraph rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake of times a plain text rather than padded text for the sake",
+   "finish": "length",
+   "prompt_tokens": 391,
+   "output_tokens": 400,
+   "s": 2.34
+  },
+  {
+   "id": "chat-revise-paragraph#3",
+   "tenant": "chat",
+   "turn": 3,
+   "output": "Sure's, Our spring sure the beds will the new beds space, the fence,. the tools gate make the tools the gate make the tools make the tools. the tools the gate make the tool the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the, the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates make the gates our the gates make the gates make the gates make the gates make the gates make the",
+   "finish": "length",
+   "prompt_tokens": 672,
+   "output_tokens": 400,
+   "s": 2.35
+  },
+  {
+   "id": "chat-study-plan#0",
+   "tenant": "chat",
+   "turn": 0,
+   "output": " I understand a simple plan plan plan plan plan plan to suggest the following following weakness and as the following weight as as the simple way to solve the problem...\n\nTo\n\n### Here\n\n-\n\n1\n\n###\n\n###\n\n###\n\n### Here\n\n  -\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n  -\n\n### \n\n  - \n\n### \n\n  -\n\n###\n\n###\n\n### \n\n  - \n\n### \n\n  -\n\n### \n\n  - \n\n### \n\n  - \n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n ### \n\n  - \n\n###\n\n###\n\n###\n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  -\n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  -\n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  -\n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  -\n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n###\n\n ### \n\n  - \n\n one\n\n ### \n\n  - \n\n one\n\n ### \n\n  - \n\n one\n\n ### \n\n  - \n\n one\n\n ### \n\n  -\n\n",
+   "finish": "length",
+   "prompt_tokens": 171,
+   "output_tokens": 400,
+   "s": 2.34
+  },
+  {
+   "id": "chat-study-plan#1",
+   "tenant": "chat",
+   "turn": 1,
+   "output": "Sure week 1, probability and distributions will; week sampling and estimation; week hypothesis testing; simple regression; and experimental experimental experimental; and experimental experimental; and experiment experimental; and; experiment; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and; and",
+   "finish": "length",
+   "prompt_tokens": 385,
+   "output_tokens": 400,
+   "s": 2.34
+  },
+  {
+   "id": "chat-study-plan#2",
+   "tenant": "chat",
+   "turn": 2,
+   "output": "Sure; Let; let; let; adjust; \n\nTo; Probability D; distributions; heavily weighted.\n\n week; Sampling and estimation; moderately weighted.\n\n week; Hyp hypothesis testing; heavily weighted.\n\n week; Simple simple regression; moderately weighted.\n\n week; Experimental; weakest; weighted.\n\n week; Hyp; heavily weighted.\n\nHere; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp;;;;\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp;\n\n;; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n; Hyp; heavily weighted.\n\n",
+   "finish": "length",
+   "prompt_tokens": 619,
+   "output_tokens": 400,
+   "s": 2.34
+  },
+  {
+   "id": "chat-study-plan#4",
+   "tenant": "chat",
+   "turn": 4,
+   "output": "Sure; Hyp;; hyp; hypothesis; study; regression; experiment;;;; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression; regression;",
+   "finish": "length",
+   "prompt_tokens": 1047,
+   "output_tokens": 400,
+   "s": 2.37
+  },
+  {
+   "id": "chat-trip-planning#0",
+   "tenant": "chat",
+   "turn": 0,
+   "output": "Sure, on a short trip to Saltmarsh Bay, it would be a delightful adventure! Here the island on a Saturday morning, and spending Sunday afternoon there, would allow plenty of time to explore the area.\n\nHere\n\n-\nHere\n\n\n\n\n\n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n \n\n",
+   "finish": "length",
+   "prompt_tokens": 177,
+   "output_tokens": 400,
+   "s": 2.34
+  },
+  {
+   "id": "chat-trip-planning#1",
+   "tenant": "chat",
+   "turn": 1,
+   "output": "Sure Friday** and ** return back on ** Sunday**,:\n\n- **Morning** Friday, arrive the cliff path to the old lighthouse.on Friday**.walk\n\n - **After back** ** on the cliffPath to the old",
+   "finish": "stop",
+   "prompt_tokens": 562,
+   "output_tokens": 48,
+   "s": 0.33
+  },
+  {
+   "id": "chat-trip-planning#2",
+   "tenant": "chat",
+   "turn": 2,
+   "output": "###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\n###\n\nbetween\n\n between\n\n between\n\n between\n\nbetween\n\n between\n\n between\n\n between\n\n between\n\n between\n\n###\n\nbetween\n\nbetween\n\nBetween\n\nbetween\n\nbetween\n\n between\n\n between\n\n between\n\n between\n\n between\n\n between\n\nbetween\n\nbetween\n\n between\n\n between\n\nBetween\n\nBetween\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\nD\n\n",
+   "finish": "length",
+   "prompt_tokens": 910,
+   "output_tokens": 400,
+   "s": 2.36
+  },
+  {
+   "id": "agent-advisory-check#0",
+   "tenant": "agent",
+   "turn": 0,
+   "output": "```python\ntools\nimport(path, grep(\", path)\ngrep \"trust_proxy_headers=True\" path\n``\n This will search the wrapper file for the line ` trust_proxy_headers=True to identify any potential lines might briefly.",
+   "finish": "stop",
+   "prompt_tokens": 332,
+   "output_tokens": 47,
+   "s": 0.31
+  },
+  {
+   "id": "agent-advisory-check#2",
+   "tenant": "agent",
+   "turn": 2,
+   "output": ".\n\n.\n\nThe  you.yyou.\n\nThe  you should you and\n\nThe  you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you",
+   "finish": "length",
+   "prompt_tokens": 1904,
+   "output_tokens": 400,
+   "s": 2.48
+  },
+  {
+   "id": "agent-billing-rounding#0",
+   "tenant": "agent",
+   "turn": 0,
+   "output": " you the\", you.\n\n we.\n\n we.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\nyou.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you.\n\n you",
+   "finish": "length",
+   "prompt_tokens": 1493,
+   "output_tokens": 400,
+   "s": 2.46
+  },
+  {
+   "id": "agent-billing-rounding#1",
+   "tenant": "agent",
+   "turn": 1,
+   "output": "between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between between",
+   "finish": "length",
+   "prompt_tokens": 3305,
+   "output_tokens": 400,
+   "s": 2.54
+  },
+  {
+   "id": "agent-billing-rounding#2",
+   "tenant": "agent",
+   "turn": 2,
+   "output": "\n\\\n\n\\\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\\:\n\\.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n.\n\n",
+   "finish": "length",
+   "prompt_tokens": 5720,
+   "output_tokens": 400,
+   "s": 2.83
+  },
+  {
+   "id": "agent-billing-rounding#3",
+   "tenant": "agent",
+   "turn": 3,
+   "output": "\\\n\\\n\\\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\\\\\x\\n\n\\\n\\\n\\\\\n\\\\\n\\\\\n\n\n\\**\n\n\n\n\n\n\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\*\\\\\n\\\n\\ \\ \\ \\\n\\\\\\\\\\\\\\\\\\0\\:\\\\\n\\ \\ \\ \\ \\ \\ \\ \\ \\\\\\ \\ \\ \\ \\ \\\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\\\\\ \\ \\ \\ \\ \\\\ \\ \\ \\ \\ \\ \\ \\ \\\\\\\\\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\\\\\\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\\\\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\\\\\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\",
+   "finish": "length",
+   "prompt_tokens": 8130,
+   "output_tokens": 400,
+   "s": 2.73
+  },
+  {
+   "id": "agent-billing-rounding#5",
+   "tenant": "agent",
+   "turn": 5,
+   "output": "\\:\n\n\\\\\n\n\\\n\n\\x\n\\:\\\n\n\\\n\n\\\\x\n\\>\\\n\\\n\n\\\\\n\\>\\\n\\x\n\\|\\\n\\\\<\n\n\\x\n\\>\\\n\\\\\n\\\n\\x\n\\be\\x\n\\>\\\n\\\\<\n\\*\\\n\\\\<\n\n\\x\n\\be\\x\n\\>\\\n\\\n\\x\n\\\\x\n\\\\<\n\\\n\\x\n\\*\\\n\\\\x\n\\|\\\n\\x\n\\\\\n\\\\\\\n\\*\\\n\\\\<\n\n\\x\n\\be\n\\(\\\n\\*\\\n\\\\\n\\x\n\\be\n\\\\\n\n\\\\\n\n\\\\\n\\\n\\x\n\\be\n\\\\\n\\x\n\\be\n\\\\\n\\be\n\\\\\n\\\n\\*\\\n\\\\<\n\\(\\\n\n\\*\\\n\\\\<\n\\(\\\n\n\\be\\x\n\\\n\\\n\\\n\\\n\\\n\\be\n\\\n\\(\\\n\n\\*\\\n\\\\\n\\(\\\n\\\n\\\n\\\n\\(\\\n\n\\\\\n\\\\w\n\\(\\\n\\be\\x\n\\\\\n\n\\x\n\\be\\x\n\\\n\\\n\n\\x\n\\\\\n\\(\\\n\n\\*\\\n\n\\(\\\n\\*\\\n\\be\n\\(\\\n\\(\\\\w\\(\\\\(\\\\w\\\\(\\\n\n\n\\(\\\n\n\\(\\\n\n\\(\\\n\n\\\\\n\\(\\\n\n\\(\\\\.\n\n\\(\\\\\n\n\\(\\\n\n\\(\\\\w\\(\\\n\n\\\\( \\(\\\n\\(\\\n\\(\\(\\\n\n\\(\\\n\\(\\\\(\\\n\\(\\\\(\\\n\\(\\\n\\(\\\n\\(\\\\(\\\\(\\\n\\(\\\n\\(\\\n\\(\\\\(\\(\\\\(\\\n\n\\(\\\n\n\\(\\\\(\\\\(\\\\(\\\\(\\\\(\\\\(\\\n\n\\(\\\n\n\\(\\\\(\\",
+   "finish": "length",
+   "prompt_tokens": 11798,
+   "output_tokens": 400,
+   "s": 3.45
+  },
+  {
+   "id": "agent-csv-import#0",
+   "tenant": "agent",
+   "turn": 0,
+   "output": "grep(\"Overlap detected\", validators.py; which searches for the function \"Overlap detected\" function in to ensure the code if the logic for detecting checking validating shifts for overlaps. and ensuring ensuring providing the current validation mechanism without unchanged, provides. validates shifts for overlaps\",\", ensures, unchanged, validation, overlaps\",\",,; which. validates the logic for handling overlaps\",\",\", which; which, unchanged,,, validates the logic for handling overlaps\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",\",",
+   "finish": "length",
+   "prompt_tokens": 332,
+   "output_tokens": 400,
+   "s": 2.35
+  },
+  {
+   "id": "agent-csv-import#3",
+   "tenant": "agent",
+   "turn": 3,
+   "output": "\"\n\\n\n\\\\\n\n\\\n\\\n\\\n\\\n\\\n \\\\\n\n\\n\n\\\n\\\n\\\n:\n\\n\n\\\n\\\n e\n\n\n\n e\n e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e e",
+   "finish": "length",
+   "prompt_tokens": 3482,
+   "output_tokens": 400,
+   "s": 2.67
+  },
+  {
+   "id": "agent-flaky-retry#0",
+   "tenant": "agent",
+   "turn": 0,
+   "output": " the you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you you",
+   "finish": "length",
+   "prompt_tokens": 1520,
+   "output_tokens": 400,
+   "s": 2.47
+  }
+ ]
+}

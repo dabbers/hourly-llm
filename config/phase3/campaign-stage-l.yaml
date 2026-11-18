@@ -1,17 +1,12 @@
-# Stage L manifest (RESULTS Q15): KV dtype x bounded affinity wait, affinity on everywhere, paired by seed.
+# Stage L manifest (RESULTS Q15): bounded affinity wait, affinity on everywhere, paired by seed.
+# The two fp8 arms of the design (l-fp8, l-fp8-wait) were not run: every fp8 KV format gave unusable text in the
+# quality sample taken before the block (RESULTS Q15), so their matrix (matrix-stage-l-fp8.yaml) stayed unused.
 settings:
   l-fp16: {desc: "stage K's k-affinity run again: chunk 2048, affinity on, fp16 KV, no wait"}
   l-fp16-wait: {desc: "l-fp16 with a 500 ms bounded wait for the remembered replica"}
-  l-fp8: {desc: "l-fp16 with --kv-cache-dtype fp8 on the engines"}
-  l-fp8-wait: {desc: "l-fp8 with a 500 ms bounded wait for the remembered replica"}
 pairs:
-  - [l-fp8, l-fp16]
   - [l-fp16-wait, l-fp16]
-  - [l-fp8-wait, l-fp8]
-  - [l-fp8-wait, l-fp16-wait]
-  - [l-fp8-wait, l-fp16]
 headline:
-  - [l-fp8, l-fp16]
   - [l-fp16-wait, l-fp16]
 scorecard:
   baseline: l-fp16

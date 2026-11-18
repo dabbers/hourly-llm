@@ -1,0 +1,27 @@
+label,baseline,scope,tenant,metric,n,value,baseline_value,criterion,pass
+l-fp16,l-fp16,on-demand,agent,floor_violation_share,4,0.32859530425831074,0.32859530425831074,not above the baseline's,1.0
+l-fp16,l-fp16,on-demand,agent,start_p95_s,4,2.3280051976442335,2.3280051976442335,<= 1.5 x the baseline's,1.0
+l-fp16,l-fp16,on-demand,agent,refusal_rate,4,0.04894757744241462,0.04894757744241462,within 1 point(s) of the baseline's,1.0
+l-fp16,l-fp16,on-demand,batch,floor_violation_share,4,0.0,0.0,not above the baseline's,1.0
+l-fp16,l-fp16,on-demand,batch,start_p95_s,4,0.9132689297199191,0.9132689297199191,<= 1.5 x the baseline's,1.0
+l-fp16,l-fp16,on-demand,batch,refusal_rate,4,0.0,0.0,within 1 point(s) of the baseline's,1.0
+l-fp16,l-fp16,on-demand,chat,floor_violation_share,4,0.1402547189902311,0.1402547189902311,not above the baseline's,1.0
+l-fp16,l-fp16,on-demand,chat,start_p95_s,4,2.1435759991407384,2.1435759991407384,<= 1.5 x the baseline's,1.0
+l-fp16,l-fp16,on-demand,chat,refusal_rate,4,0.0,0.0,within 1 point(s) of the baseline's,1.0
+l-fp16,l-fp16,on-demand,notetaker,floor_violation_share,4,0.18252623339257001,0.18252623339257001,not above the baseline's,1.0
+l-fp16,l-fp16,on-demand,notetaker,start_p95_s,4,2.537557899951935,2.537557899951935,<= 1.5 x the baseline's,1.0
+l-fp16,l-fp16,on-demand,notetaker,refusal_rate,4,0.0,0.0,within 1 point(s) of the baseline's,1.0
+l-fp16,l-fp16,run,,output_tokens_per_gpu_hour,4,2509739.8682488985,2509739.8682488985,>= 95 % of the baseline's,1.0
+l-fp16-wait,l-fp16,on-demand,agent,floor_violation_share,4,0.3196101320824005,0.32859530425831074,not above the baseline's,1.0
+l-fp16-wait,l-fp16,on-demand,agent,start_p95_s,4,2.188442495465278,2.3280051976442335,<= 1.5 x the baseline's,1.0
+l-fp16-wait,l-fp16,on-demand,agent,refusal_rate,4,0.04673721340388007,0.04894757744241462,within 1 point(s) of the baseline's,1.0
+l-fp16-wait,l-fp16,on-demand,batch,floor_violation_share,4,0.0,0.0,not above the baseline's,1.0
+l-fp16-wait,l-fp16,on-demand,batch,start_p95_s,4,0.8299174040555903,0.9132689297199191,<= 1.5 x the baseline's,1.0
+l-fp16-wait,l-fp16,on-demand,batch,refusal_rate,4,0.0,0.0,within 1 point(s) of the baseline's,1.0
+l-fp16-wait,l-fp16,on-demand,chat,floor_violation_share,4,0.10018904828614869,0.1402547189902311,not above the baseline's,1.0
+l-fp16-wait,l-fp16,on-demand,chat,start_p95_s,4,1.9241090774536125,2.1435759991407384,<= 1.5 x the baseline's,1.0
+l-fp16-wait,l-fp16,on-demand,chat,refusal_rate,4,0.0,0.0,within 1 point(s) of the baseline's,1.0
+l-fp16-wait,l-fp16,on-demand,notetaker,floor_violation_share,4,0.12794067868325293,0.18252623339257001,not above the baseline's,1.0
+l-fp16-wait,l-fp16,on-demand,notetaker,start_p95_s,4,2.322556665539741,2.537557899951935,<= 1.5 x the baseline's,1.0
+l-fp16-wait,l-fp16,on-demand,notetaker,refusal_rate,4,0.0,0.0,within 1 point(s) of the baseline's,1.0
+l-fp16-wait,l-fp16,run,,output_tokens_per_gpu_hour,4,2548238.758393422,2509739.8682488985,>= 95 % of the baseline's,1.0

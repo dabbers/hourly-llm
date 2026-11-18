@@ -187,7 +187,12 @@ tenants (`docs/DESIGN.md` sections 11–13). Stage K (2026-11-18, RESULTS.md Q14
 `docs/reports/stage-k/`): sending a conversation back to the replica that served its last turn raised the cached
 share from 37% to 61%, cut chat and agent TTFT p95 by 36–39% and halved the floor misses with 19% more output
 per GPU-hour; cache hits are billed at 19% of a fresh prompt token under both schemes, so revenue fell 19% and
-gross margin 11–12 points per token and per second alike (K2), and one replica took up to 48% of prompt tokens. $94.53 of the $150 cap spent over all three stages.
+gross margin 11–12 points per token and per second alike (K2), and one replica took up to 48% of prompt tokens. Stage L (2026-11-18, RESULTS.md Q15,
+report in `docs/reports/stage-l/`) tried two ways to get the remaining cache hits and neither did: an fp8 KV cache
+doubles the KV budget and decodes 46% faster at 32 streams but returns unusable text with this model (0 of 30
+sampled replies usable, `docs/SAMPLES.md`), so it was not load-tested; a 500 ms wait for the remembered replica
+acted on about 1% of requests and moved the cached share by 1–4 points, because most misses happen in the queue
+when every replica is full. $105.72 of the $150 cap spent over all stages.
 
 ## License
 

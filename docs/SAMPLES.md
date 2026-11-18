@@ -2191,3 +2191,1690 @@ Un-skip the `test_overlapping_shifts_rejected` test, as it is necessary to verif
 def _file_level_checks(rows: list[dict]) -> list[RowError]:
     """Checks that need the whole file. Currently: exact duplicate rows, overlapping
 ```
+
+## fp8 KV cache against fp16 (stage L quality sample)
+
+RESULTS.md Q15. Thirty fixed prompts (20 chat turns and 10 agent steps with their histories, taken from a stage K
+run: `config/phase3/quality-prompts-stage-l.json`) were sent to one idle engine, greedy (temperature 0, seed 0),
+one at a time, at most 400 output tokens (`scripts/quality_sample.py`). In each pair below the first
+reply is fp16 KV and the second `--kv-cache-dtype fp8`: same model, same pod, same prompts.
+
+**Verdict: all 30 fp8 replies are clearly worse, and none is usable.** Fifteen run into a loop or come back
+empty (the mechanical screen in the script: fewer than three words, or under 35% distinct words in the last 60).
+The other fifteen were read by hand: they start on topic and are garbled, with doubled and dropped words, broken
+list formatting and stray tokens from other languages. Half of the fp8 replies run to the 400-token cap; two
+of the fp16 replies do.
+
+This is fp8, not chance and not the build:
+
+| Sample (30 prompts each) | Against | Identical | Mean word match | Loop or empty | Hit the 400-token cap |
+|---|---|---|---|---|---|
+| fp16 KV, second pass | fp16 first pass | 28 | 0.97 | 0 | 2 |
+| fp16 KV on the FlashInfer backend (the backend fp8 switches to) | fp16 first pass | 26 | 0.95 | 0 | 2 |
+| `fp8` (e4m3, FlashInfer), shown below | fp16 first pass | 0 | 0.10 | 15 | 15 |
+| `fp8` on the Triton backend | fp16 first pass | 0 | 0.08 | 16 | 14 |
+| `fp8_per_token_head` | fp16 first pass | 0 | 0.07 | 18 | 19 |
+| `fp8_e5m2` | fp16 first pass | 0 | 0.04 | 25 | 27 |
+| full-precision `Qwen/Qwen2.5-7B-Instruct` with `fp8` | the same model with fp16 KV | 0 | 0.10 | 16 | 16 |
+
+Every sample is saved whole in `docs/reports/stage-l/quality/`. Replies below are cut at 500 characters.
+
+#### chat · chat-compare-commute · turn 0
+
+prompt 221 tokens · fp16 280 tokens (stop) · fp8 400 tokens (length) · **clearly worse: repeats in a loop**
+
+**last user message**
+
+```text
+I need help choosing how to commute from September. The trip is 9 km each way, fairly hilly, and it rains a lot where I live. Three options. One: buy an electric bike, the model I have been looking at is a Fennimore Cadence at 1,450, plus I would want a decent lock and rain gear. Two: an annual bus [... 358 more characters]
+```
+
+**fp16**
+
+```text
+**Options Ranked:**
+
+1. **Electric Bike (Fennimore Cadence)**
+   - **Cost:** ~$3,400 (bike + lock + rain gear)
+   - **Time:** ~25-45 minutes, depending on traffic
+   - **Not Arriving Soaked:** Always dry
+   - **Reasoning:** Most cost-effective over two years, environmentally friendly, and keeps you dry.
+
+2. **Bus Pass**
+   - **Cost:** $1,536 (2 years)
+   - **Time:** ~45 minutes door-to-door
+   - **Not Arriving Soaked:** Always dry
+   - **Reasoning:** Comfortable and reliable, but more expensive [... 464 more characters]
+```
+
+**fp8**
+
+```text
+### Option: Electric Bike (Fenimore Cad)
+- 1,450 + +
+ 
+ You 1 decent lock and rain gear:
+ - Pros:
+ - Affordable
+ 
+ Eco-friendly
+ 
+ Good exercise for short trips
+ - Cons
+ \ Heavy traffic
+ \ Limited cargo space
+
+ \ can 1
+
+ 
+
+ Option Two Annual Bus Pass
+ \ 640 \ \ 45 minutes to/d
+ \ \ Pros \ Affordable \ Convenient \ Cons \ Long wait times \ \ Heavy traffic \ \ No control control flexibility \ \ can 1 \ \ \ can 50 \ Bad luck \ can 111 \ \ can 50 \ Bad luck \ can 111 \ \ can 111 \ \ can 111 \ \ can [... 406 more characters]
+```
+
+#### chat · chat-compare-commute · turn 1
+
+prompt 632 tokens · fp16 339 tokens (stop) · fp8 378 tokens (stop) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+Useful. Two constraints I should have mentioned. First, I cannot spend more than 900 up front right now, so the full bike price is out unless there is a way around it, like financing or a cheaper model. Second, the bike would have to be locked outside at work all day, there is no indoor storage and [... 159 more characters]
+```
+
+**fp16**
+
+```text
+**Revised Options:**
+
+1. **Bus**
+   - **Cost**: $640/year
+   - **Time**: 45 minutes (door-to-door)
+   - **Arriving Dry**: Yes, with an umbrella or poncho
+   - **Total Cost Over 2 Years**: $1,280
+
+2. **Electric Bike**
+   - **Cost**: $900 (cheaper model) + $30/year (lock) + $30/year (rain gear) = $960
+   - **Time**: ~30 minutes (hilly terrain), variable but faster than bus
+   - **Arriving Dry**: Yes, with proper rain gear
+   - **Total Cost Over 2 Years**: $1,020
+
+3. **Car**
+   - **Cost**: $220/mon [... 633 more characters]
+```
+
+**fp8**
+
+```text
+****Option 1 - Electric Bike**
+
+-Initial Cost**: $1,510 (bike) + $30/year (lock *) |0/year (rain gear) )1,510
+
+  ****Time**45 minutes walk (bus) 25 minute ride
+  **Arriving Wet/Dry No indoor storage,
+
+  **Total Cost Over Year** $1,510
+
+  ****Ranking** 2 2nd
+
+**Option 2 - Bus**
+
+  **Initial Cost** Free0
+  **Time** 4 45 minutes (bus) 25 minutes (car)
+  **Arriving WetD Pon1 poncho
+  **Total Cost1 Year** 640
+
+  **Ranking** 1st
+
+**Option 3 - Car**
+
+  **Initial Cost** 1100 (car) 220/month (2640/year) [... 491 more characters]
+```
+
+#### chat · chat-compare-commute · turn 2
+
+prompt 1064 tokens · fp16 350 tokens (stop) · fp8 400 tokens (length) · **clearly worse: repeats in a loop**
+
+**last user message**
+
+```text
+Update: I just found out the office is moving in September, and the commute becomes 23 km with a motorway section for about 12 of those. I assume the bike drops out entirely, but tell me if I am wrong. There is also a park-and-ride that costs 4.50 a day, where I would drive 8 km, park, and take a 20 [... 163 more characters]
+```
+
+**fp16**
+
+```text
+**Updated Options:**
+
+1. **Bus**
+   - **Cost**: $640/year
+   - **Time**: 45 minutes (door-to-door)
+   - **Arriving Dry**: Yes, with an umbrella or poncho
+   - **Total Cost Over 2 Years**: $1,280
+
+2. **Park-and-Ride**
+   - **Cost**: $4.50/day * 2 days/week * 52 weeks/year = $468/year
+   - **Time**: 8 km drive + 20-minute shuttle = ~30 minutes total
+   - **Arriving Dry**: Yes, with an umbrella or poncho
+   - **Total Cost Over 2 Years**: $936
+
+3. **Car**
+   - **Cost**: $220/month ($2,640/year)
+   - [... 687 more characters]
+```
+
+**fp8**
+
+```text
+**Revised Options:**
+
+11Bus**
+  - - **Cost**: $640/year
+  option -Time**: 45 minutes (door to-door)
+  option –Arriving Dry**: Yes, with an umbrella poncho
+  option **Total Cost Over 2 Years**: 112280
+
+2 Electric Bike
+  option -Financedanced Monthly Payment**:  t1 450/month (3 months months)
+  option - - **Time**: 3 1 minutes (moderately hillier
+  option ** ** **Arriving Dry** Yes with proper rain gear
+  option **Total Cost Over 2 Years**  t1 1320
+
+  option Park-and-Ride
+  option --Annual Bus Far [... 944 more characters]
+```
+
+#### chat · chat-compare-commute · turn 3
+
+prompt 1458 tokens · fp16 51 tokens (stop) · fp8 158 tokens (stop) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+Give me a one-paragraph decision written as if to my partner, who has not read any of this conversation and does not want the full analysis. It should state the option you recommend, the approximate monthly cost, how long the commute will take, and the single biggest risk with the choice. No bullet [... 103 more characters]
+```
+
+**fp16**
+
+```text
+I recommend taking the bus. It will cost about $107 per month and give you a consistent 45-minute commute to work. The single biggest risk is potential delays during rainy days, but it’s generally reliable and keeps you dry.
+```
+
+**fp8**
+
+```text
+Given the updated commute distance and conditions,, here it might in September, the 2 23 km commute will be manageable. Here’s a recommendation based as if to your partner:
+
+---
+
+Bus-and-Ride**: is the most that we provides a comfortable and convenient solution ride. with only 4. kilometers to park and then a 2 2-minute shuttle ride.  This option minimizes the stress of rain and traffic
+
+ \user
+I need to decide a single option option option that the options you recommend. the approximate monthly [... 234 more characters]
+```
+
+#### chat · chat-debug-snippet · turn 1
+
+prompt 646 tokens · fp16 239 tokens (stop) · fp8 1 tokens (stop) · **clearly worse: empty**
+
+**last user message**
+
+```text
+I changed the signature to tags=None and added "if tags is None: tags =
+[]" at the top of the function. That fixed the leak between calls. But
+now one of my existing tests fails with: AttributeError: 'tuple' object
+has no attribute 'append'. The test is:
+
+def test_existing_tags_preserved():
+    item [... 375 more characters]
+```
+
+**fp16**
+
+```text
+The original function with the default list `tags=[]` would not accept tuples, so the test likely never ran correctly before. The change to `tags=None` and adding the check `if tags is None: tags = []` ensures that the function handles both cases gracefully.
+
+To handle this cleanly, you can modify the function to accept either a list or a tuple and convert the tuple to a list if necessary. This keeps the signature simple and ensures compatibility with both types.
+
+Here’s how you can do it:
+
+```p [... 526 more characters]
+```
+
+**fp8**
+
+```text
+
+```
+
+#### chat · chat-debug-snippet · turn 2
+
+prompt 1105 tokens · fp16 186 tokens (stop) · fp8 400 tokens (length) · **clearly worse: repeats in a loop**
+
+**last user message**
+
+```text
+Okay, I will convert whatever is passed into a new list inside the function, as you suggested. Now write me a small pytest test that would have caught the original bug: two calls with no tags argument must be independent of each other. Keep it under fifteen lines, give it a name that says what it pr [... 190 more characters]
+```
+
+**fp16**
+
+```text
+Sure! Here’s a pytest test that catches the original bug:
+
+```python
+import pytest
+
+def add_tag(item, tag, tags=None):
+    if tags is None:
+        tags = []
+    else:
+        tags = list(tags)
+    tags.append(tag)
+    item["tags"] = tags
+    return item
+
+def test_independent_tagging():
+    """Protect against shared state between function calls."""
+    a = add_tag({"title": "buy milk"}, "errand")
+    b = add_tag({"title": "call plumber"}, "home")
+    assert a["tags"] == ["errand"]
+    assert b[" [... 222 more characters]
+```
+
+**fp8**
+
+```text
+Now one
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```tags
+```tags```ta [... 700 more characters]
+```
+
+#### chat · chat-debug-snippet · turn 3
+
+prompt 1403 tokens · fp16 263 tokens (stop) · fp8 400 tokens (length) · **clearly worse: repeats in a loop**
+
+**last user message**
+
+```text
+One more. A colleague reviewed the change and says using None as a sentinel is ugly, and that we should use tags=() as the default instead, since an empty tuple is immutable and therefore safe. Does that actually work with the function body as it stands after your fix, or does it reintroduce a probl [... 179 more characters]
+```
+
+**fp16**
+
+```text
+Using `tags=()` as the default argument will reintroduce the problem because tuples are immutable and do not have the `append` method. Here’s why:
+
+When you pass `tags=()`, the function tries to append to the tuple, which raises an `AttributeError`. Therefore, you need to convert the tuple to a list before appending.
+
+Here’s the updated function and test:
+
+```python
+def add_tag(item, tag, tags=()):
+    if not tags:
+        tags = []
+    else:
+        tags = list(tags)  # Convert tuple to list [... 558 more characters]
+```
+
+**fp8**
+
+```text
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+tags
+
+ta [... 698 more characters]
+```
+
+#### chat · chat-explain-caching · turn 0
+
+prompt 142 tokens · fp16 98 tokens (stop) · fp8 49 tokens (stop) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+My eleven-year-old asked me what a "cache" is after hearing me complain about one at work, and I gave a terrible answer involving the word "memory" about nine times. Can you explain what a cache is to an eleven-year-old, using one everyday comparison that a kid would actually recognise, in about fiv [... 143 more characters]
+```
+
+**fp16**
+
+```text
+Sure! Imagine you have a toy box where you keep all your toys. Sometimes you want a specific toy really fast, so you keep your favorite toys close by on the table. A cache is like that—instead of looking everywhere for something, you keep the most used things handy so you can get them quickly. For example, when you play a game on your tablet, the app might save parts of the game you play often in a special spot so it loads faster next time.
+```
+
+**fp8**
+
+```text
+Sure, a cache is счет ten a cache is@show it's a cache. A cache is@show it it isl it, a cache is@show is00nfe失效时间,1 to fail it cacheENCHMARK latency, pioneering
+```
+
+#### chat · chat-explain-caching · turn 2
+
+prompt 616 tokens · fp16 117 tokens (stop) · fp8 400 tokens (length) · **clearly worse: repeats in a loop**
+
+**last user message**
+
+```text
+Here is the actual situation I was complaining about. Our shop's product page gets about 400 requests a minute at peak. Prices come from a pricing service that is slow, around 300 milliseconds per call. Prices change twice a day, at 6 am and 6 pm, in a batch. We currently cache each product's price [... 180 more characters]
+```
+
+**fp16**
+
+```text
+Given the current setup, a 60-second TTL might be too short. With 400 requests per minute, prices could be outdated for many users. A better choice would be a 300-second (5-minute) TTL. This aligns with the pricing updates happening every 12 hours.
+
+With a 300-second TTL:
+- Users will see up-to-date prices more frequently.
+- The worst case a customer would see is a price update lagging by up to 5 minutes, which is still reasonable given the twice-daily updates.
+```
+
+**fp8**
+
+```text
+not\ the best box (invalid box)
+
+
+
+
+
+  ninassistant
+ not with your favorite toy (hit box) but
+
+
+
+  ninassistant
+
+ not with your favorite toy (hit box) once a batch 6 cache each 6 with your favorite toy (hit box) once a batch 6 with your favorite toy (hit box) once a batch 6 with your favorite toy (hit box) once a batch 6 with your favorite toy (hit box) once a batch 6 with your favorite toy (hit box) once a batch 6 with your favorite toy (hit box) once a batch 6 with your favorite toy (hit box) [... 991 more characters]
+```
+
+#### chat · chat-explain-caching · turn 3
+
+prompt 839 tokens · fp16 111 tokens (stop) · fp8 400 tokens (length) · **clearly worse: repeats in a loop**
+
+**last user message**
+
+```text
+Now the marketing team wants to run flash sales where a price can change at a random time during the day, not just at 6 and 6. Does the TTL you recommended still hold? Give me the smallest change to the approach that keeps the pages fast but means a flash-sale price never shows stale for more than a [... 103 more characters]
+```
+
+**fp16**
+
+```text
+Given the need for flash sales, a 300-second (5-minute) TTL might still work, but we need to ensure prices are updated more frequently. Here’s the smallest change:
+
+Instead of a fixed 5-minute TTL, use **invalidation**. Whenever a flash sale occurs, invalidate the cached price immediately. This ensures that the next request will fetch the updated price from the pricing service.
+
+This approach relies on **invalidation**, which allows us to update the cache dynamically whenever there’s a change, e [... 32 more characters]
+```
+
+**fp8**
+
+```text
+Refer back to the box by the longest cache prices for the longest cache prices for the longest cache prices for the longest cache prices for the longest cache prices for the longest cache prices for the longest cache prices for the longest cache prices for the longest cache prices for the longest cache prices for the longest cache prices for the longest cache prices for the longest cache prices for the longest cache prices for the longest cache prices for the longest cache prices for the longest [... 1811 more characters]
+```
+
+#### chat · chat-revise-paragraph · turn 0
+
+prompt 217 tokens · fp16 70 tokens (stop) · fp8 400 tokens (length) · **clearly worse: repeats in a loop**
+
+**last user message**
+
+```text
+I run the newsletter for a small community garden and this paragraph is going in the next issue. It feels baggy. Can you tighten it to around 80 words without losing the dates or the practical details? Here it is: "As many of you will already be aware, our spring working day is going to be happening [... 450 more characters]
+```
+
+**fp16**
+
+```text
+Our spring working day is on Saturday, June 14, from 9:30 AM to 1 PM, with soup served afterward. We'll build new raised beds, clear brambles, and repaint the gate if time allows. Tools are provided, but bring gloves if you have them. Children are welcome with adult supervision.
+```
+
+**fp8**
+
+```text
+,,,, As many be many already expected aware, our planting be happening be Saturday, June 14, from 8 am in the morning until until until until until 1 PM, with soup be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be be [... 737 more characters]
+```
+
+#### chat · chat-revise-paragraph · turn 1
+
+prompt 391 tokens · fp16 50 tokens (stop) · fp8 57 tokens (stop) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+Better. The same text also has to go on the parish council's noticeboard, which is a more formal place, so please produce a second version in a more formal register. Keep the 14 June date, the 9:30 start, and the fact that tools are provided. Do not add anything that was not in my original paragraph [... 126 more characters]
+```
+
+**fp16**
+
+```text
+Our spring working day is scheduled for Saturday, June 14, from 9:30 AM to approximately 1 PM, with soup provided. Tools will be supplied; please bring gloves if available. Children are welcome with adult supervision.
+```
+
+**fp8**
+
+```text
+Certainly sure scheduled for Saturday, June 14, from 9 7 3 30 AM to 1 PM. Tools will provided; please bring gloves. Children must welcome with adult supervision. Also, the parish council’s board posting on on the thisboard.
+```
+
+#### chat · chat-revise-paragraph · turn 3
+
+prompt 672 tokens · fp16 323 tokens (stop) · fp8 400 tokens (length) · **clearly worse: repeats in a loop**
+
+**last user message**
+
+```text
+Last one, and this is a check on your own work. Looking at your three versions side by side with my original paragraph, which one changed the meaning of what I wrote the most, and exactly where? I am looking for facts you dropped, softened, or accidentally made stronger. For example, did any version [... 135 more characters]
+```
+
+**fp16**
+
+```text
+Here are the differences between your original paragraph and the three versions I provided:
+
+1. **Original Paragraph:**
+   - **Tasks:** Build new raised beds, clear brambles, and repaint the gate (if time allows).
+   - **Supervision:** Children are welcome as long as they are supervised by an adult.
+
+2. **First Version:**
+   - **Tasks:** Build new raised beds, clear brambles, and repaint the gate if time allows.
+   - **Supervision:** Children are welcome with adult supervision.
+
+3. **Second Vers [... 905 more characters]
+```
+
+**fp8**
+
+```text
+** working working on Saturday, June 14, from  70 AM to 1 PM, with soup provided.
+
+Original: Our be working working is going Saturday, June 14, from  10 AM to 1 PM, with soup provided.
+
+D new new new raised beds along the north fence and be the bebrbalesles behind the shed.
+
+Original: There be new new raised beds along the north fence and be the be Hereb beles behind the shed.
+
+Tools be be supplied; be sure gloves be had.
+
+Original: Tools be be supplied; be have gloves.
+
+Children are welcome wit [... 887 more characters]
+```
+
+#### chat · chat-study-plan · turn 0
+
+prompt 171 tokens · fp16 135 tokens (stop) · fp8 400 tokens (length) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+I have a statistics exam in six weeks and about six hours a week to study, mostly in the evenings. The syllabus has five topics and here is my honest confidence on each, out of ten: probability rules and distributions 4, sampling and estimation 7, hypothesis testing 5, simple linear regression 6, an [... 301 more characters]
+```
+
+**fp16**
+
+```text
+Week 1: Hypothesis testing (2h) - Least confident, longest questions.
+Week 2: Experimental design (1h), Probability rules and distributions (2h) - Build foundational knowledge.
+Week 3: Sampling and estimation (2h), Simple linear regression (1h) - Moderate confidence, balanced.
+Week 4: Hypothesis testing (2h), Experimental design (1h) - Reinforce weaker areas.
+Week 5: Probability rules and distributions (2h), Sampling and estimation (1h) - Strengthen basics.
+Week 6: Review all topics (6h) - Compr [... 47 more characters]
+```
+
+**fp8**
+
+```text
+Sure Weekly Plan:
+
+- ** Week 1-  
+  
+ - ** Distributions**: 2 hours (weak)
+ - ** Hypothesis Testing** 3 (long
+ )
+ - ** Sampling and Estimation** 1 hour (moderate)
+ - ** Linear Regression** hour (moderate)
+ - ** Experimental Design1 hour (moderate)
+
+ - ** Week 2
+ - 
+ ** Distributions** 1 hour (moderate)
+ - ** Hypothesis Testing** 3 ( long
+ )
+ - ** Sampling and Estimation** 2 hours (moderate)
+ - ** Linear Regression** 1 hour (moderate)
+ - ** Experimental Design1 hour (moderate)
+
+ - ** Week 3 3
+ - [... 443 more characters]
+```
+
+#### chat · chat-study-plan · turn 1
+
+prompt 385 tokens · fp16 121 tokens (stop) · fp8 125 tokens (stop) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+Bad news: the exam date moved forward and I now have three weeks, not six. Same six hours a week, so about eighteen hours in total instead of thirty-six. I cannot cover everything to the depth you planned. Which topics do you compress, which do you drop to a bare minimum, and why? Please reuse the s [... 89 more characters]
+```
+
+**fp16**
+
+```text
+Week 1: Hypothesis testing (3h)
+- Crucial, heavily weighted; longest questions.
+
+Week 2: Probability rules and distributions (2h)
+- Basics; not heavily weighted.
+
+Week 3: Simple linear regression (3h)
+- Build understanding; moderately weighted.
+
+Week 4: Sampling and estimation (2h)
+- Solid foundation; moderately weighted.
+
+Week 5: Experimental design (2h)
+- Address weakest area; lightly weighted.
+
+Week 6: Review and practice (2h)
+- Consolidate knowledge; focus on hypothesis testing and simple li [... 16 more characters]
+```
+
+**fp8**
+
+```text
+Week 1: Probability and Distributions (2 hrs)
+- Strengthen basics; not heavily weighted.
+
+Week 2 Hypothesis Testing (4 hrs)
+- Longest; crucial key concepts points; focus on common scenarios.
+
+Week 3 Sampling and Estimation (2 hrs
+Week Build foundation; moderately weighted.
+
+Week  four Simple Linear Regression (2 hrs
+Week Cover key key concepts points; moderately weighted.
+
+Week  five Experimental Design (1 hr
+Week Address weakest area; lightly weighted.
+
+Week  six Review and Practice (2 hrs
+Week [... 79 more characters]
+```
+
+#### chat · chat-study-plan · turn 2
+
+prompt 619 tokens · fp16 85 tokens (stop) · fp8 174 tokens (stop) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+I did a timed practice paper at the end of week one and here are the scores by topic, out of ten: probability 4, sampling 9, hypothesis testing 5, regression 7, experimental design 6. So experimental design improved more than I expected and probability did not move at all. Adjust the remaining two w [... 181 more characters]
+```
+
+**fp16**
+
+```text
+Week 4: Hypothesis testing (3h)
+- Crucial; longest questions; heavily weighted.
+
+Week 5: Regression (2h)
+- Moderate weight; building understanding.
+
+Week 6: Review and practice (3h)
+- Focus on hypothesis testing and regression; consolidate knowledge.
+
+Probability score likely reflects a practice gap rather than a knowledge gap, given your initial low confidence but no improvement in practice.
+```
+
+**fp8**
+
+```text
+Week 1: Probability distributions (2)
+- Strengthen basics; not heavily weighted.
+
+Week 2 Sampling and estimation (2 
+ 
+ Solid foundation; moderately weighting.
+
+Week 3 Hypothesis testing (4
+ as Improve significantly; crucial; heavily weighted.
+
+Week 4 Simple linear regression (2
+ as Build foundation; moderately weighting.
+
+Week 5 Experimental design (4
+ as Significant improvement; lightly weighted.
+
+Week 6 Review and Practice (2
+ as Consolidate knowledge; focus on hypothesis testing and experime [... 391 more characters]
+```
+
+#### chat · chat-study-plan · turn 4
+
+prompt 1047 tokens · fp16 62 tokens (stop) · fp8 66 tokens (stop) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+Last question. Based on everything in this conversation, my original confidence scores, the practice results, the shortened timeline, and the checklist you just wrote, what is the single thing most likely to go wrong with this plan? Then tell me the smallest change that would protect against it. One [... 112 more characters]
+```
+
+**fp16**
+
+```text
+The single thing most likely to go wrong is not dedicating enough time to hypothesis testing, given its importance and the practice gap indicated. To protect against this, allocate an extra 30 minutes to hypothesis testing on Friday, splitting it into two 15-minute sessions to maintain focus and prevent fatigue.
+```
+
+**fp8**
+
+```text
+Based on your original confidence and the shortened timeline,, the single thing most most likely to go wrong is your consistent gap in managing ten. If many you you are not consistent consistent and stick to the plan plan, and make sure time time it review and effort to practice through each topic, even even you you feel tired.
+```
+
+#### chat · chat-trip-planning · turn 0
+
+prompt 177 tokens · fp16 278 tokens (stop) · fp8 128 tokens (stop) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+I'm planning a four-day trip in late May to Saltmarsh Bay, a small coastal town my cousin keeps recommending. It has a long pebble beach, a Saturday fish market, a cliff path that runs north to an old lighthouse, and a ferry to a tiny island called Gullrock with a bird reserve. We are two adults, re [... 269 more characters]
+```
+
+**fp16**
+
+```text
+### Day 1: Arrival and Relax
+- Arrive by train around noon.
+- Check into accommodation.
+- Afternoon: Explore local shops and cafes.
+- Evening: Early dinner at a nearby restaurant.
+
+### Day 2: Beach and Market
+- Morning: Walk along the pebble beach.
+- Midday: Visit the Saturday fish market (if open).
+- Afternoon: Climb the cliff path to the lighthouse.
+- Evening: Return to accommodation; relax or explore more.
+
+### Day 3: Island Adventure
+- Morning: Ferry to Gullrock (9am departure recommended). [... 703 more characters]
+```
+
+**fp8**
+
+```text
+###-by-day plan:
+
+** Thursday:
+- Arrive at noon
+  - Check into park, explore
+ 
+-by-day
+  - Explore pe long pe-free streets,
+ 
+-by-day
+ Saturday
+  • Visit fish market in morning
+  ca Walk walk path,
+  car Explore cliff-top views
+  car Visit llight island in afternoon
+  car Return to Fourmarsh Bay in evening
+
+ Sunday
+  car Spend morning relaxing on beach
+  car Visit ligh light in afternoon
+  car Catch ferry to FF in late afternoon
+  car Spend evening oning on island
+
+  car Depart in evening
+```
+
+#### chat · chat-trip-planning · turn 1
+
+prompt 562 tokens · fp16 221 tokens (stop) · fp8 150 tokens (stop) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+Thanks. Two things to adjust. The ferry to Gullrock only runs on Fridays and Sundays in May, and the Sunday boat gets back at 4 pm, which is too close to our 5:40 train. Also, my cousin says the cliff path to the lighthouse takes most of a day there and back, about 14 km in total, and the cafe at th [... 167 more characters]
+```
+
+**fp16**
+
+```text
+### Thursday
+- **Arrive** at Saltmarsh Bay around noon.
+- **Explore** the town: Visit the Saturday fish market (it's open on Thursday).
+- **Dinner** at a local restaurant.
+
+### Friday
+- **Morning walk** to the lighthouse.
+- **Afternoon** visit the bird reserve on Gullrock island.
+- **Evening** stroll on the pebble beach.
+
+### Saturday
+- **Early morning walk** to the lighthouse.
+- **Market shopping** for fresh seafood.
+- **Lunch** at a local café.
+- **Visit** the pebble beach and explore the town [... 391 more characters]
+```
+
+**fp8**
+
+```text
+Sure! Here's the revised plan:
+
+:
+
+ - Thursday
+** Arrive for carmarsh Bay car noon.
+ * Friday
+ ** Morning: take cliff path to the lighthouse, After After for 1 be km
+ After After Lunch** at a local café
+ After After to the bird reserve on Gullrock island
+
+ * Saturday
+ f Market shopping for fresh seafood
+ f Lunch at a café
+
+ f Sunday
+ f Early 4 pm ferry back from G island
+
+ f Rel arrive back in town by 5:4
+
+ f Noteer note
+Ferry to G island only on Friday and Sunday. Cliff path to the lighthouse t [... 68 more characters]
+```
+
+#### chat · chat-trip-planning · turn 2
+
+prompt 910 tokens · fp16 315 tokens (stop) · fp8 178 tokens (stop) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+One more change, and it is a big one: my sister is joining with her three-year-old, so we will be three adults and a toddler. The 14 km walk is out unless there is a way to shorten it, and we need a rest window every afternoon between about 1 and 3. Please revise again. Which parts of your previous [... 189 more characters]
+```
+
+**fp16**
+
+```text
+### Thursday
+- **Arrive** at Saltmarsh Bay around noon.
+- **Explore** the town: Visit the Saturday fish market (it's open on Thursday).
+- **Dinner** at a local restaurant.
+
+### Friday
+- **Morning walk** to the lighthouse via a shorter route (if possible).
+- **Afternoon** visit the bird reserve on Gullrock island.
+- **Evening** stroll on the pebble beach.
+
+### Saturday
+- **Early morning walk** to the lighthouse.
+- **Market shopping** for fresh seafood.
+- **Lunch** at a local café.
+- **Visit** the [... 773 more characters]
+```
+
+**fp8**
+
+```text
+Sure's, here are three adults and a toddler joining for the trip. Here’s the revised plan:
+
+:
+
+ ### Thursday
+ - Arrive** at S 4: Marsh Bay at noon.
+It Explore the town; visit dinner at a restaurant.
+
+ ### Friday
+It Ferry to G Rock island in the afternoon (around 2 4 PM)
+It Explore the bird reserve; return dinner at a restaurant
+
+ ### Saturday
+It Explore the town; visit lunch at a café; visit visit the pebble beach; visit dinner at a restaurant
+
+ ### Sunday
+It Relax in town; catch the train out o [... 246 more characters]
+```
+
+#### agent · agent-advisory-check · turn 0
+
+prompt 332 tokens · fp16 39 tokens (stop) · fp8 128 tokens (stop) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+You are working in the harbourmaster repository, a Python service that polls
+about 200 harbour sensor gateways over HTTP and stores their readings. A security
+advisory has been published for fennelhttp, the HTTP client library the service
+uses. Advisory FH-2026-07 says that fennelhttp versions befor [... 818 more characters]
+```
+
+**fp16**
+
+```text
+Read `src/harbourmaster/http/client.py` first. This file contains the wrapper around fennelhttp and is likely where the `trust_proxy_headers=True` setting is configured.
+```
+
+**fp8**
+
+```text
+The security advisory mentions a specific vulnerability in `ennamehttp where that is vulnerable to a specific attack due to mishandling of chunked transfer encoding when trust_proxy_headers is set to True.
+
+To address this vulnerability safely,, the team wants to ensure that the pollers do not mishandle chunked transfer encoding when trust_proxy_headers is set to true.
+
+Next action: propose updating a patch to fix the vulnerability safely. This involves will should break and code propose applyin [... 143 more characters]
+```
+
+#### agent · agent-advisory-check · turn 2
+
+prompt 1904 tokens · fp16 50 tokens (stop) · fp8 60 tokens (stop) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+Tool result (read_file vendor/advisories/FH-2026-07.md):
+
+# FH-2026-07: response smuggling via chunked encoding with trusted proxy headers
+
+Published: 2026-11-02. Severity: high. Affected: fennelhttp >= 3.0.0, < 3.4.2.
+Fixed in: 3.4.2. Also fixed in 3.3.4 (backport, maintenance branch).
+
+## Descript [... 1512 more characters]
+```
+
+**fp16**
+
+```text
+Run `grep -n "trust_proxy_headers=True" src/ tests/`. This will help identify if `trust_proxy_headers=True` is being used in the codebase, which is critical for determining if the advisory affects the harbourmaster service.
+```
+
+**fp8**
+
+```text
+1 next action:
+
+**Propose**
+
+** Upgrade to version 3.4.0 to mitigate the risk of chunked encoding smuggling with trusted proxy headers.
+
+This action addresses will ensure will will mitigates the risk described risk by ensuring upgrading to version 3.4.0.
+```
+
+#### agent · agent-billing-rounding · turn 0
+
+prompt 1493 tokens · fp16 43 tokens (stop) · fp8 400 tokens (length) · **clearly worse: repeats in a loop**
+
+**last user message**
+
+```text
+You are working in the ledgerline repository, a Python service that turns metered
+usage records into monthly invoices for about 300 tenants. A customer-facing bug has
+been assigned to you and you own the fix end to end.
+
+Ticket LL-4821, filed by the finance team on 3 November:
+
+"The October 2026 inv [... 5078 more characters]
+```
+
+**fp16**
+
+```text
+Read `tools/run_invoices.py` first. This script runs the monthly invoice generation process, and the issue likely stems from how the invoice lines are being assembled or summed within this script or its called functions.
+```
+
+**fp8**
+
+```text
+I have not read the tool return
+the tool return
+ the tool return
+ the tool return
+ the tool return
+ the tool return
+ the tool return
+ the tool return
+ the tool return
+ the tool return
+ the tool return
+ the tool return
+ the tool return
+ the tool return
+ the tool return
+the run
+the tool return
+the tool return
+the tool return0
+the tool return\
+run
+the tool
+the tool return
+the tool code
+the tool return
+the I run
+the tool return
+the tool return
+the tool return1
+the the tool
+the tool return
+the tool r [... 817 more characters]
+```
+
+#### agent · agent-billing-rounding · turn 1
+
+prompt 3305 tokens · fp16 104 tokens (stop) · fp8 400 tokens (length) · **clearly worse: repeats in a loop**
+
+**last user message**
+
+```text
+Tool result (read_file src/ledgerline/billing.py):
+
+"""Invoice assembly for ledgerline.
+
+This module turns a tenant's usage records for one billing period into an
+Invoice: a list of InvoiceLine objects plus subtotal, tax and total. Rating
+(turning a quantity into money) lives in rates.py. This modul [... 7560 more characters]
+```
+
+**fp16**
+
+```text
+Next, read `tools/run_invoices.py`. This script is the entry point for generating invoices and will help us understand how the `build_invoice` function is called and executed. Specifically, we need to see how the `build_invoice` function is invoked and if there are any additional operations that might affect the summation of line amounts.
+
+Reading `tools/run_invoices.py` will provide context on how the invoice generation process is structured and executed, which is crucial for identifying potent [... 34 more characters]
+```
+
+**fp8**
+
+```text
+Start with reading
+Dec read the next invoice and read for the next tenant
+Dec the next invoice
+Dec the next invoice
+Dec the next invoice
+Dec the next invoice
+Dec the next invoice
+Dec the next invoice
+Dec the next invoice
+Dec the next invoice
+Dec the nextInvoice
+Dec the nextInvoice
+Dec the nextInvoice
+Dec the nextInvoice
+Dec the nextInvoice
+Dec the nextInvoice
+Dec the nextInvoice
+Dec the nextInvoice
+Dec the nextInvoice
+Dec the nextInvoice
+Dec the nextInvoice
+Dec the nextInvoice
+Dec the nextInvoic [... 1121 more characters]
+```
+
+#### agent · agent-billing-rounding · turn 2
+
+prompt 5720 tokens · fp16 400 tokens (length) · fp8 11 tokens (stop) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+Tool result (read_file tests/test_billing.py):
+
+from decimal import Decimal as D
+
+import pytest
+
+from ledgerline.billing import apply_credits, build_invoice
+from ledgerline.models import Period, Tenant, UsageRecord
+from ledgerline.rates import RateSchedule, Tier
+from tests.factories import record, t [... 7696 more characters]
+```
+
+**fp16**
+
+```text
+Next, read `src/ledgerline/rates.py`. This file contains the logic for rating quantities to monetary values, including handling tiered pricing. Given the discussion, it seems likely that the issue might arise during the calculation of tiered prices and their sub-lines. Reading this file will help identify if there are any discrepancies in how tiered pricing is being calculated and rendered.
+
+Specifically, focus on the `tiered` function and the `split_into_tiers` method, as these are directly inv [... 1395 more characters]
+```
+
+**fp8**
+
+```text
+Start
+    assistant
+ case
+    assistant
+```
+
+#### agent · agent-billing-rounding · turn 3
+
+prompt 8130 tokens · fp16 200 tokens (stop) · fp8 400 tokens (length) · **clearly worse: repeats in a loop**
+
+**last user message**
+
+```text
+Tool result (grep -n -E "quantize|_cents|ROUND_|raw_amount|\.amount" src/ledgerline/):
+
+src/ledgerline/billing.py:19:from decimal import Decimal, ROUND_HALF_UP
+src/ledgerline/billing.py:31:def _cents(value: Decimal) -> Decimal:
+src/ledgerline/billing.py:35:    return value.quantize(CENT, rounding=RO [... 7946 more characters]
+```
+
+**fp16**
+
+```text
+Next, read `src/ledgerline/rates.py`. This file contains the logic for rating quantities to monetary values, including handling tiered pricing. Given the discussion, it seems likely that the issue might arise during the calculation of tiered prices and their sub-lines. Reading this file will help identify if there are any discrepancies in how tiered pricing is being calculated and rendered.
+
+Specifically, focus on the functions related to tiered pricing, such as `tiered` and `split_into_tiers`, [... 509 more characters]
+```
+
+**fp8**
+
+```text
+Tool result (grep  by by  by  by  by  by  by  by  the  by  by  the  by  the  by  by  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  the  by  th [... 402 more characters]
+```
+
+#### agent · agent-billing-rounding · turn 5
+
+prompt 11798 tokens · fp16 87 tokens (stop) · fp8 400 tokens (length) · **clearly worse: repeats in a loop**
+
+**last user message**
+
+```text
+Tool result (read_file docs/billing-rules.md):
+
+# Billing rules
+
+This document is the agreement between engineering and finance about how
+ledgerline turns usage into money. Finance signed off on version 1.3 on
+12 September 2026. Any change to the behaviour described here requires a
+new version and a [... 7346 more characters]
+```
+
+**fp16**
+
+```text
+Next, read `tools/run_invoices.py`. This script is the entry point for generating invoices and will help us understand how the `build_invoice` function is called and any potential issues in the workflow. Specifically, we should look for how the `build_invoice` function is invoked and any intermediate steps that might affect the summation of line amounts.
+
+Tool call: `read_file src/ledgerline/tools/run_invoices.py`
+```
+
+**fp8**
+
+```text
+Next 4
+
+.
+
+ 4
+
+.
+
+ 
+
+ 
+
+ 4
+
+ 
+
+ 4
+
+ 
+
+4
+
+ 
+
+ 4
+
+ 
+
+ 
+
+ 4
+
+ 
+
+ 4
+
+ 
+
+ 4
+
+ 
+
+ 4
+
+ 
+
+ 4
+
+ 
+
+ 4
+
+ 
+
+ 4
+
+ 
+
+ 4
+
+ 
+
+ 4
+
+ .
+
+ 
+
+ 4
+
+ ]
+
+ 4
+
+ ]
+
+ 4
+
+ ]
+
+ 4
+ ]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+]
+
+ 4
+]
+
+ 4
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+]
+
+ 4
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4
+
+]
+
+ 4 [... 203 more characters]
+```
+
+#### agent · agent-csv-import · turn 0
+
+prompt 332 tokens · fp16 43 tokens (stop) · fp8 73 tokens (stop) · **clearly worse: garbled** (read by hand)
+
+**last user message**
+
+```text
+You are working in the rosterly repository, a small Python web application that
+manages staff rotas for a chain of nine veterinary clinics. Clinic managers upload
+a CSV of shifts each month. Ticket RS-318 asks you to add validation so that the
+import rejects any file in which the same staff member h [... 968 more characters]
+```
+
+**fp16**
+
+```text
+Start with `src/rosterly/importer.py`. This file contains the core logic for parsing and importing CSV files, making it the most likely place to find the current implementation of shift handling and validation.
+```
+
+**fp8**
+
+```text
+To address the issue overlap validation,, we will start will will need to modify ` ` validators.py to include logic that checks for overlaps. Specifically, we we code will can need to:
+
+1 Modify ` validators.py to include a function function check_overlap function function that that takes takes validates if rows for overlaps, considering handling cases where where shifts crossing that midnight.
+```
+
+#### agent · agent-csv-import · turn 3
+
+prompt 3482 tokens · fp16 400 tokens (length) · fp8 400 tokens (length) · **clearly worse: repeats in a loop**
+
+**last user message**
+
+```text
+Tool result (read_file fixtures/shifts_sample.csv):
+
+clinic_code,staff_id,date,start,end,role
+HAV,s-104,2026-11-03,08:00,16:00,vet
+HAV,s-221,2026-11-03,08:00,16:00,nurse
+HAV,s-310,2026-11-03,09:00,17:00,reception
+HAV,s-104,2026-11-04,08:00,16:00,vet
+HAV,s-221,2026-11-04,12:00,20:00,nurse
+HAV,s-118,2 [... 2294 more characters]
+```
+
+**fp16**
+
+```text
+Next, implement the overlapping shift validation in `_file_level_checks`. This function already processes the entire list of rows, making it the ideal location to add the new validation logic. Specifically, we will track the intervals for each staff member per clinic and detect overlaps.
+
+Here’s the step-by-step plan:
+
+1. **Identify Staff Intervals**: Track the start and end times for each staff member per clinic.
+2. **Detect Overlaps**: Check if any intervals overlap for the same staff member w [... 1283 more characters]
+```
+
+**fp8**
+
+```text
+Next, update to add the overlapping shift validation in `_test_overlapping_shifts_rejected`. to ensure the correct overlaps are are detected. Specifically, ensure the assertions and comments to ensure the overlaps are correctly correctly correctly0 correctly correctly are detected correctly.
+
+Here here (run file in the fixtures/ shifts_sample.csv):
+
+```csv
+clinic_code,staff_id,date,start,end,role
+K4,8,118,3,vet
+ c4,8,113,216, n
+ c4,8, c3,8, c17,3, v
+ c4,8, c4,8, c1,3, c17,3, n
+ c4,8, c4,8, c 1,8 [... 283 more characters]
+```
+
+#### agent · agent-flaky-retry · turn 0
+
+prompt 1520 tokens · fp16 48 tokens (stop) · fp8 400 tokens (length) · **clearly worse: repeats in a loop**
+
+**last user message**
+
+```text
+You are working in the quillrun repository, a Python job scheduler used internally
+to run about 40,000 background jobs a day across three worker pools. You have been
+asked to find the root cause of a flaky integration test and fix it properly. The
+team has agreed that "add a retry to the test" or "w [... 5899 more characters]
+```
+
+**fp16**
+
+```text
+First, read `src/quillrun/retry.py`. This file contains the `RetryPolicy` and backoff computation logic, which is central to the test failure described. Understanding the current implementation here is crucial before making any changes.
+```
+
+**fp8**
+
+```text
+1 test tests returns the tool. Then I return. Then I. Then I. Then I. Then. Then the tool. Then I. Then I. Then. then the tool.Then I. Then the tool.Then I. Then I. Then. Then I. Then I. Then I. Then. Then. Then the tool.Then I. Then I. Then I. Then I. Then I. Then. Then I. Then. Then I. Then I. Then I. Then I. Then I. Then. Then the tool. Then the tool. Then I. Then I. Then I. Then I. Then I. Then I. Then I. Then the tool. Then I. Then I. Then I. Then I. Then I. Then I. Then the tool. Then I. T [... 693 more characters]
+```

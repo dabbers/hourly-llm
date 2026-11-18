@@ -1068,7 +1068,154 @@ Hypothesis B (mine, the wait): `l-fp16-wait` against `l-fp16` on the same seeds.
 
 `l-fp8-wait` is reported against both single levers; no line is fixed for it.
 
-Results: pending the runs.
+### Results (run 2026-11-18)
+
+**Short answer: neither lever gets the rest of the cache hits. fp8 KV produces unusable text with this model,
+so its two arms were not run. The wait works when it acts, but it acts on too few requests to matter.**
+
+What ran. The fp16 block ran as designed: `l-fp16` and `l-fp16-wait`, seeds 1–4, eight runs, 70,242 requests,
+0 errors, KV preflight passed before every run at 285,584 tokens per replica. The fp8 block stopped at its
+quality check, before any load run. Stage L cost $11.19 of GPU time (one three-GPU pod for 4.2 hours); the
+project total is $105.72 of the $150 cap. The pod is terminated.
+
+#### fp8 KV (hypothesis A)
+
+| # | Line | Result |
+|---|---|---|
+| A1 | KV budget at least 1.8× | **Held.** 566,144 tokens per replica against 285,584: 1.98×, the same on all three engines. |
+| A2 | seat fallbacks fall by half | Not measured: the fp8 arms were not run (A6). |
+| A3 | cached share above 65% | Not measured. |
+| A4 | agent floor misses below 25% | Not measured. |
+| A5 | margins | Not measured. |
+| A6 | no clear quality loss | **Not held, by a wide margin.** All 30 fp8 replies are clearly worse than fp16 and none is usable. |
+
+The quality sample. On the same 30 prompts, two fp16 passes gave 28 identical replies. fp8 gave none: 15
+replies loop or come back empty, and the other 15 are garbled (doubled and dropped words, broken formatting,
+stray tokens). Half of the 30 run to the 400-token cap. The 30 pairs are in SAMPLES.md ("fp8 KV cache against fp16").
+
+I checked that this is fp8 and not something else, on the same pod and prompts:
+
+| Engine variant | Replies identical to fp16 | Loop or empty |
+|---|---|---|
+| fp16 KV, second pass | 28 of 30 | 0 |
+| fp16 KV on FlashInfer, the attention backend fp8 switches the engine to | 26 of 30 | 0 |
+| `fp8` (FlashInfer) | 0 | 15 |
+| `fp8` on the Triton backend | 0 | 16 |
+| `fp8_per_token_head` | 0 | 18 |
+| `fp8_e5m2` | 0 | 25 |
+| full-precision `Qwen/Qwen2.5-7B-Instruct` with `fp8`, against itself with fp16 | 0 | 16 |
+
+So the fault is not the new backend, not one fp8 format and not the AWQ weights. It is fp8 KV for this model
+on vLLM 0.32. The engine's own start-up log says fp8 "may cause accuracy drop without a proper scaling
+factor"; a model exported with calibrated KV scales is the untested way out.
+
+Why the fp8 load runs were dropped. A service that returns this text is not a service, so its speed and margin
+would describe nothing a customer could buy. The numbers would also not be comparable: broken replies run to
+the output cap, which changes the load itself.
+
+What the fp8 calibration shows anyway. Decode speed does not depend on what the tokens say, so I calibrated
+the fp8 engine with the same command. fp8 KV decodes much faster at high concurrency, and the fp16 run on the
+same backend shows the gain comes from fp8 itself:
+
+| Concurrent streams (6,144-token context) | 8 | 16 | 24 | 32 | 48 |
+|---|---|---|---|---|---|
+| fp16 KV, tokens/s per stream | 114 | 82 | 64 | 53 | not reached |
+| fp16 KV on FlashInfer | 113 | 83 | 64 | 54 | not reached |
+| fp8 KV | 131 | 108 | 88 | 78 | 59 |
+
+By the gateway's seat rule that is 83, 69 and 41 seats at 15, 30 and 60 tps against 60, 47 and 22 (the engine's
+64-stream limit would cap the first two at 64). The rule fixed in advance would have put the fp8 arms on the
+fp8 curve.
+
+How the two predictions did. The owner expected fp8 to free seats through a larger KV budget. I expected it not
+to, because seats come from the decode curve, "unless the fp8 calibration moves the decode curve". It moved
+it: the seat ceiling at 60 tps nearly doubles. So the owner's outcome (more seats) would very likely have
+appeared, by a different mechanism than the one named, and my expectation of no change was wrong. Neither
+matters until fp8 gives correct text. If it can be made to, it is the largest capacity lever found in this
+project, and that is the reason to pursue it.
+
+Getting fp8 to start at all took four attempts on this image. fp8 moves attention to FlashInfer, which
+compiles its kernels at first start and needs `ninja` on the path, a CUDA compiler that matches the CUDA
+headers in the Python environment (13.0 here; the image's system compiler is 12.4 and the environment's own
+was 13.5), and a `libcudart.so` link. The fix is recorded in `scripts/pod.sh`.
+
+#### The bounded wait (hypothesis B)
+
+Per run. Cached share, floor misses and margins are over all requests; "waits" is how many requests the lever
+acted on.
+
+| Arm | Seed | Hit rate | Seat fallbacks | KV fallbacks | Waits (ended on the remembered replica) | Cached share | TTFT p95 chat / agent | Start p95 | Floor misses, all / agent | Margin per token / per second | Output per GPU-hour | Largest prompt share |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `l-fp16` | 1 | 80.3% | 1,007 | 70 | 0 | 60.6% | 949 / 1,372 ms | 2.03 s | 17.7% / 37.5% | 45.6% / 44.8% | 2.51 M | 36.9% |
+| `l-fp16-wait` | 1 | 85.1% | 809 | 11 | 103 (71) | 62.9% | 795 / 1,207 ms | 2.12 s | 15.2% / 35.8% | 44.4% / 43.4% | 2.57 M | 39.3% |
+| `l-fp16` | 2 | 84.6% | 814 | 8 | 0 | 62.4% | 844 / 969 ms | 1.85 s | 15.2% / 35.9% | 43.4% / 42.5% | 2.56 M | 42.0% |
+| `l-fp16-wait` | 2 | 87.0% | 645 | 53 | 143 (100) | 63.4% | 882 / 1,076 ms | 1.97 s | 14.3% / 34.0% | 43.4% / 42.5% | 2.58 M | 40.2% |
+| `l-fp16` | 3 | 70.0% | 1,665 | 0 | 0 | 56.9% | 1,174 / 1,300 ms | 4.48 s | 29.4% / 45.8% | 49.6% / 49.6% | 2.40 M | 36.2% |
+| `l-fp16-wait` | 3 | 76.7% | 1,302 | 11 | 81 (60) | 61.2% | 1,011 / 1,094 ms | 3.31 s | 23.2% / 42.2% | 48.3% / 48.0% | 2.49 M | 38.5% |
+| `l-fp16` | 4 | 99.8% | 8 | 0 | 0 | 63.3% | 452 / 492 ms | 0.65 s | 2.0% / 12.2% | 21.1% / 19.4% | 2.56 M | 52.8% |
+| `l-fp16-wait` | 4 | 99.8% | 8 | 0 | 7 (4) | 62.9% | 546 / 630 ms | 0.74 s | 2.6% / 15.8% | 21.4% / 19.8% | 2.55 M | 50.7% |
+
+KV budget: 285,584 tokens per replica in every run. Floor misses for the other tenants: chat 15.0, 11.3, 29.8
+and 0.1% without the wait and 10.6, 10.4, 18.9 and 0.1% with it; note-taker 11.8, 17.3, 43.9 and 0% against
+10.8, 14.9, 25.6 and 0%; batch 0% everywhere. Revenue per million output tokens, mean of the four seeds:
+$0.610 per token and $0.603 per second without the wait, $0.592 and $0.583 with it.
+
+Paired differences, `l-fp16-wait` minus `l-fp16`:
+
+| Seed | Seat fallbacks | Cached share | TTFT p95 chat / agent | Start p95 | Floor misses, all / agent | Margin per token / per second | Output per GPU-hour |
+|---|---|---|---|---|---|---|---|
+| 1 | −198 (−20%) | +2.3 pts | −155 / −165 ms | +5% | −2.5 / −1.7 pts | −1.1 / −1.4 pts | +2.4% |
+| 2 | −169 (−21%) | +1.1 pts | +38 / +107 ms | +7% | −0.9 / −1.9 pts | −0.1 / 0.0 pts | +0.5% |
+| 3 | −363 (−22%) | +4.3 pts | −164 / −206 ms | −26% | −6.1 / −3.6 pts | −1.3 / −1.7 pts | +3.6% |
+| 4 | 0 | −0.4 pts | +94 / +138 ms | +15% | +0.6 / +3.6 pts | +0.3 / +0.4 pts | −0.2% |
+
+| # | Line | Result |
+|---|---|---|
+| B1 | seat fallbacks fall by half on seeds 1–3 | **Not held.** They fell 20–22%. |
+| B2 | cached share above 65% on seeds 1–3 | **Not held.** 62.9%, 63.4% and 61.2%. |
+| B3 | TTFT p95 not higher, start p95 at most 10% higher | **Not held.** Held on seeds 1 and 3; TTFT p95 was higher on seeds 2 and 4, and start p95 15% higher on seed 4. |
+| B4 | floor misses not higher | **Not held.** Lower on seeds 1–3, higher on seed 4. |
+| B5 | output per GPU-hour not lower | **Not held on the letter.** Higher on seeds 1–3, 0.2% lower on seed 4. |
+
+Why the wait did so little. It acted on 103, 143 and 81 requests on seeds 1–3, about 1% of each run, while
+seat fallbacks numbered 800 to 1,700. When it acted it worked: 69–74% of the waiting requests got their
+remembered replica, after a median 145–230 ms. But I aimed it at the wrong case. The wait covers a request
+that could start at once on another replica. In these runs 86%, 87% and 94% of the seat fallbacks had already
+queued for more than 100 ms: every replica was full, the request sat in the gateway's queue, and it took the
+first seat that came free anywhere. The wait as built never touches those. My 500 ms figure came from asking
+how soon the remembered replica frees a seat after a fallback, which was the right question asked about the
+wrong group of requests.
+
+How much of the difference is real. Two reads on run-to-run variation say most of it is not safely above
+noise. First, on seed 4 the wait acted on 7 requests of 8,216, so the seed-4 differences (TTFT p95 +94 and
++138 ms, floor misses +0.6 points) are what two runs of near-identical settings differ by. Second, `l-fp16` is
+stage K's `k-affinity` run again on another pod: cached share differed by −1.1 to +1.8 points, floor misses by
++0.9 to +7.5 points, and chat TTFT p95 by −490 to +80 ms between the two. Against that, the wait's gains on
+seeds 1–2 are inside the variation, and only seed 3 (cached share +4.3 points, floor misses −6.1) stands
+outside it. The direction on seeds 1–3 is consistently favourable; the size is small. The failed B3–B5 lines
+on seed 4 are this variation, not the lever, but the lines were fixed in advance and they did not hold.
+
+Margins. Where the wait raised the cached share, both margins fell by 1.1–1.7 points, per token and per second
+alike. That is K2 again: more cache hits billed at the cache-read price.
+
+Two recurring observations, now findings rather than incidents:
+
+- The KV cold-start shortfall appeared again, twice: an engine that starts while another is compiling or
+  loading comes up with 270,896 tokens instead of 285,584. A staggered warm restart fixes it every time, and
+  the preflight catches it.
+- The largest prompt-token share on seed 4 was 52.8% and 50.7% (47.7% in stage K). On the light day one
+  replica carries half of the prompt tokens under affinity. The imbalance guard is still the open item.
+
+What this leaves. The cached share stays near 61–63% on the heavy days. To move it, the remembered replica has
+to be preferred when a queued request is dispatched (a freed seat goes first to a waiter that remembers that
+replica, within a bound on how long others can be passed over), not only when a request arrives. That is a
+change to queue order and needs its own fairness rule, so it is proposed here, not built. Separately, fp8 KV
+is worth one more attempt with a model that carries calibrated KV scales, because of the decode-speed result
+above.
+
+Files: paired report and per-run tables in `docs/reports/stage-l/` (`campaign.html`, `stage_l_table.csv`,
+`stage_l_table_paired.csv`, `k2_reprice.csv`), every quality sample in `docs/reports/stage-l/quality/`,
+calibrations in `calibration/stage-l-fp16-a.yaml`, `stage-l-fp16-flashinfer-a.yaml` and `stage-l-fp8-a.yaml`.
 
 ## What was not measured, and what to do next
 
@@ -1105,7 +1252,7 @@ and four of the shipping reservation (Q8). Not measured, in order of value:
 - One GPU model, one model size, one price basket: a 4090 at $0.893 per GPU-hour and a 7B AWQ model at the 7B
   basket; the fp16 model, a 120 tps shape and an A100 cross-check (PHASE2.md §3) were skipped for budget. The
   report recomputes the margins for any `gpu_usd_per_hour` and price reference.
-- Affinity with a cap on prompt-token share and a price that keeps part of the saving (Q14), phase-length reservations, and the gateway fix for requests abandoned in the
+- Affinity that also prefers the remembered replica when a queued request is dispatched (Q15), fp8 KV with a model that carries calibrated KV scales (Q15: 1.98× KV and a 60 tps seat ceiling of 41 against 22, if the text can be made correct), affinity with a cap on prompt-token share and a price that keeps part of the saving (Q14), phase-length reservations, and the gateway fix for requests abandoned in the
   queue (served and billed to a closed socket in one saturation run; built and tested, not run on hardware).
 
 In order of value: the start-bound contract with its credit; the prefill-aware curve; the backfill decision;

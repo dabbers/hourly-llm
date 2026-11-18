@@ -1,3 +1,4 @@
+# NOT RUN (2026-11-18): the fp8 quality sample failed before this block (RESULTS Q15), so no fp8 load run exists.
 # Stage L (RESULTS Q15), second block: affinity on in every arm, engines at prefill chunk 2048 with an fp8 KV cache.
 # Two arms per block, interleaved by seed: l-fp8 (stage K's k-affinity with fp8 KV) and l-fp8-wait (the same with a 500 ms
 # bounded wait for the remembered replica, admission.prefix_affinity_wait_ms). The KV dtype is an engine
@@ -11,7 +12,7 @@ config_dir: config/phase2
 expect_replicas: 3
 expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
 expect_calibration: runpod-4090
-expect_kv_total: 1            # FILLED IN after the fp8 restart from the engines' /metrics, before the chain starts
+expect_kv_total: 566144     # fp8 budget read from the engines after the restart (35,384 blocks of 16), 1.98x fp16
 kv_spread_max: 0.01
 report_out: runs/stage-l/report-fp8
 report_mode: last

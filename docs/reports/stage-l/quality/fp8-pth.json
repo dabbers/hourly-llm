@@ -1,0 +1,307 @@
+{
+ "url": "http://127.0.0.1:8020",
+ "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+ "label": "fp8-per-token-head",
+ "replies": [
+  {
+   "id": "chat-compare-commute#0",
+   "tenant": "chat",
+   "turn": 0,
+   "output": "Let Rank 1: Electric Bike (F F F F F F)\n- **Pros: \n  - Comfortable, and ease of of riding, especially on hills.\n  • Weather protection with good rain gear.\n  • Cost Environmentally friendly.\n  • Cost Cost cost is low, compared to year car.\n\n-Cons\n  • Initial cost cost is high.\n  - May need to charge charge charging chargelong to charge charge charge.\n\nRank 2: Annual Bus Pass ( 64 )\n-Pros\n  - Cost is cost, and no need maintenance.\n  • Comfortable during.\n  - No convenient.\n-Cons\n  • Limited notflexibleibilityy.\n  • Initial cost is high.\n  - May may not get control to year yown car.\n\nRank 3: Keep Current Car Car Car ar ( 11 )\n-Pros\n  • Familiar route.\n  - May compare isy already own.\n-Cons\n  • Cost-uneasy comfortable.\n  -- Initial cost isy already high.\n  - Fuel costs and maintenance costs.\n\n  -y May may may- compare may\n\n Reasoning: Based on comfort, initial cost is, and initial initial initialy flexibility,, the electric bike offers the best best convenient option... However Therefore, it itit\n",
+   "finish": "stop",
+   "prompt_tokens": 221,
+   "output_tokens": 270,
+   "s": 2.06
+  },
+  {
+   "id": "chat-compare-commute#1",
+   "tenant": "chat",
+   "turn": 1,
+   "output": "Given the constraints:\n\n1 Option 1: Electric Bike\n- **Cost**: Up 1,4 (plus lock and rain gear)\n- **Time**: 33 minute (h3, and dry faster than walking\n - Arriving Dry**: Yes, with proper rain gear\n- **Total Yearly**::",
+   "finish": "stop",
+   "prompt_tokens": 632,
+   "output_tokens": 66,
+   "s": 0.43
+  },
+  {
+   "id": "chat-compare-commute#2",
+   "tenant": "chat",
+   "turn": 2,
+   "output": "### Revised Commoptions:\n\n:\n\n1. **Bus**\n- ** **Cost**: $6 64/year\n-- **Time**: 45 (15/ each way)\n- - **Arriving Dry**: Yes, with an umbrella or poncho\n--- **Total Yearly Cost**: $64/year\n\n22 **Electric Bike**\n-- ** **Cost**: \n-- ** Financed**: $75/month for 1 months (with discounts)\n--- ** cheaper model: $ 71 ( + and rain gear included)\n-- **Time**: ~ 1- (h hilly terrain), faster than bus\n-- **Arriving Dry**: Yes with proper rain gear\n-- **Total Yearly cost**:**:**:**:**:**:**:**:**:**:**:**:**:**:**:**:**:ly**:**:**:**:**:**:ly**:**:lylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylylyly",
+   "finish": "length",
+   "prompt_tokens": 1064,
+   "output_tokens": 400,
+   "s": 2.4
+  },
+  {
+   "id": "chat-compare-commute#3",
+   "tenant": "chat",
+   "turn": 3,
+   "output": "Sure September, the commute distance increases to 9 km, and considering conditions financing, becomes changes, the bike drops out entirely. The park-and-ride option becomes cheaper model, by the car car. remains the most most most,.\n\n- **Bus**: Costs $640/year, takes takes 45 minutes each day, and arrives dry dry dry.\n - ** park-and-R ride**: Costs roughly4,50/day for 9 months = 12160/year, 45 minutes but, and arrives dry dry dry.\n\n- **Car**: Costs 110/month and 164 s/year, 45 minutes variable and arrives dry dry.\n\n- ** biggest factor: is the cost decrease longer commute distance, which which making makes increases the cost cost and costs.\n\n- ** monthly cost::\n - ** **Bus**: 64 s/year / 45 months\n - ** park-and-R ride**: 164 s/year 4 45 months\n - **Car**: 11 s/month 164 s/year\n\n - **Approximate monthly cost**::\n - ** **Bus**: 16 s/month\n -. ** park-and-R ride**: 47 smonth\n - **Car**: 11 smonth\n\n- The park biggest factor with the t is the longer commute distance, which which which increases the time and costs.",
+   "finish": "stop",
+   "prompt_tokens": 1458,
+   "output_tokens": 290,
+   "s": 1.77
+  },
+  {
+   "id": "chat-debug-snippet#1",
+   "tenant": "chat",
+   "turn": 1,
+   "output": "It handle handle handle handle handle handle handle To handle To handle To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To",
+   "finish": "length",
+   "prompt_tokens": 646,
+   "output_tokens": 400,
+   "s": 2.37
+  },
+  {
+   "id": "chat-debug-snippet#2",
+   "tenant": "chat",
+   "turn": 2,
+   "output": "Sure To protect fix the To bug To with no tags,,, a concise To To protect protect protect protect protect protect protect:\n\n\n\n:\n\n To protect the To To protect To protect To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To",
+   "finish": "length",
+   "prompt_tokens": 1105,
+   "output_tokens": 400,
+   "s": 2.4
+  },
+  {
+   "id": "chat-debug-snippet#3",
+   "tenant": "chat",
+   "turn": 3,
+   "output": "Got it it! Here here address the original code bug and To handle handle protect handle protect To handle theTo protect To protect To protect To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To To",
+   "finish": "length",
+   "prompt_tokens": 1403,
+   "output_tokens": 400,
+   "s": 2.41
+  },
+  {
+   "id": "chat-explain-caching#0",
+   "tenant": "chat",
+   "turn": 0,
+   "output": "A cache is is like like a special folder where your computer keeps keeps important its important important important files,. It think keep them files do together and keep them them organized do well so it it it find them easy files do easier do.. It so do keep It like like a box similar keeping do your your desk drawer organized do with important your favorite toys and snacks... so do do find can it easier do to find find what what than you........... do so do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do. do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do find do find do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do do find do do do do do do do do do do do do do do find do do do do do do do do do find do do do do do do do do do do do do do do find do do do do do do do do do do find do do do do do do do do do do do do find do do do do do do do do do do do find find do do do do do find do do do do do find find do do do do find find do do do do find find do do do find do do do find do do do do find find do do find find find do do do do find find do do do find find find do do do find find do do do find find find do do do find find find do do do find find find do do do",
+   "finish": "length",
+   "prompt_tokens": 142,
+   "output_tokens": 400,
+   "s": 2.3
+  },
+  {
+   "id": "chat-explain-caching#2",
+   "tenant": "chat",
+   "turn": 2,
+   "output": " When a cache stores frequently requested data,, quickly, For example,, a website request in in requests a go peak,. go within in in within within milliseconds. go. go 2. Twice a go go means 6 6 6 6 with a 5 6  go  go  go 6  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go ",
+   "finish": "length",
+   "prompt_tokens": 616,
+   "output_tokens": 400,
+   "s": 2.36
+  },
+  {
+   "id": "chat-explain-caching#3",
+   "tenant": "chat",
+   "turn": 3,
+   "output": "The TTL (Time-to Live) does determines how how how often often long the cache holds keep valid. For your setting, a 6 to 6 seconds TTL means means means the pages go go stay fresh for a longer sale. go to ensure a random sale page never go stale for a go sale.. The to go a 6-second junior developer explanation go relies on go the concept understanding TTL to go keep the pages fresh fresh valid for a go sale..",
+   "finish": "stop",
+   "prompt_tokens": 839,
+   "output_tokens": 96,
+   "s": 0.6
+  },
+  {
+   "id": "chat-revise-paragraph#0",
+   "tenant": "chat",
+   "turn": 0,
+   "output": "Our spring garden maintenance day is set for Saturday, June 1 1 1 1 1 1 1 1 1 1 1 14 from  do  do 9 9  do 9 9 9  do 9 9  do 9 9  do 9 9  do 9 9  do  do 9 9  do  do 9 9  do  do 9 9  do  do 1  do  do  do 9  do 9 9  do  do  do 9  do  do  do 9  do  do  do  do 1  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do  do ",
+   "finish": "length",
+   "prompt_tokens": 217,
+   "output_tokens": 400,
+   "s": 2.31
+  },
+  {
+   "id": "chat-revise-paragraph#1",
+   "tenant": "chat",
+   "turn": 1,
+   "output": " Our spring work day day is on Saturday, June 1 1 1 from 9 AM to roughly 1 PM, with soup. We We do do beds, go fences, and repaint the gate. allow allow welcome children with adult supervision. and tools tools council go on board board board would would would board would would go padded go go go would would length go go go would go go. would go go go would would go go go.",
+   "finish": "stop",
+   "prompt_tokens": 391,
+   "output_tokens": 92,
+   "s": 0.56
+  },
+  {
+   "id": "chat-revise-paragraph#3",
+   "tenant": "chat",
+   "turn": 3,
+   "output": "Sure,\n\nHere here with your your paragraph:\n\n:\n\nOur spring spring spring go do is happening for Saturday go June 11 1 from 9 pm 9 am 9 AM 9 from 9 pm 9 go 9 from 9 go 9 from 9 9 9 go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go  go go ",
+   "finish": "length",
+   "prompt_tokens": 672,
+   "output_tokens": 400,
+   "s": 2.35
+  },
+  {
+   "id": "chat-study-plan#0",
+   "tenant": "chat",
+   "turn": 0,
+   "output": "Here week breakdown:\n\n- ** Week 1: Confidence 3 3\n Focus: D distributions (3 2)\n- Week 2 3\n Focus| sampling and estimation ( week 7)\n- Week 4\n Confidence  7 7\n Focus  hypothesis testing ( week 7\n- Week 5 5\n Focus  regression ( week 6\n- Week 7\n Confidence  3 3\n Focus  experimental design ( week 3\n\nEach week should covers covers six hours hours to study, and focus week focuses on the topic where you weakest. and most confidence lowest.",
+   "finish": "stop",
+   "prompt_tokens": 171,
+   "output_tokens": 127,
+   "s": 0.76
+  },
+  {
+   "id": "chat-study-plan#1",
+   "tenant": "chat",
+   "turn": 1,
+   "output": "Week 1: Probability & D Distributions (3h)\n- Strengthen basics; heavily weighted.\n\nWeek 2| Sampling & Estimation (3h)\n- Solid foundation; moderately weighted\n\nWeek 33| Hypothesis Testing ( 6h\n- Focus on this; longest section in past papers; heavily weighted\n\nWeek 44| Simple Linear Regression (33hh\n- Build foundation; moderately weighted\n\nWeek  t5 Experimental Design ( 3h\n\n- Address weakest area; lightly weighted\n\nWeek 6 | Review & Practice ( 3h)\n- Consolidate learning; focus on hypothesis testing & experimental design)",
+   "finish": "stop",
+   "prompt_tokens": 385,
+   "output_tokens": 135,
+   "s": 0.81
+  },
+  {
+   "id": "chat-study-plan#2",
+   "tenant": "chat",
+   "turn": 2,
+   "output": "Based on your recent timed test:\n\n- **Probability & and Distributions**::** 6**\n**\n 9**\n out of 10**\n - **Samplingi and estimation** 6**\n\n 9 ** out of 10\n- **Hypothesis testing test** 6**\n\n 8 so out\n\n  7\n\n regression 7\n  6\n  1\n\n \n\n **\n\nIt it seems your confidence in Probability & and distributions is higher higher than expected expected expected. Let might it to strengthen this the weaker areas. and increase.\n\nWeek 1: Probability & and distributions (3 h)\n- Focus on areas where you scored higher high\n  9 out out of 10\nWeek 2 Sampling and estimation (2 h)\n - Continue review practice\n  9 out out of 1 so\nWeek 3 Hypothesis testing ( 2 h)\n - Address weaker area; focus h\n  7 out out out of 1 so\nWeek  regression (  h)\n - Build foundation;  h\n  7 out out out",
+   "finish": "stop",
+   "prompt_tokens": 619,
+   "output_tokens": 225,
+   "s": 1.34
+  },
+  {
+   "id": "chat-study-plan#4",
+   "tenant": "chat",
+   "turn": 4,
+   "output": " Based your confidence scores, and the the shortened checklist:\n\n:\n\n:\n\n:\n\n:\n\n:\n\n \n\n- Probability and distributions:: : 4 4\n \n\n\n\n\n \n\n - Hypothesis test go 7 7 7 7  go 7 7  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go  go ",
+   "finish": "length",
+   "prompt_tokens": 1047,
+   "output_tokens": 400,
+   "s": 2.4
+  },
+  {
+   "id": "chat-trip-planning#0",
+   "tenant": "chat",
+   "turn": 0,
+   "output": "Sure it plan plan l day l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l",
+   "finish": "length",
+   "prompt_tokens": 177,
+   "output_tokens": 400,
+   "s": 2.31
+  },
+  {
+   "id": "chat-trip-planning#1",
+   "tenant": "chat",
+   "turn": 1,
+   "output": "Sure! Here here day-day plan:\n\n### Thursday\n- Arrive at Saltmarsh Bay around noon.\n- Explore the Saturday beach.\n- Dinner at at a local restaurant.\n\n l l\n\n### Friday\n- Morning l l to the lighthouse.\n l Visit G lrock island.\n l L\n\nl Saturday\nl Market shopping for fresh seafood.\n l Lunch l a local café.\n l Visit the pebble beach and explore.\n l l\n\n l Sunday\n l Morning l to the lighthouse.\n l Relax l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l",
+   "finish": "length",
+   "prompt_tokens": 562,
+   "output_tokens": 400,
+   "s": 2.35
+  },
+  {
+   "id": "chat-trip-planning#2",
+   "tenant": "chat",
+   "turn": 2,
+   "output": "Given the changes constraints and the need with a toddler, let l l l l the following to revise the plan plan plan:\n\n \n\nThursday\n- Arrive at Salt Saltmarsh Bay around noon.\n- Explore the Saturday l l (l l Thursday).\n\nFriday\n- Morning l l to the lighthouse via the cliff l.\n- Visit the bird l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l l",
+   "finish": "length",
+   "prompt_tokens": 910,
+   "output_tokens": 400,
+   "s": 2.38
+  },
+  {
+   "id": "agent-advisory-check#0",
+   "tenant": "agent",
+   "turn": 0,
+   "output": "chunk\nf\nencoding\nm\nm\nm1\nf\nm2\nf\n-33\nf\n-34\nf\n-32\nf\n-33\nf\n-32\nf\n-+2\nf\n-+3\nf\n-+2\nf\n-+3\nf\n-+2\nf\n-+",
+   "finish": "stop",
+   "prompt_tokens": 332,
+   "output_tokens": 83,
+   "s": 0.52
+  },
+  {
+   "id": "agent-advisory-check#2",
+   "tenant": "agent",
+   "turn": 2,
+   "output": "Tool ` (grep - \"trust_proxy_headers=True\" the file):\n\n# FH-7:1:1: Smugglinging a trusted proxy to accept a fixed-length chunk, \n\nPublished: 2.4.9, Severity:1\n\nA fixed-length chunk is not sent sent smuggled by through by a trusted proxy. The chunk is is000000002\nThe chunk is is002\n the origin length is is read smuggled so\nthe chunk is01 so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so\nthe chunk is so",
+   "finish": "length",
+   "prompt_tokens": 1904,
+   "output_tokens": 400,
+   "s": 2.58
+  },
+  {
+   "id": "agent-billing-rounding#0",
+   "tenant": "agent",
+   "turn": 0,
+   "output": "  thatNov  any\n  any14\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  anyany\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n  any\n ",
+   "finish": "length",
+   "prompt_tokens": 1493,
+   "output_tokens": 400,
+   "s": 2.52
+  },
+  {
+   "id": "agent-billing-rounding#1",
+   "tenant": "agent",
+   "turn": 1,
+   "output": "        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n        tenant\n       ",
+   "finish": "length",
+   "prompt_tokens": 3305,
+   "output_tokens": 400,
+   "s": 2.73
+  },
+  {
+   "id": "agent-billing-rounding#2",
+   "tenant": "agent",
+   "turn": 2,
+   "output": "for a la\n``|\n*/\n\nnon\nless\n``\nallowed\n for a\n````\n``` 1\n```\n``|\n}\n``>\n``\nallowed\n for a\n```  used\nA\n```  used\n``` 1\n````\n```  used\n```  No\n````\n````\n```  No\n```  No\n```  No\n````\n````\n````\n````\n````\n````\n````\n```  No\n```  No\n````\n````\n````\n````\n````\n````\n````\n````\n````\n```  No\n```  No\n```  No\n```\n````\n````\n````\n````\n````\n````\n```  No\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n```  No\n````\n```  No\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n````\n```",
+   "finish": "length",
+   "prompt_tokens": 5720,
+   "output_tokens": 400,
+   "s": 3.26
+  },
+  {
+   "id": "agent-billing-rounding#3",
+   "tenant": "agent",
+   "turn": 3,
+   "output": "|\n```\\n\n```|\n\n|\n\n``\n```s\n```\n\\n\n```\n\\u\n\\x\n\\n\n\\u\n\\x\n\\n\n\\x\n\\n\n\\x\n\\N\n\\x\n\\n\n\\x\n\\N\n\\x\n\\N\n\\x\n\\n\n\\x\n\\N\n\\x\n\\n\n\\x\n\\n\n\\x\n\\n\n\\x\n\\n\n\\x\n\\n>\n\\x\n\\n\n\\x\n\\n\n\\x\n\\n>\n\\x\n\\n\n\\x\n\\n\n\\x\n\\N\n\\x\n\\n\n\\x\n\\n\n\\x\n\\n\n\\x\n\\n\n\\x\n\\\n\\x\n\\\n\\x\n\\\\>\n\\x\n\\\n\\x\n\\R\n\\x\n\\\\$\n\\x\n\\\\>\n\\x\n\\\\\n\\x\n\\\\\n\\x\n\\\\$\n\\x\n\\\\$\n\\x\n\\\\\\\n\\x\n\\\\( \n\n\\x\n\\\\(`\n\\x\n\\\\(\n\\x\n\\\\(`\n\\x\n\\\\(`\n\\x\n\\\\$\n\\x\n\\\\(`\n\\x\n\\\\(`\n\\x\n</\n\\x\n\\\\(`\n\\x\n\\\\(`\n\\x\n\\\n\\x\n\\\\(`\n\\x\n\\\\(`\n\\x\n\\\\(`\n\\x\n\\\\(`\n\\x`\n\\\\(`\n\\x\n\\\\(`\n\\x\n\\\\(`\n\\x\n\\\\(`\n\\x`\n\\\\(`\n\\x\n\\\\(`\n\\x`\n\\\\(`\n\\x`\n\\\\(`\n\\x`\n\\\\(`\n\\x`\n\\\\(`\n\\x`\n)\\\n`\n\\x`\n\\n\n\\x`\n』`\n\\x`\n\\x\n\\x\n\\x\n\\x\n\\x\n\\x\n\\x\n\\x\n\\x\n\\x\n\\x\n\\x`\n\\x`\n\\x`\n\\x\n\\x`\n\\x`\n\\x`\n\\x`\n\\x`\n\\x`\n\\x`\n\\x`\n\\x`\n\\x`\n\\x`\n",
+   "finish": "length",
+   "prompt_tokens": 8130,
+   "output_tokens": 400,
+   "s": 3.32
+  },
+  {
+   "id": "agent-billing-rounding#5",
+   "tenant": "agent",
+   "turn": 5,
+   "output": "\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\\\n\n\\n\n\\n\n\\n\\n\\n\n\\n\n\\n\n\\n\n\\\\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\\n\\n\n\\\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\\\\n\\n\n\\n\n\\n\n\\\\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n}\\\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\\\\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n>\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n\n\\n",
+   "finish": "length",
+   "prompt_tokens": 11798,
+   "output_tokens": 400,
+   "s": 4.7
+  },
+  {
+   "id": "agent-csv-import#0",
+   "tenant": "agent",
+   "turn": 0,
+   "output": "Dec read to read read ` shifts_sample.csv from the fixtures directory. This reason:\n\nto do so allows that it that it it can access easily access access the exact file path data file the CSV file that is already formatted correctly and can be serve used used to test test test validate without without needing to read an invalid file first first first A.",
+   "finish": "stop",
+   "prompt_tokens": 332,
+   "output_tokens": 70,
+   "s": 0.45
+  },
+  {
+   "id": "agent-csv-import#3",
+   "tenant": "agent",
+   "turn": 3,
+   "output": "Tool (read read fixtures shiftshifts_sample.csv):\n\nThis file reads reads reads reads reading the fixtures fileshift\\_sample.csv file file, which contains the sample sample A sample for testing testing testing validation logic. Specifically, it A A1 sample for validating that overlapping shifts for staff across clinics.\n\nA A Aly staff and clinic codes\\ staff and date\\ start and time time time time\\ and\\ clinic code\\ and\\ staff\\ and\\ date\\ and\\time\\ and\\role\\ and\\role\\and\\ and\\clinic\\ and\\s\\ and\\ and\\ clinic\\ and\\ staff\\ and\\ date\\ and\\ clinic\\ and\\ staff\\ and\\ly\\ and\\ clinic\\ and\\ staff\\ and\\-\\ and\\ clinic\\ and\\ staff\\ and\\-.\\\n\nThe validation logic will checks for overlaps between staff across clinics\\ and\\ rejects\\ any\\ invalid\\ rows\\ with\\ their\\ and\\ a\\ row\\ number\\ and\\ a\\ message\\ and\\ sends\\ and\\ clinic\\ and\\ staff\\ and\\-\\ and\\ and\\ clinic\\ and\\ staff\\ and\\o\\ and\\ clinic\\ and\\ staff\\ and\\o\\ and\\ clinic\\ and\\ staff\\ and\\o\\ and\\ clinic\\ and\\ staff\\ and\\o\\ and\\ clinic\\ and\\ staff\\ and\\o\\ and\\ clinic\\ and\\ staff\\ and\\o\\ and\\ clinic\\ and\\ staff\\ and\\o\\ and\\ clinic\\ and\\ staff\\ and\\ and\\ clinic\\ and\\ staff\\ and\\o\\ and\\ clinic\\ and\\ staff\\ and\\o\\ and\\ clinic\\ and\\ staff\\ and\\o\\ and\\ and\\ clinic\\ and\\ staff\\ and\\o\\ and\\ clinic\\ and\\ staff\\ and\\o\\ and\\ and\\ clinic\\ and\\ staff\\ and\\o\\ and\\ clinic\\ and\\ staff",
+   "finish": "length",
+   "prompt_tokens": 3482,
+   "output_tokens": 400,
+   "s": 2.89
+  },
+  {
+   "id": "agent-flaky-retry#0",
+   "tenant": "agent",
+   "turn": 0,
+   "output": "The integration test tests retry mechanism is failing failing fl due the scheduler's and it the FakeClock\nqu allows allows the integration tests uses. is designed to simulate a deliberate delay timing issue issue issue.\nbehavior. This The retry logicqu marks marks marks that the job runs runs the job job a boundary\ndeadlinequ even the job job job the jobun scheduled job job job the job job runs runs\njob the jobqu runs runs the job again again again again again-222191..\n\nTo debug this the issue issue issue failurenqu, the FakeClockqu is used used used the only tooloolqu runs toqu\nsimulate1 the timing1 differences1 betweenququ the retry logic1 is1 based1 on1 the1qu actual\nclock1 and1 the1 deadline1 which thequ itqu the1 scheduled1 time time the1 job runqu the\nretry1 is1 based the1 correct correct the1 timing1 differences1 Itqu the1 fakeclock1 simulates1 the1\nreal1 slowququ the1 retry1 logic1 is1 correct the1 correctqu the1 correct runs the1 correct correct the1 correct behavior the1\ntiming1 differences1 and1 the1--qu2111111 the1 retry1 logic1 works1 as as the1\nsame1 way the1 the1 real run1 the1 retry1.\n\n",
+   "finish": "stop",
+   "prompt_tokens": 1520,
+   "output_tokens": 291,
+   "s": 1.88
+  }
+ ]
+}
