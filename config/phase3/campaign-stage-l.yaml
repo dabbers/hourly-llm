@@ -1,0 +1,17 @@
+# Stage L manifest (RESULTS Q15): KV dtype x bounded affinity wait, affinity on everywhere, paired by seed.
+settings:
+  l-fp16: {desc: "stage K's k-affinity run again: chunk 2048, affinity on, fp16 KV, no wait"}
+  l-fp16-wait: {desc: "l-fp16 with a 500 ms bounded wait for the remembered replica"}
+  l-fp8: {desc: "l-fp16 with --kv-cache-dtype fp8 on the engines"}
+  l-fp8-wait: {desc: "l-fp8 with a 500 ms bounded wait for the remembered replica"}
+pairs:
+  - [l-fp8, l-fp16]
+  - [l-fp16-wait, l-fp16]
+  - [l-fp8-wait, l-fp8]
+  - [l-fp8-wait, l-fp16-wait]
+  - [l-fp8-wait, l-fp16]
+headline:
+  - [l-fp8, l-fp16]
+  - [l-fp16-wait, l-fp16]
+scorecard:
+  baseline: l-fp16

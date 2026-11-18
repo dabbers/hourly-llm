@@ -61,7 +61,8 @@ def read_meter(path: Path) -> pd.DataFrame:
     if "reservation_id" not in df:  # meter files written before milestone 4
         df["reservation_id"] = None
     for col, default in (("cached_tokens", 0), ("billed_shape", None), ("showcase", None),  # before phase 2
-                         ("conversation_id", None), ("affinity", None)):  # before stage K
+                         ("conversation_id", None), ("affinity", None),  # before stage K
+                         ("affinity_wait_ms", np.nan)):  # before stage L
         if col not in df:
             df[col] = default
     return df

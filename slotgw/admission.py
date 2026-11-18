@@ -36,6 +36,7 @@ from .pacing import Pacer
 log = logging.getLogger("slotgw.admission")
 
 QUEUE_ORDER = ("interactive", "lazy", "burst")
+AFFINITY_WAIT_POLL_S = 0.01  # stage L: how often a request waiting for its remembered replica looks again
 
 
 class ReplicaLike(Protocol):
@@ -90,6 +91,7 @@ class Hold:
     # stage K (prefix affinity)
     conversation: str | None = None
     affinity: str | None = None  # None = no remembered replica; "hit"; else why it ran elsewhere (seat, kv, unhealthy, ...)
+    affinity_wait_ms: float | None = None  # stage L: time spent waiting for the remembered replica (hit or not)
 
 
 class ReplicaLedger:
@@ -420,6 +422,8 @@ class Scheduler:
         self._affinity: OrderedDict[str, tuple[str, float]] = OrderedDict()
         self.affinity_hits = 0
         self.affinity_fallbacks: dict[str, int] = {}
+        self.affinity_waits = 0  # stage L: requests that waited for their remembered replica
+        self.affinity_wait_hits = 0  # of which: it fitted before the wait ran out
 
     # ---- prefix affinity (stage K) --------------------------------------------------------------
 
@@ -469,6 +473,42 @@ class Scheduler:
                 self.affinity_fallbacks[h.affinity] = self.affinity_fallbacks.get(h.affinity, 0) + 1
         self._touch(conversation, h.ledger.id)
         return h
+
+    def _wait_target(self, shape: Shape, chosen: ReplicaLedger, conversation: str | None) -> ReplicaLedger | None:
+        """Stage L: the remembered replica, if this request should wait for it: the wait is configured,
+        affinity is on, and placement just chose another replica although the remembered one is healthy
+        and serves the shape."""
+        if not (self.settings.prefix_affinity and self.settings.prefix_affinity_wait_ms > 0):
+            return None
+        remembered = self.remembered(conversation)
+        if remembered is None or chosen.id == remembered:
+            return None
+        for ledg in self.candidates(shape):
+            if ledg.id == remembered:
+                return ledg if ledg.healthy and ledg.seats(shape.tps) > 0 else None
+        return None
+
+    async def _wait_for_home(
+        self, home: ReplicaLedger, shape: Shape, prompt_tokens: int, kv_tokens: int | None, conversation: str | None
+    ) -> tuple[ReplicaLedger | None, float]:
+        """Wait up to `prefix_affinity_wait_ms` for `home` to fit the request. Returns (replica, waited ms):
+        `home` as soon as it fits, else whatever placement gives when the wait runs out (None = nothing fits
+        any more, and the caller queues the request). The request holds no seat while it waits, so later
+        arrivals may take seats first; the wait is counted in the request's queue time."""
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        deadline = t0 + self.settings.prefix_affinity_wait_ms / 1000.0
+        self.affinity_waits += 1
+        kv = home.kv_blocks(kv_tokens) if kv_tokens is not None else home.kv_for(shape)
+        while True:
+            left = deadline - loop.time()
+            if left <= 0 or not home.healthy:
+                break
+            await asyncio.sleep(min(AFFINITY_WAIT_POLL_S, left))
+            if home.check(shape, kv, prompt_tokens) is None:
+                self.affinity_wait_hits += 1
+                return home, (loop.time() - t0) * 1000.0
+        return self.place(shape, prompt_tokens, kv_needed=kv_tokens, conversation=conversation), (loop.time() - t0) * 1000.0
 
     # ---- placement ----------------------------------------------------------------------------
 
@@ -759,6 +799,11 @@ class Scheduler:
         others_waiting = any(bool(q) for q in ahead)
         if not others_waiting and not front:
             ledg = self.place(shape, prompt_tokens, kv_needed=kv_tokens, conversation=conversation)
+            waited_ms = None
+            if ledg is not None and not burst_ctx:
+                home = self._wait_target(shape, ledg, conversation)
+                if home is not None:
+                    ledg, waited_ms = await self._wait_for_home(home, shape, prompt_tokens, kv_tokens, conversation)
             if ledg is not None:
                 remembered = self.remembered(conversation)
                 reason = None
@@ -766,6 +811,7 @@ class Scheduler:
                     reason = self._affinity_reason(shape, prompt_tokens, kv_tokens, remembered)
                 kv = ledg.kv_blocks(kv_tokens) if kv_tokens is not None else ledg.kv_for(shape)
                 h = self._placed(ledg.hold(request_id, shape, kv, prompt_tokens, preemptable, burst_ctx), conversation, remembered, reason)
+                h.affinity_wait_ms = waited_ms
                 if burst_ctx:
                     self.bursts_admitted += 1
                 self._refresh_burst()
@@ -830,6 +876,9 @@ class Scheduler:
                 "enabled": self.settings.prefix_affinity,
                 "hits": self.affinity_hits,
                 "fallbacks": dict(self.affinity_fallbacks),
+                "wait_ms": self.settings.prefix_affinity_wait_ms,
+                "waits": self.affinity_waits,
+                "wait_hits": self.affinity_wait_hits,
                 "remembered": len(self._affinity),
             },
             "burst": self.burst.model_dump(),

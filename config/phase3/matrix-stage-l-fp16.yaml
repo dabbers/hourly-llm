@@ -1,0 +1,27 @@
+# Stage L (RESULTS Q15), first block: affinity on in every arm, engines at prefill chunk 2048 with an fp16 KV cache.
+# Two arms per block, interleaved by seed: l-fp16 (stage K's k-affinity) and l-fp16-wait (the same with a 500 ms
+# bounded wait for the remembered replica, admission.prefix_affinity_wait_ms). The KV dtype is an engine
+# argument, so the two blocks are two chains with one engine restart between them:
+#   fp16: VLLM_MAX_NUM_BATCHED_TOKENS=2048 bash scripts/pod.sh vllm <gw> install   (then a warm restart if the KV check fails)
+#   fp8:  START_ORDER="1 2 0" STAGGER=1 bash scripts/pod.sh vllm <gw> restart <the same argument line> --kv-cache-dtype fp8
+# The preflight checks the KV budget before every run, so an fp8 run cannot start on fp16 engines or the reverse.
+#   bash scripts/pod.sh chain <gw> start config/phase3/matrix-stage-l-fp16.yaml --max-hours 3 --stop-pods --stop-grace-min 40
+scenario: config/scenarios/mixed-4090.yaml
+config_dir: config/phase2
+expect_replicas: 3
+expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
+expect_calibration: runpod-4090
+expect_kv_total: 285584       # chunk 2048, fp16 KV (stage K and the chunk-2048 runs)
+kv_spread_max: 0.01
+report_out: runs/stage-l/report-fp16
+report_mode: last
+continue_on_fail: false
+runs:
+  - {label: l-fp16,      seeds: [1], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "0"},   loadgen_args: ["--no-reservations"]}
+  - {label: l-fp16-wait, seeds: [1], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "500"}, loadgen_args: ["--no-reservations"]}
+  - {label: l-fp16,      seeds: [2], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "0"},   loadgen_args: ["--no-reservations"]}
+  - {label: l-fp16-wait, seeds: [2], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "500"}, loadgen_args: ["--no-reservations"]}
+  - {label: l-fp16,      seeds: [3], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "0"},   loadgen_args: ["--no-reservations"]}
+  - {label: l-fp16-wait, seeds: [3], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "500"}, loadgen_args: ["--no-reservations"]}
+  - {label: l-fp16,      seeds: [4], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "0"},   loadgen_args: ["--no-reservations"]}
+  - {label: l-fp16-wait, seeds: [4], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "500"}, loadgen_args: ["--no-reservations"]}

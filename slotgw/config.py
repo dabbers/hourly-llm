@@ -184,6 +184,10 @@ class AdmissionSettings(BaseModel):
     prefix_affinity: bool = False
     prefix_affinity_ttl_s: float = Field(default=120.0, gt=0)  # a conversation idle this long is forgotten
     prefix_affinity_max_entries: int = Field(default=100_000, ge=1)
+    # stage L: a turn whose remembered replica does not fit now, while another replica does, may wait this long
+    # for the remembered one before it runs elsewhere. 0 = never wait (stage K). Only requests that would be
+    # placed at once wait; a request that has to queue is dispatched as before.
+    prefix_affinity_wait_ms: float = Field(default=0.0, ge=0)
 
 
 class BurstSettings(BaseModel):

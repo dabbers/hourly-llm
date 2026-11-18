@@ -11,6 +11,7 @@ admission:
   lazy_preempt: ${SLOTGW_LAZY_PREEMPT:-never}               # never | requeue (interactive evicts lazy)
   max_prefill_tokens_in_flight: ${SLOTGW_MAX_PREFILL_TOKENS:-0}  # prompt tokens prefilling at once; 0 = off
   prefix_affinity: ${SLOTGW_PREFIX_AFFINITY:-false}       # stage K: a conversation's next turn returns to its last replica when that fits now (never waits)
+  prefix_affinity_wait_ms: ${SLOTGW_PREFIX_AFFINITY_WAIT_MS:-0}   # stage L: wait this long for the remembered replica before running elsewhere (0 = never)
   dispatch_tick_s: 0.25
   reservation_spill: false     # a reserved tenant whose slots are all busy waits for one (no on-demand spill)
   health_interval_s: 5.0

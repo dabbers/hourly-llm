@@ -1001,6 +1001,75 @@ did not resolve on 2026-11-17, so the pod was created, read and terminated throu
 $8.73 for stage K including one pod created without sshd and replaced; $94.53 of the $150 cap across all
 three stages.
 
+## Q15. Does a larger KV cache (fp8) or a short wait for the remembered replica get the rest of the cache hits?
+
+**Status: the hypotheses below were written on 2026-11-18, before any stage L run. Results go under them.**
+
+Why ask. Stage K's cached share stopped at 61% because on the heavy days the remembered replica had no free
+seat for 17–28% of eligible requests (Q14). Two levers are tested, with affinity on in every arm.
+
+- **fp8 KV** (`--kv-cache-dtype fp8` on the engines, supported on the RTX 4090; DESIGN A6). It should roughly
+  double the KV budget per GPU. The ledger reads the budget from each engine at start, so the KV rule uses
+  the new number without a code change.
+- **A bounded wait** (`admission.prefix_affinity_wait_ms`, 500 ms here, default 0). A turn that would be
+  placed at once on another replica because the remembered one does not fit waits up to 500 ms for the
+  remembered one, then runs wherever placement puts it. It holds no seat while it waits, the wait counts in
+  its queue time, and a request that has to queue anyway is dispatched as before. 500 ms was chosen from the
+  stage K records: after a seat fallback, the next request on the remembered replica ended within 250 ms in
+  44–46% of cases, within 500 ms in 63–66% and within 1 s in 83–86%; a fallback's median TTFT was 810–870 ms
+  against 250–275 ms for a hit.
+
+What the stage K records say about fp8 before running it (written with the hypothesis, so the reader can
+judge the prediction). A replica's seats come from its calibrated decode-speed curve, not from KV: 22 seats
+while a 60 tps stream runs, 47 at 30 tps. Of the 3,638 fallbacks in the four `k-affinity` runs, 3,603 were
+`seat` and 35 were `kv`. Requests that hit the remembered replica already cached 84% of their prompt tokens,
+so eviction is not the gap. If every fallback had been a hit, the cached share on seeds 1–3 would have been
+71–72%. My expectation is therefore that fp8 alone meets its KV line and misses its seat and cache lines,
+unless the fp8 calibration moves the decode curve.
+
+The experiment. Four arms, seeds 1–4 each, all run fresh on one pod (stage K's runs are not reused as a
+baseline): `l-fp16` (stage K's `k-affinity` settings: chunk 2048, affinity on, fp16 KV), `l-fp16-wait`,
+`l-fp8`, `l-fp8-wait`. Scenario `mixed-4090.yaml`, `--no-reservations`, bursting on. The KV dtype is an
+engine argument, so the fp16 arms run first as one chain and the fp8 arms second after one engine restart;
+within a block the two arms are interleaved by seed. The KV preflight runs before every run with the
+block's expected budget. `l-fp16` against stage K's `k-affinity` (same settings, another day) is the read on
+day-to-day drift, since the fp8 comparison crosses the two blocks.
+
+Calibration. Engine 0 is calibrated in each block with the same command (concurrency 1–48, contexts 2,048 and
+6,144). The fp16 arms use the phase-2 curves, as stage K did. Rule fixed in advance: if the fp8 curve gives a
+different number of seats at 30 or 60 tps than the fresh fp16 curve, the fp8 arms run on the fp8 curve
+(`REPLICA_CURVE`) and the table says so; otherwise both blocks use the same curves.
+
+Quality check. Thirty fixed prompts (20 chat turns, 10 agent steps, taken with their histories from a stage
+K run: `config/phase3/quality-prompts-stage-l.json`) are sent to one idle engine in each block, greedy
+(temperature 0, seed 0), one at a time (`scripts/quality_sample.py`). fp16 is sampled twice to show how much
+two fp16 passes differ by themselves. The replies go side by side into `docs/SAMPLES.md`.
+
+Hypothesis A (the owner's, fp8): `l-fp8` against `l-fp16` on the same seeds.
+
+| # | Line | Holds if |
+|---|---|---|
+| A1 | KV budget per replica grows | at least 1.8× larger |
+| A2 | seat fallbacks fall | affinity fallbacks for "no free seat" fall by at least half on seeds 1–3 |
+| A3 | cached share rises | above 65% on seeds 1–3 |
+| A4 | agent floor misses fall | below 25% |
+| A5 | margins | per-token margin rises; per-second margin falls or stays flat |
+| A6 | quality | no clear output quality loss in the sample |
+
+Hypothesis B (mine, the wait): `l-fp16-wait` against `l-fp16` on the same seeds.
+
+| # | Line | Holds if |
+|---|---|---|
+| B1 | seat fallbacks fall | by at least half on seeds 1–3 |
+| B2 | cached share rises | above 65% on seeds 1–3 |
+| B3 | the wait pays for itself at the first token | chat and agent TTFT p95 not higher, start p95 not more than 10% higher |
+| B4 | floor misses do not rise | all-request and agent floor misses not higher |
+| B5 | output | output per GPU-hour not lower |
+
+`l-fp8-wait` is reported against both single levers; no line is fixed for it.
+
+Results: pending the runs.
+
 ## What was not measured, and what to do next
 
 Measured since the phase-2 list: reservation spill (`resv-spill`, `resv-p95-spill`, Q8), the `abort` revocation

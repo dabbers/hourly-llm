@@ -213,3 +213,86 @@ async def test_gateway_reads_the_conversation_header_and_meters_affinity(tmp_pat
         assert len({replica for replica, _, _ in mine}) == 1 and all(a == "hit" for _, _, a in mine[1:])
     else:
         assert len({replica for replica, _, _ in mine}) > 1 and any(a == "score" for _, _, a in mine[1:])
+
+
+# ---- stage L: a bounded wait for the remembered replica -------------------------------------------
+
+
+def _fill(sc: Scheduler, home, shape=S8_60):
+    """Hold seats on `home` until it refuses `shape` for want of a seat."""
+    held = []
+    while home.check(shape, home.kv_for(shape), 100) is None:
+        held.append(home.hold(f"fill{len(held)}", shape, home.kv_for(shape), 100))
+    assert home.check(shape, home.kv_for(shape), 100) == "seat"
+    return held
+
+
+async def test_wait_takes_the_remembered_replica_when_a_seat_frees_in_time():
+    sc = sched(n=2, prefix_affinity=True, prefix_affinity_wait_ms=300)
+    h0 = await sc.admit("t0", S8_60, 500, conversation="c1")
+    home = h0.ledger
+    sc.release(h0)
+    held = _fill(sc, home)
+    task = asyncio.create_task(sc.admit("t1", S8_60, 900, conversation="c1"))
+    await asyncio.sleep(0.05)
+    assert not task.done()  # another replica fits, and it waits anyway
+    sc.release(held.pop())
+    h1 = await asyncio.wait_for(task, 1.0)
+    assert h1.ledger is home and h1.affinity == "hit"
+    assert h1.affinity_wait_ms is not None and 30 <= h1.affinity_wait_ms < 300
+    snap = sc.snapshot()["prefix_affinity"]
+    assert snap["waits"] == 1 and snap["wait_hits"] == 1 and snap["wait_ms"] == 300
+    for h in (*held, h1):
+        sc.release(h)
+
+
+async def test_wait_runs_out_and_the_request_runs_elsewhere_with_the_reason():
+    sc = sched(n=2, prefix_affinity=True, prefix_affinity_wait_ms=60)
+    h0 = await sc.admit("t0", S8_60, 500, conversation="c1")
+    home = h0.ledger
+    sc.release(h0)
+    held = _fill(sc, home)
+    h1 = await asyncio.wait_for(sc.admit("t1", S8_60, 900, conversation="c1"), 1.0)
+    assert h1.ledger is not home and h1.affinity == "seat"
+    assert h1.affinity_wait_ms is not None and h1.affinity_wait_ms >= 55
+    assert sc.affinity_waits == 1 and sc.affinity_wait_hits == 0 and sc.affinity_fallbacks == {"seat": 1}
+    for h in (*held, h1):
+        sc.release(h)
+
+
+async def test_no_wait_when_off_unremembered_or_home_fits():
+    for kw in ({"prefix_affinity": True}, {"prefix_affinity": False, "prefix_affinity_wait_ms": 300}):
+        sc = sched(n=2, **kw)
+        h0 = await sc.admit("t0", S8_60, 500, conversation="c1")
+        home = h0.ledger
+        sc.release(h0)
+        held = _fill(sc, home)
+        h1 = await asyncio.wait_for(sc.admit("t1", S8_60, 900, conversation="c1"), 0.05)  # at once
+        assert h1.ledger is not home and h1.affinity_wait_ms is None and sc.affinity_waits == 0
+        for h in (*held, h1):
+            sc.release(h)
+    sc = sched(n=2, prefix_affinity=True, prefix_affinity_wait_ms=300)
+    h0 = await asyncio.wait_for(sc.admit("t0", S8_60, 500, conversation="c1"), 0.05)  # nothing remembered
+    sc.release(h0)
+    h1 = await asyncio.wait_for(sc.admit("t1", S8_60, 500, conversation="c1"), 0.05)  # home fits: a plain hit
+    assert h1.affinity == "hit" and h1.affinity_wait_ms is None and sc.affinity_waits == 0
+    sc.release(h1)
+
+
+async def test_wait_that_ends_with_nothing_free_queues_the_request():
+    sc = sched(n=2, prefix_affinity=True, prefix_affinity_wait_ms=60)
+    h0 = await sc.admit("t0", S8_60, 500, conversation="c1")
+    home = h0.ledger
+    other = next(l for l in sc.ledgers if l is not home)
+    sc.release(h0)
+    held = _fill(sc, home)
+    task = asyncio.create_task(sc.admit("t1", S8_60, 900, conversation="c1"))
+    await asyncio.sleep(0.02)
+    held_other = _fill(sc, other)  # the other replica fills up while it waits
+    await asyncio.sleep(0.1)
+    assert not task.done() and sc.queue_lengths()["interactive"] == 1
+    sc.release(held_other.pop())
+    h1 = await asyncio.wait_for(task, 1.0)
+    assert h1.ledger is other
+    for h in (*held, *held_other, h1):
+        sc.release(h)

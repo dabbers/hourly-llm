@@ -1,0 +1,15 @@
+# Stage L rehearsal on three fake replicas (scripts/rehearsal.sh): the two-minute smoke with and without the
+# bounded affinity wait, to show the wait column and the stage-L report before a pod is started.
+#   bash scripts/rehearsal.sh chain config/phase3/matrix-stage-l-rehearsal.yaml
+scenario: config/scenarios/smoke-4090.yaml
+config_dir: config/phase2
+expect_replicas: 3
+expect_model: Qwen/Qwen2.5-7B-Instruct-AWQ
+expect_calibration: runpod-4090
+report_out: runs/rehearsal/report
+report_mode: last
+continue_on_fail: false
+fresh_runs: true
+runs:
+  - {label: l-fp16,      seeds: [1], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "0"},   loadgen_args: ["--no-reservations"]}
+  - {label: l-fp16-wait, seeds: [1], env: {SLOTGW_BURST: "true", SLOTGW_BURST_REVOKE: grace, SLOTGW_PREFIX_AFFINITY: "true", SLOTGW_PREFIX_AFFINITY_WAIT_MS: "500"}, loadgen_args: ["--no-reservations"]}
