@@ -887,7 +887,71 @@ Hypothesis (before running), `k-affinity` against `k-base` on the same seeds:
 | H5 | the provider does not pay for it | gross margin and output per GPU-hour not below the baseline's |
 | H6 | no replica is overloaded | no replica takes more than 45% of prompt tokens |
 
-Results: pending the run.
+Results (run on 2026-11-18, 05:54–08:24 UTC; one pod, three RTX 4090s, engines at chunk 2048 with a uniform
+KV budget of 285,584 tokens; eight runs, 65,977 requests, 0 request errors; report in
+`docs/reports/stage-k/campaign.html` with its CSVs). Means over seeds 1–4, paired difference `k-affinity` −
+`k-base` with its 95% interval; four pairs, so the intervals are wide and the Holm-adjusted p-values on the
+headline lines are 0.002–0.12.
+
+Short answer: yes for the tenant, and the provider pays for it. Affinity took the cached share from 37% to
+61%, cut chat and agent TTFT p95 by 36–39% and halved the floor misses, on the same three GPUs with 19% more
+output. Because the same work then takes fewer billed seconds, revenue fell 19% and gross margin fell 12
+points. Three of the six lines held, H1 missed its level, H5 failed on margin and H6 failed on one seed.
+
+| # | Verdict | `k-base` | `k-affinity` | Paired difference (95% CI) |
+|---|---|---|---|---|
+| H1 | **Not held**: the rise is large and the level is short of 65% | cached share 36.6% | 60.6% (58.0–64.4% by seed) | +23.9 points (21.0 to 26.8), p 0.0001 |
+| H2 | **Held** | chat TTFT p95 1,739 ms; agent 2,377 ms | 1,106 ms; 1,442 ms | chat −633 ms (−902 to −363); agent −935 ms (−1,499 to −372) |
+| H3 | **Held** | all-request floor misses 27.7%; agent 51.4% | 13.4%; agent 29.3% | all −14.3 points (−26.5 to −2.1); agent −22.1 points (−32.4 to −11.8) |
+| H4 | **Held**: the start improved | start p95 4.68 s | 2.83 s | −1.85 s (−3.22 to −0.48), −40% |
+| H5 | **Not held**: output up, margin down | gross margin 51.5%; 2.10 M output tokens per GPU-hour | 39.1%; 2.50 M | margin −12.4 points (−20.7 to −4.0), lower on every seed; output +18.9% (+13 to +25%) |
+| H6 | **Not held** on one seed of four | largest prompt-token share 35.1% | 41.3% (39.7, 42.1, 35.7, 47.7% by seed) | +6.2 points (−0.8 to +13.2) |
+
+What the routing did.
+
+- Hit rate (placed on the remembered replica ÷ requests that had one): 43.6% by load alone, 83.4% with
+  affinity (+39.8 points, 32.0 to 47.6). On seeds 1–3 it was 72–83%; on seed 4, the light day, 100%.
+- Fallbacks with affinity on were almost all `seat` (1,110 + 931 + 1,570 + 0 over the four seeds) with 35 `kv`
+  in one run and no `unhealthy`. The remembered replica had no free seat on 17–28% of eligible requests on the
+  heavy days: that is the gap between the 61% measured and the 65% predicted.
+- With affinity off, 790–1,767 requests per run found the remembered replica free and were sent elsewhere by
+  load (`score`): the cache misses that affinity removes at no cost to anyone.
+- Requests stayed even across replicas in both arms (largest share 35.0% against 34.9%). Prompt tokens did
+  not: one replica took 40–48% with affinity on three seeds of four. Seed 4 is the case to watch: every
+  conversation stayed where it started, nothing forced a move, and one replica held 47.7% of prompt tokens
+  while another held 22.3%. Soft affinity has no rebalancing step, so a light day concentrates more than a
+  heavy one.
+
+What the tenant got. Delivered rate rose for every tenant (chat 48.8 → 74.5 tps, agent 50.3 → 64.5, note-taker
+47.6 → 69.9, batch 83.5 → 100.8). Chat's floor misses went from 23.3% to 10.1%, the note-taker's from 22.7% to
+11.8% (interval crosses zero). The agent tenant's 29.3% is the first result below the 58–65% that the
+overcommit, prefill-cap and chunk-size levers all left (Q10, Q12); it is still far from a met floor. Refusals
+did not move (1.8% → 1.4%, interval crosses zero).
+
+What the provider paid. GPU cost was identical. Tenant revenue fell from $1.70 to $1.37 per run (−19.3%,
+−$0.38 to −$0.27): chat's bill fell 35% for the same requests and the agent's 23% for 6% more requests,
+because a turn that prefills from cache holds its seat for fewer seconds and per-second billing charges the
+seconds. The burst discount also grew ($0.098 → $0.163 per run). The closed-loop batch tenant refilled part
+of the freed capacity (+47% requests, +$0.08), not all of it: utilisation fell from 45.5% to 38.3%. The
+per-token reference bill fell too (−17.4%), since that basket prices cache reads below fresh prompt tokens, so
+the loss is not special to the shape price: a provider that passes cache savings through earns less per
+conversation either way. Under shape pricing the gain reaches the tenant automatically and in full.
+
+Reading it against the framing of this write-up: affinity is a service improvement that the price list gives
+away. It is worth shipping only with a way to resell the 7 points of utilisation it frees (more tenants per
+GPU, which this fixed-traffic experiment does not test) or with a price that keeps some of the saving. Both
+are unmeasured. H6 says it also needs a cap or a rebalancing rule on prompt-token share before it runs
+unattended.
+
+Limits. Four pairs on one traffic scenario, one day of runs; seed 4 is lighter than seeds 1–3 (22–23 M
+prompt tokens against 27–33 M) and drives the widest intervals. Both arms ran at chunk 2048, which Q12
+showed helps the floor and costs the first token, so the baseline here is not the campaign's `burst` setting
+and the levels do not compare directly with Q8–Q13. The 120 s idle limit and the 100,000-entry map were not
+varied. Operations: the engine on GPU 0 again profiled a smaller KV budget at its cold first start (270,896
+against 285,584, the fifth occurrence of five) and a warm restart fixed it before any run; RunPod's REST host
+did not resolve on 2026-11-17, so the pod was created, read and terminated through the GraphQL API. Cost:
+$8.73 for stage K including one pod created without sshd and replaced; $94.53 of the $150 cap across all
+three stages.
 
 ## What was not measured, and what to do next
 
@@ -924,7 +988,7 @@ and four of the shipping reservation (Q8). Not measured, in order of value:
 - One GPU model, one model size, one price basket: a 4090 at $0.893 per GPU-hour and a 7B AWQ model at the 7B
   basket; the fp16 model, a 120 tps shape and an A100 cross-check (PHASE2.md §3) were skipped for budget. The
   report recomputes the margins for any `gpu_usd_per_hour` and price reference.
-- Session affinity for cache hits, phase-length reservations, and the gateway fix for requests abandoned in the
+- Affinity with a cap on prompt-token share and a price that keeps part of the saving (Q14), phase-length reservations, and the gateway fix for requests abandoned in the
   queue (served and billed to a closed socket in one saturation run; built and tested, not run on hardware).
 
 In order of value: the start-bound contract with its credit; the prefill-aware curve; the backfill decision;

@@ -1,0 +1,27 @@
+label,baseline,scope,tenant,metric,n,value,baseline_value,criterion,pass
+k-base,k-base,on-demand,agent,floor_violation_share,4,0.5141929646686382,0.5141929646686382,not above the baseline's,1.0
+k-base,k-base,on-demand,agent,start_p95_s,4,4.919128313660616,4.919128313660616,<= 1.5 x the baseline's,1.0
+k-base,k-base,on-demand,agent,refusal_rate,4,0.05980484734025811,0.05980484734025811,within 1 point(s) of the baseline's,1.0
+k-base,k-base,on-demand,batch,floor_violation_share,4,0.0,0.0,not above the baseline's,1.0
+k-base,k-base,on-demand,batch,start_p95_s,4,5.359934929013253,5.359934929013253,<= 1.5 x the baseline's,1.0
+k-base,k-base,on-demand,batch,refusal_rate,4,0.0,0.0,within 1 point(s) of the baseline's,1.0
+k-base,k-base,on-demand,chat,floor_violation_share,4,0.2330209047502364,0.2330209047502364,not above the baseline's,1.0
+k-base,k-base,on-demand,chat,start_p95_s,4,4.545773476362227,4.545773476362227,<= 1.5 x the baseline's,1.0
+k-base,k-base,on-demand,chat,refusal_rate,4,7.080147267063155e-05,7.080147267063155e-05,within 1 point(s) of the baseline's,1.0
+k-base,k-base,on-demand,notetaker,floor_violation_share,4,0.22718514937059828,0.22718514937059828,not above the baseline's,1.0
+k-base,k-base,on-demand,notetaker,start_p95_s,4,5.056503197550771,5.056503197550771,<= 1.5 x the baseline's,1.0
+k-base,k-base,on-demand,notetaker,refusal_rate,4,0.0,0.0,within 1 point(s) of the baseline's,1.0
+k-base,k-base,run,,output_tokens_per_gpu_hour,4,2104031.396123697,2104031.396123697,>= 95 % of the baseline's,1.0
+k-affinity,k-base,on-demand,agent,floor_violation_share,4,0.2932208739379549,0.5141929646686382,not above the baseline's,1.0
+k-affinity,k-base,on-demand,agent,start_p95_s,4,3.031944102048873,4.919128313660616,<= 1.5 x the baseline's,1.0
+k-affinity,k-base,on-demand,agent,refusal_rate,4,0.04852258128273545,0.05980484734025811,within 1 point(s) of the baseline's,1.0
+k-affinity,k-base,on-demand,batch,floor_violation_share,4,0.0,0.0,not above the baseline's,1.0
+k-affinity,k-base,on-demand,batch,start_p95_s,4,1.8049343526363355,5.359934929013253,<= 1.5 x the baseline's,1.0
+k-affinity,k-base,on-demand,batch,refusal_rate,4,0.0,0.0,within 1 point(s) of the baseline's,1.0
+k-affinity,k-base,on-demand,chat,floor_violation_share,4,0.10080172895404348,0.2330209047502364,not above the baseline's,1.0
+k-affinity,k-base,on-demand,chat,start_p95_s,4,2.68052868247032,4.545773476362227,<= 1.5 x the baseline's,1.0
+k-affinity,k-base,on-demand,chat,refusal_rate,4,0.0,7.080147267063155e-05,within 1 point(s) of the baseline's,1.0
+k-affinity,k-base,on-demand,notetaker,floor_violation_share,4,0.11764830329186765,0.22718514937059828,not above the baseline's,1.0
+k-affinity,k-base,on-demand,notetaker,start_p95_s,4,3.220162001252173,5.056503197550771,<= 1.5 x the baseline's,1.0
+k-affinity,k-base,on-demand,notetaker,refusal_rate,4,0.0,0.0,within 1 point(s) of the baseline's,1.0
+k-affinity,k-base,run,,output_tokens_per_gpu_hour,4,2500780.1286529023,2104031.396123697,>= 95 % of the baseline's,1.0
