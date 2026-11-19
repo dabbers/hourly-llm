@@ -203,6 +203,15 @@ class AdmissionSettings(BaseModel):
     # so a tenant on a faster shape gets a proportionally larger share of prompt reading. Work-conserving: it
     # reorders the queue and never holds a request back while it fits.
     ingest_fair_share: bool = False
+    # stage O: a ceiling on prompt reading per tenant, enforced before admission (the gateway cannot throttle
+    # prefill inside the engine). Each tenant has a token bucket that refills at ratio x the shape's tps for
+    # every slot it holds (one if it has no reservation) and holds at most one context per slot. A request
+    # draws its counted prompt tokens and waits while the bucket is in debt; a wait longer than the shape's
+    # queue limit is refused. Not work-conserving: a tenant over its rate waits even when the engine is idle.
+    ingest_bucket: bool = False
+    ingest_bucket_input_ratio: float = Field(default=10.0, gt=0)
+    # stage O: the engine's request priority follows the tier (a faster shape is scheduled first).
+    tier_priority: bool = False
 
 
 class BurstSettings(BaseModel):

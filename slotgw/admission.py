@@ -97,6 +97,7 @@ class Hold:
     queue_jumped: int | None = None  # queue positions this request went past to take its remembered replica
     queue_passed: int | None = None  # times a waiter behind it took a seat first while it queued
     queue_passed_ms: float | None = None  # from the first time it was passed to its own admission
+    ingest_wait_ms: float | None = None  # stage O: time this request waited for its tenant's input bucket
 
 
 class ReplicaLedger:
@@ -439,6 +440,9 @@ class Scheduler:
         self._fq_finish: dict[str, float] = {}
         self.fq_reorders = 0  # dispatches that took a waiter from behind the head of the queue
         self._conv_prompt: OrderedDict[str, int] = OrderedDict()  # conversation -> prompt tokens of its last turn
+        self._buckets: dict[str, tuple[float, float]] = {}  # stage O: tenant -> (input tokens in the bucket, time)
+        self.ingest_waits = 0  # requests that waited for their tenant's input bucket
+        self.ingest_refusals = 0  # requests whose bucket wait would have passed the shape's queue limit
 
     # ---- fair share of prompt reading (stage N) ------------------------------------------------
 
@@ -455,6 +459,29 @@ class Scheduler:
         if prev is None or prompt_tokens <= prev:
             return prompt_tokens
         return max(MIN_INGEST_TOKENS, prompt_tokens - prev)
+
+    def _bucket_draw(self, tenant: str | None, shape: Shape, tokens: int, max_wait_s: float) -> float | None:
+        """Draw `tokens` from the tenant's input bucket. Returns the seconds the request has to wait for
+        the bucket to cover it (0 = now), or None when that is longer than `max_wait_s` (nothing is drawn)."""
+        if not self.settings.ingest_bucket or tenant is None or shape.lazy:
+            return 0.0
+        res = self.reservation_for(tenant, shape)
+        slots = max(1, len(res.slots)) if res is not None else 1
+        rate = self.settings.ingest_bucket_input_ratio * shape.tps * slots
+        size = float(shape.max_context * slots)
+        t = now()
+        level, t_last = self._buckets.get(tenant, (size, t))
+        level = min(size, level + (t - t_last) * rate)
+        after = level - min(float(tokens), size)
+        wait = max(0.0, -after) / rate
+        if wait > max_wait_s:
+            self._buckets[tenant] = (level, t)
+            self.ingest_refusals += 1
+            return None
+        self._buckets[tenant] = (after, t)
+        if wait > 0:
+            self.ingest_waits += 1
+        return wait
 
     def _fq_tag(self, tenant: str | None, shape: Shape, tokens: int) -> float:
         """Charge `tokens` of prompt reading to the tenant at its shape's weight; return the start tag."""
@@ -875,13 +902,43 @@ class Scheduler:
         burst_ctx: bool = False,
         conversation: str | None = None,
     ) -> Hold:
+        """Count the turn's prompt, wait for the tenant's input bucket when that is on (stage O), then admit."""
+        prompt_tokens = self._ingest_tokens(prompt_tokens, conversation)
+        timeout = shape.max_queue_s if max_wait_s is None else max_wait_s
+        wait = 0.0 if (front or burst_ctx) else self._bucket_draw(tenant, shape, prompt_tokens, timeout)
+        if wait is None:
+            self.timeouts += 1
+            raise QueueTimeout("ingest_rate", 0.0)
+        if wait > 0:
+            await asyncio.sleep(wait)
+            max_wait_s = max(0.0, timeout - wait)
+        h = await self._admit(
+            request_id, shape, prompt_tokens, tenant=tenant, preemptable=preemptable, front=front, max_wait_s=max_wait_s,
+            kv_tokens=kv_tokens, burst_ctx=burst_ctx, conversation=conversation,
+        )
+        h.ingest_wait_ms = wait * 1000.0 if wait > 0 else None
+        return h
+
+    async def _admit(
+        self,
+        request_id: str,
+        shape: Shape,
+        prompt_tokens: int,
+        *,
+        tenant: str | None = None,
+        preemptable: bool = False,
+        front: bool = False,
+        max_wait_s: float | None = None,
+        kv_tokens: int | None = None,
+        burst_ctx: bool = False,
+        conversation: str | None = None,
+    ) -> Hold:
         """Return a Hold on some replica, waiting up to the shape's max_queue_s. A tenant with a
         reservation covering the shape takes one of its slots (or waits for one); a context burst
         (`burst_ctx`, `kv_tokens` = its real need) is admitted only when nothing else waits."""
         timeout = shape.max_queue_s if max_wait_s is None else max_wait_s
         if burst_ctx:  # a burst that cannot be placed now fails fast (DESIGN 12, post-M4)
             timeout = min(timeout, self.burst.context_max_queue_s)
-        prompt_tokens = self._ingest_tokens(prompt_tokens, conversation)
         if not burst_ctx:
             res = self.reservation_for(tenant, shape)
             if res is not None:
@@ -996,6 +1053,10 @@ class Scheduler:
                 "new_tokens": self.settings.ingest_new_tokens,
                 "fair_share": self.settings.ingest_fair_share,
                 "reorders": self.fq_reorders,
+                "bucket": self.settings.ingest_bucket,
+                "bucket_input_ratio": self.settings.ingest_bucket_input_ratio,
+                "bucket_waits": self.ingest_waits,
+                "bucket_refusals": self.ingest_refusals,
             },
             "burst": self.burst.model_dump(),
             "reservations": [r.snapshot() for r in self.reservations.values() if r.t_end is None],

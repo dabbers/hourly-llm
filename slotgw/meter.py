@@ -114,6 +114,7 @@ class RequestRecord:
     queue_jumped: int | None = None  # stage M: queue positions it went past to take its remembered replica
     queue_passed: int | None = None  # stage M: times a waiter behind it was admitted first
     queue_passed_ms: float | None = None  # stage M: from the first time it was passed to its own admission
+    ingest_wait_ms: float | None = None  # stage O: waited this long for the tenant's input bucket (part of queued_ms)
 
     @property
     def ttft_ms(self) -> float | None:
@@ -171,6 +172,7 @@ class Meter:
             ("reservation_id", "TEXT"), ("cached_tokens", "INTEGER"), ("billed_shape", "TEXT"), ("showcase", "TEXT"),
             ("conversation_id", "TEXT"), ("affinity", "TEXT"), ("affinity_wait_ms", "REAL"),
             ("queue_jumped", "INTEGER"), ("queue_passed", "INTEGER"), ("queue_passed_ms", "REAL"),
+            ("ingest_wait_ms", "REAL"),
         ):
             if col not in have:  # meter files written before the column existed
                 self._conn.execute(f"ALTER TABLE requests ADD COLUMN {col} {typ}")

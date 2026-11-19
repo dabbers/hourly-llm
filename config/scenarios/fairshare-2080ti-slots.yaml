@@ -1,0 +1,36 @@
+# Stage O (docs/RESULTS.md Q19): the stage N traffic with every tenant on its own slots (no on-demand spill).
+# Eight slots, which is every seat this card has while a 30 tps stream runs. The same name as the stage N
+# scenario, so the same seed gives the same requests.
+name: fairshare
+hour_length_s: 600
+drain_s: 60
+sample_interval_s: 2
+phases:
+  - {name: ramp, duration_s: 60, rate_scale: 0.5}
+  - {name: peak, duration_s: 360, rate_scale: 1.0}
+  - {name: tail, duration_s: 60, rate_scale: 0.4}
+tenants:
+  - name: chat-std
+    api_key: sk-local-chat-std
+    shape: small.8k.15tps
+    profile: {kind: chat, turns: [3, 8], first_user_tokens: [150, 500], user_tokens_per_turn: [100, 400], output_tokens: [60, 220], think_s: [3, 12]}
+    arrivals: {kind: diurnal, rate_per_min: 4}
+    reservation: {slots: 2}
+  - name: chat-pro
+    api_key: sk-local-chat-pro
+    shape: small.8k.30tps
+    profile: {kind: chat, turns: [3, 8], first_user_tokens: [150, 500], user_tokens_per_turn: [100, 400], output_tokens: [60, 220], think_s: [3, 12]}
+    arrivals: {kind: diurnal, rate_per_min: 4}
+    reservation: {slots: 3}
+  - name: docs-std                  # one streamed question over a long document (the agent profile with a single step)
+    api_key: sk-local-docs-std
+    shape: small.8k.15tps
+    profile: {kind: agent, steps: [1, 1], first_user_tokens: [2500, 6500], growth_tokens: [0, 0], output_tokens: [100, 250], pause_s: [1, 1]}
+    arrivals: {kind: diurnal, rate_per_min: 3}
+    reservation: {slots: 1}
+  - name: docs-pro
+    api_key: sk-local-docs-pro
+    shape: small.8k.30tps
+    profile: {kind: agent, steps: [1, 1], first_user_tokens: [2500, 6500], growth_tokens: [0, 0], output_tokens: [100, 250], pause_s: [1, 1]}
+    arrivals: {kind: diurnal, rate_per_min: 3}
+    reservation: {slots: 2}

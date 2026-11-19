@@ -106,3 +106,90 @@ async def test_whole_prompt_is_counted_with_the_new_token_count_off():
     assert (h0.prompt_tokens, h1.prompt_tokens) == (1500, 2100)
     sc.release(h0)
     sc.release(h1)
+
+
+# ---- stage O: a ceiling on prompt reading per tenant (token bucket before admission) ----------------
+
+import time  # noqa: E402
+
+import pytest  # noqa: E402
+
+from slotgw.admission import QueueTimeout  # noqa: E402
+
+
+async def test_no_bucket_wait_with_the_bucket_off():
+    sc = sched(n=1)
+    for i in range(3):
+        h = await sc.admit(f"r{i}", S8_30, 6000, tenant="docs")
+        assert h.ingest_wait_ms is None
+        sc.release(h)
+    assert sc.ingest_waits == 0
+
+
+async def test_a_tenant_over_its_input_rate_waits_and_another_tenant_does_not():
+    # ratio 1000 x 30 tps = 30,000 prompt tokens a second into a bucket of one 8,192-token context
+    sc = sched(n=1, ingest_bucket=True, ingest_bucket_input_ratio=1000)
+    h0 = await sc.admit("d0", S8_30, 6000, tenant="docs")
+    assert h0.ingest_wait_ms is None  # the bucket starts full
+    t0 = time.monotonic()
+    h1 = await sc.admit("d1", S8_30, 6000, tenant="docs")  # 2,192 left: in debt by 3,808 tokens, 127 ms
+    assert time.monotonic() - t0 >= 0.1 and 100 <= h1.ingest_wait_ms <= 140
+    t0 = time.monotonic()
+    h2 = await sc.admit("c0", S8_30, 6000, tenant="chat")  # its own bucket
+    assert h2.ingest_wait_ms is None and time.monotonic() - t0 < 0.05
+    assert sc.ingest_waits == 1 and sc.snapshot()["ingest"]["bucket_waits"] == 1
+    for h in (h0, h1, h2):
+        sc.release(h)
+
+
+async def test_a_bucket_wait_past_the_queue_limit_is_refused_and_draws_nothing():
+    sc = sched(n=1, ingest_bucket=True, ingest_bucket_input_ratio=1000)
+    h0 = await sc.admit("d0", S8_30, 6000, tenant="docs")
+    with pytest.raises(QueueTimeout) as e:
+        await sc.admit("d1", S8_30, 6000, tenant="docs", max_wait_s=0.05)
+    assert e.value.reason == "ingest_rate" and sc.ingest_refusals == 1
+    h2 = await sc.admit("d2", S8_30, 2000, tenant="docs")  # the refused request left the 2,192 tokens in place
+    assert h2.ingest_wait_ms is None
+    sc.release(h0)
+    sc.release(h2)
+
+
+async def test_a_slower_shape_refills_more_slowly_and_reserved_slots_multiply_the_rate():
+    sc = sched(n=1, ingest_bucket=True, ingest_bucket_input_ratio=1000)
+    assert sc._bucket_draw("std", S8_15, 8192, 30) == 0.0
+    assert sc._bucket_draw("pro", S8_30, 8192, 30) == 0.0
+    std = sc._bucket_draw("std", S8_15, 3000, 30)
+    pro = sc._bucket_draw("pro", S8_30, 3000, 30)
+    assert std == pytest.approx(0.2, abs=0.01) and pro == pytest.approx(0.1, abs=0.01)  # 3,000 tokens at 15k and 30k a second
+    sc.reserve("big", S8_30, 2)
+    assert sc._bucket_draw("big", S8_30, 16384, 30) == 0.0  # two slots: two contexts in the bucket
+    assert sc._bucket_draw("big", S8_30, 3000, 30) == pytest.approx(0.05, abs=0.01)  # and twice the rate
+
+
+async def test_gateway_meters_the_bucket_wait_with_tier_priority_on(tmp_path):
+    """Three 3,000-token prompts from one tenant through the real HTTP path: the bucket (one 8,192-token
+    context, refilling at 600 tokens a second) covers two; the third waits and the wait is metered."""
+    import httpx
+
+    from slotgw.config import AdmissionSettings
+
+    from .test_multi_replica import TWO_SEATS, Cluster
+
+    settings = AdmissionSettings(ingest_bucket=True, ingest_bucket_input_ratio=20, tier_priority=True)
+    cluster = Cluster([TWO_SEATS], settings, 10.0, tmp_path / "meter.sqlite")
+    doc = " ".join(["word"] * 3000)
+    try:
+        async with httpx.AsyncClient(base_url=cluster.gateway.url, timeout=60) as c:
+            async def send(i: int) -> None:
+                await asyncio.sleep(0.02 * i)
+                r = await c.post("/v1/chat/completions", headers={"Authorization": "Bearer sk-local-chat"},
+                                 json={"model": "small.8k.30tps", "messages": [{"role": "user", "content": f"{i} {doc}"}], "max_tokens": 8})
+                assert r.status_code == 200, r.text
+
+            await asyncio.gather(*(send(i) for i in range(3)))
+        rows = sorted(cluster.rows(), key=lambda r: r["t_arrival"])
+    finally:
+        cluster.stop()
+    assert [r["status"] for r in rows] == ["ok"] * 3
+    assert rows[0]["ingest_wait_ms"] is None and rows[1]["ingest_wait_ms"] is None
+    assert rows[2]["ingest_wait_ms"] > 50 and rows[2]["queued_ms"] >= rows[2]["ingest_wait_ms"]

@@ -1,0 +1,35 @@
+# Stage O (docs/RESULTS.md Q19): every tenant on the slots that cover its p95 concurrency in n-fifo seed 1.
+# Sixteen slots on a card with eight seats: run with SLOTGW_TPS_OVERCOMMIT=2.0 (the provider oversells seats).
+name: fairshare
+hour_length_s: 600
+drain_s: 60
+sample_interval_s: 2
+phases:
+  - {name: ramp, duration_s: 60, rate_scale: 0.5}
+  - {name: peak, duration_s: 360, rate_scale: 1.0}
+  - {name: tail, duration_s: 60, rate_scale: 0.4}
+tenants:
+  - name: chat-std
+    api_key: sk-local-chat-std
+    shape: small.8k.15tps
+    profile: {kind: chat, turns: [3, 8], first_user_tokens: [150, 500], user_tokens_per_turn: [100, 400], output_tokens: [60, 220], think_s: [3, 12]}
+    arrivals: {kind: diurnal, rate_per_min: 4}
+    reservation: {slots: 5}
+  - name: chat-pro
+    api_key: sk-local-chat-pro
+    shape: small.8k.30tps
+    profile: {kind: chat, turns: [3, 8], first_user_tokens: [150, 500], user_tokens_per_turn: [100, 400], output_tokens: [60, 220], think_s: [3, 12]}
+    arrivals: {kind: diurnal, rate_per_min: 4}
+    reservation: {slots: 6}
+  - name: docs-std                  # one streamed question over a long document (the agent profile with a single step)
+    api_key: sk-local-docs-std
+    shape: small.8k.15tps
+    profile: {kind: agent, steps: [1, 1], first_user_tokens: [2500, 6500], growth_tokens: [0, 0], output_tokens: [100, 250], pause_s: [1, 1]}
+    arrivals: {kind: diurnal, rate_per_min: 3}
+    reservation: {slots: 2}
+  - name: docs-pro
+    api_key: sk-local-docs-pro
+    shape: small.8k.30tps
+    profile: {kind: agent, steps: [1, 1], first_user_tokens: [2500, 6500], growth_tokens: [0, 0], output_tokens: [100, 250], pause_s: [1, 1]}
+    arrivals: {kind: diurnal, rate_per_min: 3}
+    reservation: {slots: 3}

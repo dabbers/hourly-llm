@@ -1557,6 +1557,136 @@ absolute speeds do not transfer; the ratios between arms are the result. Four te
 a service rule; no bill is changed, so this stage shows whether an input tier could be delivered, not what it
 would earn.
 
+## Q19. What happens under true slot-hour billing, with the rates as ceilings on output and on input?
+
+**Status: the plan and the hypotheses for the runs were written on 2026-11-19, before any stage O run. The
+offline part (part A) is done and needs no GPU. The local runs (part B) go under the hypotheses.**
+
+Why ask. The design measured so far is a hybrid (owner and a second reviewer, 2026-11-19). It sells a rate as a
+floor, bills runtime seconds plus a per-token prompt charge, and leaves input unbounded. The model a VM uses is
+different: pay for the slot by the hour, used or not, and the rate is a ceiling the provider enforces. Stage O
+tests that model. The reviewer's plan asked for one paid stage on the 4090s; the owner asked for as much as
+possible offline and locally first, with a paid run only if the numbers are promising.
+
+The model.
+
+- **The bill is the slot-hour.** A flat price per slot per hour for the tier, used or not. No prompt charge, no
+  runtime seconds, no cache-read price. This is the existing reservation bill (Q8), now for every tenant.
+- **The output rate is a ceiling.** Each stream is paced at its tier's rate and bursting is off. No floor is
+  promised; the delivered rate is reported.
+- **The input rate is a ceiling** (`admission.ingest_bucket`). Each tenant has a token bucket for prompt
+  reading: it refills at 10 times the tier's output rate per slot (150 tokens a second for a 15 tps slot, 300
+  for a 30 tps slot) and holds one context per slot. A request draws the prompt tokens beyond its
+  conversation's previous prompt, so cached tokens cost nothing. A request waits while the bucket is in debt and
+  is refused if the wait would pass the shape's 30 s queue limit. Enforced before admission, because the gateway
+  cannot slow prefill inside the engine.
+- **Priority follows the tier** (`admission.tier_priority`). The engine schedules a faster shape first.
+
+Deviations from the reviewer's plan, and why.
+
+- Its hypotheses 2 and 3 (margin no longer falls with cached share; the bill varies 2% or less) are true by
+  construction under a flat fee with a fixed slot count. Part A tests the version that is not: what happens
+  when tenants size their slots to what they use.
+- It changed billing, output ceiling, input ceiling and priority in one arm. The local arms add them one at a
+  time so a difference has one cause.
+- "Keep cache routing and the stage M queue rule on" needs more than one replica. On one GPU they do nothing.
+
+### Part A. Offline: slot-hour prices and the stage K and M runs re-priced (done, no GPU time)
+
+**Under slot-hour billing the tenants of the stage K and M runs would need 1.4 to 1.7 times the seats the
+cluster has, so the model only works oversold. Cache routing still cuts revenue, by 13% instead of 17–19%,
+because tenants need 13% fewer slots. The bill is flat only for a tenant that never resizes. The price a
+tenant pays against per-token runs from 0.7 times (long prompts) to 1.6 times (the fast tier).**
+
+Method (`scripts/stage_o_slot_hour.py`, table in `docs/reports/stage-o/slot_hour.csv`). Each run's report
+already holds the slots a tenant would need to cover its measured concurrency (`report/reservations.csv`). The
+p95 row is taken as what the tenant buys for that day. A tier's price is the GPU cost of one seat divided by
+the share of seats sold at which the provider breaks even, here 60%:
+
+| Tier (4090, 7B) | GPU cost of one seat | Slot-hour price at 60% sold | Per month |
+|---|---|---|---|
+| 15 tps, 8k (lazy) | $0.0218 | $0.0363 | $26 |
+| 30 tps, 8k or 16k | $0.0278 | $0.0464 | $33 |
+| 60 tps, 8k | $0.0594 | $0.0990 | $71 |
+
+The seat cost is $0.89 per GPU-hour over 32 seats at 30 tps (the 6k-context calibration), with the 60 tps seat
+weighted 2.1 times.
+
+Per arm, mean over seeds:
+
+| Arm | Slots bought (p95) | Share of seats that is | Slot-hour revenue (margin) | Per token (margin) | Per second (margin) |
+|---|---|---|---|---|---|
+| `k-base` (no cache routing) | 103 | 149% | $1.99 (60%) | $1.68 (52%) | $1.70 (53%) |
+| `k-affinity` | 90 | 129% | $1.73 (54%) | $1.39 (42%) | $1.37 (41%) |
+| `m-affinity` | 101 | 147% | $1.97 (59%) | $1.51 (47%) | $1.51 (47%) |
+| `m-queue` | 98 | 144% | $1.92 (58%) | $1.48 (46%) | $1.47 (45%) |
+
+- **The slots do not fit.** Tenants' p95 needs add up to 129–149% of the seats (89% to 168% per run). The
+  revenue above exists only if the provider sells more slots than it has seats, as a VM host oversells vCPUs.
+  Q10 measured what overselling seats does here: every stream slows. With seats sold once, revenue is capped
+  at cost ÷ 0.6 and tenants have to buy fewer slots and queue.
+- **Does the provider keep its efficiency gains?** Partly, and only if tenants do not resize. Cache routing let
+  the same traffic run on 13.3% fewer slots, so slot-hour revenue fell 12.9%, against 17.4% per token and
+  19.3% per second. If tenants keep their slot count the revenue does not move at all and the provider has 13%
+  of its seats back to sell. That is better than per-token, where the market's cache price hands the gain to
+  the tenant at once. It is not a guarantee.
+- **Is the bill predictable?** With a fixed slot count it is flat, by construction. A tenant that resizes to
+  each day's p95 gets a bill that varies more than its per-token bill in two of four cases:
+
+| Tenant (stage K, four seeds; seed 4 is a light day) | Slots per day | Bill variation, slot-hour | Per token |
+|---|---|---|---|
+| agent (60 tps) | 40, 37, 45, 29 | 18% | 33% |
+| batch (15 tps lazy) | 16, 16, 16, 17 | 3% | 41% |
+| chat (30 tps) | 48, 52, 46, 30 | 22% | 13% |
+| note-taker (16k, 30 tps) | 5, 6, 7, 3 | 33% | 8% |
+
+  So the predictability is real only for a tenant that commits to a size, which is the reservation result of
+  Q8 again. The cost of committing is the idle time below.
+- **What a tenant pays against per-token.** Slot-hour over per-token, mean over seeds: agent 1.5–1.6 times,
+  chat 0.9–1.1, batch 0.9–1.2, note-taker 0.7–0.8. The fast tier pays most because one 60 tps seat costs 2.1
+  ordinary seats. The note-taker pays least because its long prompts are no longer charged. Interactive slots
+  sit used 27–49% of the time, and with p95 sizing 7–12% of requests would still have queued for a slot.
+- **Who would buy it** (from these numbers). A tenant with long prompts and steady use (document work, batch):
+  it pays less than per token and gets a ceiling on its bill. A tenant with bursty short turns on a fast tier
+  pays 1.5 times more for slots that sit idle half the time. A tenant that needs a speed guarantee is not
+  served by a ceiling at all.
+
+### Part B. Local runs on the 2080 Ti: plan and hypotheses
+
+The traffic is stage N's (Q18), same seeds, so `n-fifo` is the base arm: today's hybrid, on demand, bursting on.
+Every stage O arm puts each tenant on its own slots with no spill, bursting off.
+
+| Arm | Slots (chat-std, chat-pro, docs-std, docs-pro) | Input bucket | Tier priority | Seats sold |
+|---|---|---|---|---|
+| `o-slots` | 2, 3, 1, 2 = the card's 8 seats | off | off | once |
+| `o-bucket` | 2, 3, 1, 2 | on | off | once |
+| `o-prio` | 2, 3, 1, 2 | on | on | once |
+| `o-over` | 5, 6, 2, 3 = each tenant's p95 in `n-fifo` | on | on | twice (`tps_overcommit` 2.0) |
+
+The card seats 8 streams and the tenants' p95 needs add up to 16 slots, the same shortfall as part A. So the
+first three arms sell the seats once and tenants queue for their own slots; `o-over` sells every tenant what
+it asked for on an oversold card. Seeds 1–3, twelve runs, `scripts/stage_o_local.sh`.
+
+Hypothesis (mine), each arm against `n-fifo` on the same seed unless stated. "Wait" is arrival to first token.
+
+| # | Line | Holds if |
+|---|---|---|
+| O1 | interactive waits survive (reviewer's 1) | the chat tenants' wait p95 in `o-bucket` is not more than 10% above `n-fifo` on each seed. I expect this to fail with seats sold once, and state it as the reviewer wrote it |
+| O2 | the input ceiling protects the others | chat tenants' mean time from admission to first token is lower in `o-bucket` than in `o-slots` on each seed |
+| O3 | the ceiling is reachable (reviewer's 4) | each tenant's median delivered output rate is at least 90% of its tier's rate, in each stage O arm |
+| O4 | the long-prompt tenants pay in time (reviewer's 5) | docs tenants' mean wait is higher in `o-bucket` than in `o-slots`, and `docs-std`'s mean bucket wait is higher than `docs-pro`'s over the seeds pooled |
+| O5 | the ceiling costs output | output tokens in each stage O arm are more than 10% below `n-fifo` |
+| O6 | priority favours the faster tier | in `o-prio` against `o-bucket`, the 30 tps tenants' mean time from admission to first token falls and the 15 tps tenants' rises |
+| O7 | overselling buys the wait back and costs speed | chat wait p95 in `o-over` is lower than in `o-prio`, and the median delivered rate of the 30 tps tenants is lower |
+
+What would justify a paid run. O2 and O3 holding, with refusals under 5% in `o-over`. Then the slot-ceiling
+model is deliverable and the 4090 stage would measure it with cache routing and real prices. If the tenants
+cannot be seated without waits several times the base arm's, the model fails on capacity before billing
+matters, and a paid run would only confirm it.
+
+Limits, stated in advance. As Q18: one GPU, a 3B model, four tenants, ratios not absolute numbers. Slot counts
+for `o-over` come from one base run. The bucket's input ratio (10) is one value, chosen before the runs.
+
 ## What was not measured, and what to do next
 
 Measured since the phase-2 list: reservation spill (`resv-spill`, `resv-p95-spill`, Q8), the `abort` revocation

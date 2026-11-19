@@ -17,6 +17,9 @@ admission:
   prefix_affinity_pass_window_ms: ${SLOTGW_PREFIX_AFFINITY_PASS_WINDOW_MS:-500}   # stage M: a waiter can be passed only this long after it is first passed
   ingest_new_tokens: ${SLOTGW_INGEST_NEW_TOKENS:-false}   # stage N: count a turn's prompt as the tokens beyond its conversation's previous prompt (prefill cap, fair share)
   ingest_fair_share: ${SLOTGW_INGEST_FAIR_SHARE:-false}   # stage N: serve the interactive queue in weighted fair order over tenants (weight = the shape's tps), not first-in first-out
+  ingest_bucket: ${SLOTGW_INGEST_BUCKET:-false}   # stage O: a token bucket on prompt reading per tenant, ratio x the shape's tps per slot
+  ingest_bucket_input_ratio: ${SLOTGW_INGEST_BUCKET_RATIO:-10}
+  tier_priority: ${SLOTGW_TIER_PRIORITY:-false}   # stage O: the engine schedules a faster shape first
   dispatch_tick_s: 0.25
   reservation_spill: ${SLOTGW_RESERVATION_SPILL:-false}
   health_interval_s: 5.0

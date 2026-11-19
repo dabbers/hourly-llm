@@ -417,6 +417,8 @@ def build_router() -> APIRouter:
         payload = {k: v for k, v in body.items() if k not in _PASSTHROUGH_EXCLUDE}
         payload["max_tokens"] = max_tokens
         payload["priority"] = PRIORITY_BURST if burst_ctx else (PRIORITY_LAZY if shape.lazy else PRIORITY_INTERACTIVE)
+        if state.config.gateway.admission.tier_priority and not burst_ctx and not shape.lazy:
+            payload["priority"] = -int(round(shape.tps))  # stage O: lower runs first, so a faster tier goes first
 
         # A context burst runs as its burst class (the model's slowest shape by default): that shape's
         # tps takes the seat, paces the stream and prices the runtime; the tenant's shape stays on the record.
@@ -468,6 +470,7 @@ def build_router() -> APIRouter:
             rec.affinity = None if hold.reserved else hold.affinity
             rec.affinity_wait_ms = None if hold.reserved else hold.affinity_wait_ms
             rec.queue_jumped, rec.queue_passed, rec.queue_passed_ms = hold.queue_jumped, hold.queue_passed, hold.queue_passed_ms
+            rec.ingest_wait_ms = hold.ingest_wait_ms
             hold.pacer = pacer
             state.scheduler.dispatch()  # lends this request its burst rate
         rec.t_admitted = now()
