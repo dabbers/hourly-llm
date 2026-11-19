@@ -1478,6 +1478,85 @@ One load mix, one model, one GPU type. The busy share is assumed, the quiet hour
 half-load figure predates cache routing, and the reserved prices use decode ceilings. Whether hosts on
 OpenRouter make 25% is the owner's assumption; only their prices are used.
 
+## Q18. Does a fair share of prompt reading, weighted by the tier a tenant pays for, shorten the wait?
+
+**Status: the plan and hypotheses below were written on 2026-11-19, before any stage N run. Results go under
+them. The runs are on the local RTX 2080 Ti (free), as a scaled test of the mechanism, not of real traffic.**
+
+Why ask. Every stage so far found the same limit: reading prompts, not writing tokens, is what the engine runs
+out of, and one tenant's long prompt slows everyone (Q5, Q10, Q12). The slot bill charges output by time and
+input per token, and nothing limits or orders prompt reading by tenant (owner's observation, 2026-11-18). The
+owner's rule: whoever pays for a faster tier gets a proportionally larger share. If a card could do 100 tokens
+per second and a 60 tps and a 40 tps customer arrive together, the 60 tps customer gets more of it.
+
+The rule (`admission.ingest_fair_share`, off by default).
+
+- The interactive queue is served in weighted fair order over tenants, not first-in, first-out (start-time
+  fair queuing). A request costs its prompt tokens divided by its shape's tps. A tenant's next request starts
+  where its last one finished, or at the queue's current virtual time if that is later, and the smallest start
+  goes first. So a 30 tps tenant gets twice the prompt reading of a 15 tps tenant when both are waiting, a
+  tenant with short prompts is not stuck behind another tenant's backlog of long ones, and a tenant that was
+  idle does not bank credit.
+- It is work-conserving: it only reorders the queue. Nothing is held back while it fits. A hard input rate per
+  slot (a token bucket) would also idle capacity; that is a different experiment and is not run here.
+- A turn's prompt is counted as the tokens beyond its conversation's previous prompt
+  (`admission.ingest_new_tokens`), an estimate of what the engine has to read, because the rest is in the
+  prefix cache. Without this a long cached chat would be charged like a long document.
+- It sits on the cap on prompt tokens being read at once (`admission.max_prefill_tokens_in_flight`, Q10). The
+  cap is what makes requests wait for reading in the gateway, where they can be ordered; without it they are
+  admitted and the engine orders them.
+
+The test bed. One RTX 2080 Ti, Qwen2.5-3B AWQ, 181,936 KV tokens, chunk 128 (the phase 1 setup). This card
+shows the interference most strongly: one 6,000-token prompt took 4.6 s to read and dropped a neighbour from
+130 to 1.7 tokens per second. It seats 8 streams at 30 tps and only 2 at 60, so the tiers are 15 and 30 tps
+(weights 1 and 2), not 30 and 60.
+
+The traffic (`config/scenarios/fairshare-2080ti.yaml`). A scaled mix: sizes are fractions of the 8k context and
+rates are sized to this card. Two prompt profiles, each run by two tenants that differ only in the shape they
+pay for, so the tier effect can be read inside a profile:
+
+| Tenant | Shape | Profile | Sessions per minute at peak |
+|---|---|---|---|
+| `chat-std`, `chat-pro` | 15 tps, 30 tps | 3–8 turns, each adds 100–500 tokens (1–6% of the context), 60–220 out | 4 each |
+| `docs-std`, `docs-pro` | 15 tps, 30 tps | one streamed question over a 2,500–6,500 token document (30–80% of the context), 100–250 out | 3 each |
+
+Eight minutes per run (ramp, six minutes of peak, tail) and a minute of drain. The rates may be adjusted once,
+on the first-in-first-out arm only, if the first run shows no queue or a collapse; that is sizing, not a result.
+
+The arms, seeds 1–3, interleaved by seed, nine runs (`scripts/stage_n_local.sh`):
+
+| Arm | Cap on prompt tokens being read | Queue order |
+|---|---|---|
+| `n-fifo` | none | first in, first out (the local default) |
+| `n-cap` | 2,048 new tokens | first in, first out |
+| `n-fair` | 2,048 new tokens | weighted fair share |
+
+`n-fair` against `n-cap` isolates the ordering. `n-fifo` shows what the cap does by itself on this card. The cap
+is about 1.6 s of reading at this card's measured speed; one value is run, not a sweep.
+
+Hypothesis (mine). "Wait" is arrival to first token.
+
+| # | Line | Holds if |
+|---|---|---|
+| N1 | light tenants wait less | the chat tenants' mean wait is at least 25% lower in `n-fair` than in `n-cap` on each seed |
+| N2 | the average wait falls | mean wait over all requests is lower in `n-fair` than in `n-cap` on each seed |
+| N3 | paying more buys reading | over the three seeds pooled, `docs-pro`'s mean queue time is at most 0.75 of `docs-std`'s in `n-fair`, and between 0.75 and 1.33 of it in `n-cap` |
+| N4 | the heavy tenants pay for it | the docs tenants' mean wait is higher in `n-fair` than in `n-cap` |
+| N5 | no work is lost | output tokens and completed requests in `n-fair` are within 5% of `n-cap` on each seed |
+| N6 | the cap protects streams | the share of chat streams delivered under 95% of their rate is lower in `n-cap` than in `n-fifo` on each seed, and `n-fair` is within 3 points of `n-cap` |
+
+N2 is the one I am least sure of: reordering cannot remove work, so the average only falls because short
+prompts go first.
+
+What would justify a paid run. N1, N2 and N5 holding, with N3 showing the tier ratio. Then the same three arms
+would be worth one stage on the 4090s with the 7B mix. If N2 fails, fair share only moves the wait between
+tenants and does not justify GPU money.
+
+Limits, stated in advance. One GPU, so nothing about routing or cache affinity. A 3B model and a card whose
+absolute speeds do not transfer; the ratios between arms are the result. Four tenants. Fair share is tested as
+a service rule; no bill is changed, so this stage shows whether an input tier could be delivered, not what it
+would earn.
+
 ## What was not measured, and what to do next
 
 Measured since the phase-2 list: reservation spill (`resv-spill`, `resv-p95-spill`, Q8), the `abort` revocation

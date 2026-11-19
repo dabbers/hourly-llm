@@ -36,6 +36,7 @@ from .pacing import Pacer
 log = logging.getLogger("slotgw.admission")
 
 QUEUE_ORDER = ("interactive", "lazy", "burst")
+MIN_INGEST_TOKENS = 16  # a cached turn still reads at least one KV block of new prompt
 AFFINITY_WAIT_POLL_S = 0.01  # stage L: how often a request waiting for its remembered replica looks again
 
 
@@ -352,6 +353,7 @@ class Waiter:
     conversation: str | None = None
     passed: int = 0  # stage M: times a waiter behind this one was admitted first
     t_first_passed: float | None = None
+    fq_start: float = 0.0  # stage N: start tag in the tenants' fair order (smallest goes first)
 
 
 @dataclass
@@ -431,6 +433,47 @@ class Scheduler:
         self.affinity_waits = 0  # stage L: requests that waited for their remembered replica
         self.affinity_wait_hits = 0  # of which: it fitted before the wait ran out
         self.queue_jumps = 0  # stage M: queued requests admitted past the head, onto their remembered replica
+        # stage N: fair share of prompt reading. Virtual time is the start tag of the last request served;
+        # each tenant's next request starts where its previous one finished, or at the virtual time if later.
+        self._fq_vtime = 0.0
+        self._fq_finish: dict[str, float] = {}
+        self.fq_reorders = 0  # dispatches that took a waiter from behind the head of the queue
+        self._conv_prompt: OrderedDict[str, int] = OrderedDict()  # conversation -> prompt tokens of its last turn
+
+    # ---- fair share of prompt reading (stage N) ------------------------------------------------
+
+    def _ingest_tokens(self, prompt_tokens: int, conversation: str | None) -> int:
+        """The prompt tokens the engine has to read for this turn: with `ingest_new_tokens`, those beyond
+        the conversation's previous prompt (the rest is in the prefix cache); otherwise all of them."""
+        if not self.settings.ingest_new_tokens or conversation is None:
+            return prompt_tokens
+        prev = self._conv_prompt.get(conversation)
+        self._conv_prompt[conversation] = prompt_tokens
+        self._conv_prompt.move_to_end(conversation)
+        while len(self._conv_prompt) > self.settings.prefix_affinity_max_entries:
+            self._conv_prompt.popitem(last=False)
+        if prev is None or prompt_tokens <= prev:
+            return prompt_tokens
+        return max(MIN_INGEST_TOKENS, prompt_tokens - prev)
+
+    def _fq_tag(self, tenant: str | None, shape: Shape, tokens: int) -> float:
+        """Charge `tokens` of prompt reading to the tenant at its shape's weight; return the start tag."""
+        key = tenant or "-"
+        start = max(self._fq_vtime, self._fq_finish.get(key, 0.0))
+        self._fq_finish[key] = start + tokens / shape.tps
+        return start
+
+    def _fq_head(self, q: deque[Waiter]) -> None:
+        """Bring the waiter with the smallest start tag to the head of the queue (ties: first come)."""
+        best = None
+        for i, w in enumerate(q):
+            if not w.future.done() and (best is None or w.fq_start < q[best].fq_start):
+                best = i
+        if best:
+            w = q[best]
+            del q[best]
+            q.appendleft(w)
+            self.fq_reorders += 1
 
     # ---- prefix affinity (stage K) --------------------------------------------------------------
 
@@ -631,7 +674,10 @@ class Scheduler:
         affinity on (stage M), a waiter a few places back takes the seat instead when it remembers that
         replica and the head does not; the head keeps its place."""
         q = self.queues[cls]
+        fair = cls == "interactive" and self.settings.ingest_fair_share
         while q:
+            if fair and len(q) > 1:
+                self._fq_head(q)
             w = q[0]
             if w.future.done():
                 q.popleft()
@@ -652,6 +698,7 @@ class Scheduler:
                     self._stamp_passed(h, c)
                     h.queue_jumped = pos
                     self.queue_jumps += 1
+                    self._fq_vtime = max(self._fq_vtime, c.fq_start)
                     c.future.set_result(self._placed(h, c.conversation, ledg.id))
                     continue
             if ledg is None and cls == "interactive":
@@ -667,6 +714,7 @@ class Scheduler:
                 reason = self._affinity_reason(w.shape, w.prompt_tokens, w.kv_needed, remembered)
             h = ledg.hold(w.request_id, w.shape, self._kv_needed(ledg, w), w.prompt_tokens, w.preemptable, w.burst_ctx)
             self._stamp_passed(h, w)
+            self._fq_vtime = max(self._fq_vtime, w.fq_start)
             w.future.set_result(self._placed(h, w.conversation, remembered, reason))
             if w.burst_ctx:
                 self.bursts_admitted += 1
@@ -833,6 +881,7 @@ class Scheduler:
         timeout = shape.max_queue_s if max_wait_s is None else max_wait_s
         if burst_ctx:  # a burst that cannot be placed now fails fast (DESIGN 12, post-M4)
             timeout = min(timeout, self.burst.context_max_queue_s)
+        prompt_tokens = self._ingest_tokens(prompt_tokens, conversation)
         if not burst_ctx:
             res = self.reservation_for(tenant, shape)
             if res is not None:
@@ -849,6 +898,10 @@ class Scheduler:
             raise Unsellable(shape.name)
         cls = "burst" if burst_ctx else ("lazy" if shape.lazy else "interactive")
         queue = self.queues[cls]
+        # a requeued request (front) keeps its place at the head and is not charged twice
+        fq_start = float("-inf") if front else 0.0
+        if cls == "interactive" and self.settings.ingest_fair_share and not front:
+            fq_start = self._fq_tag(tenant, shape, prompt_tokens)
         ahead = [self.queues[c] for c in QUEUE_ORDER[: QUEUE_ORDER.index(cls) + 1]]
         others_waiting = any(bool(q) for q in ahead)
         if not others_waiting and not front:
@@ -868,11 +921,12 @@ class Scheduler:
                 h.affinity_wait_ms = waited_ms
                 if burst_ctx:
                     self.bursts_admitted += 1
+                self._fq_vtime = max(self._fq_vtime, fq_start)
                 self._refresh_burst()
                 return h
         loop = asyncio.get_running_loop()
         w = Waiter(request_id, shape, prompt_tokens, kv_tokens, preemptable, burst_ctx, now(), loop.create_future(),
-                   conversation=conversation)
+                   conversation=conversation, fq_start=fq_start)
         if front:
             queue.appendleft(w)
         else:
@@ -937,6 +991,11 @@ class Scheduler:
                 "pass_window_ms": self.settings.prefix_affinity_pass_window_ms,
                 "queue_jumps": self.queue_jumps,
                 "remembered": len(self._affinity),
+            },
+            "ingest": {
+                "new_tokens": self.settings.ingest_new_tokens,
+                "fair_share": self.settings.ingest_fair_share,
+                "reorders": self.fq_reorders,
             },
             "burst": self.burst.model_dump(),
             "reservations": [r.snapshot() for r in self.reservations.values() if r.t_end is None],

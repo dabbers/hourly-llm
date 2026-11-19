@@ -194,6 +194,15 @@ class AdmissionSettings(BaseModel):
     # pass window that starts the first time it is passed; after that nothing behind it goes first.
     prefix_affinity_queue_lookahead: int = Field(default=0, ge=0)
     prefix_affinity_pass_window_ms: float = Field(default=500.0, ge=0)
+    # stage N: the prompt tokens a turn is counted with (by the prefill cap and by fair share) are the ones
+    # beyond its conversation's previous prompt, an estimate of what the engine has to read; the rest is in the
+    # prefix cache. Off = the whole prompt, as in phase 3.
+    ingest_new_tokens: bool = False
+    # stage N: the interactive queue is served in weighted fair order over tenants instead of first-in,
+    # first-out (start-time fair queuing). A request costs its counted prompt tokens divided by its shape's tps,
+    # so a tenant on a faster shape gets a proportionally larger share of prompt reading. Work-conserving: it
+    # reorders the queue and never holds a request back while it fits.
+    ingest_fair_share: bool = False
 
 
 class BurstSettings(BaseModel):

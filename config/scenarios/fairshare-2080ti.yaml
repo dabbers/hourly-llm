@@ -1,0 +1,37 @@
+# Stage N (docs/RESULTS.md Q18): fair share of prompt reading, on the local 2080 Ti.
+# A scaled mix, not a real one: sizes are fractions of the 8k context and rates are sized to this card.
+# Two prompt profiles, each run by two tenants that differ only in the shape they pay for:
+#   chat-*  light: a turn adds 1-5% of the context, most of the prompt is already cached
+#   docs-*  heavy: one long document per request, 30-80% of the context, nothing cached
+#   *-std on small.8k.15tps, *-pro on small.8k.30tps (twice the weight under fair share)
+# The 60 tps shape is left out: this card seats only two of them (calibration/local-2080ti.yaml).
+#   docker compose run --rm loadgen --scenario config/scenarios/fairshare-2080ti.yaml --seed 1 --no-reservations --label n-fifo
+name: fairshare
+hour_length_s: 600
+drain_s: 60
+sample_interval_s: 2
+phases:
+  - {name: ramp, duration_s: 60, rate_scale: 0.5}
+  - {name: peak, duration_s: 360, rate_scale: 1.0}
+  - {name: tail, duration_s: 60, rate_scale: 0.4}
+tenants:
+  - name: chat-std
+    api_key: sk-local-chat-std
+    shape: small.8k.15tps
+    profile: {kind: chat, turns: [3, 8], first_user_tokens: [150, 500], user_tokens_per_turn: [100, 400], output_tokens: [60, 220], think_s: [3, 12]}
+    arrivals: {kind: diurnal, rate_per_min: 4}
+  - name: chat-pro
+    api_key: sk-local-chat-pro
+    shape: small.8k.30tps
+    profile: {kind: chat, turns: [3, 8], first_user_tokens: [150, 500], user_tokens_per_turn: [100, 400], output_tokens: [60, 220], think_s: [3, 12]}
+    arrivals: {kind: diurnal, rate_per_min: 4}
+  - name: docs-std                  # one streamed question over a long document (the agent profile with a single step)
+    api_key: sk-local-docs-std
+    shape: small.8k.15tps
+    profile: {kind: agent, steps: [1, 1], first_user_tokens: [2500, 6500], growth_tokens: [0, 0], output_tokens: [100, 250], pause_s: [1, 1]}
+    arrivals: {kind: diurnal, rate_per_min: 3}
+  - name: docs-pro
+    api_key: sk-local-docs-pro
+    shape: small.8k.30tps
+    profile: {kind: agent, steps: [1, 1], first_user_tokens: [2500, 6500], growth_tokens: [0, 0], output_tokens: [100, 250], pause_s: [1, 1]}
+    arrivals: {kind: diurnal, rate_per_min: 3}

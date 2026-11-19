@@ -15,6 +15,8 @@ admission:
   prefix_affinity_wait_ms: ${SLOTGW_PREFIX_AFFINITY_WAIT_MS:-0}   # stage L: wait this long for the remembered replica before running elsewhere (0 = never)
   prefix_affinity_queue_lookahead: ${SLOTGW_PREFIX_AFFINITY_QUEUE_LOOKAHEAD:-0}   # stage M: a queued turn among the first N may take a freed seat on its remembered replica ahead of the head (0 = strict FIFO)
   prefix_affinity_pass_window_ms: ${SLOTGW_PREFIX_AFFINITY_PASS_WINDOW_MS:-500}   # stage M: a waiter can be passed only this long after it is first passed
+  ingest_new_tokens: ${SLOTGW_INGEST_NEW_TOKENS:-false}   # stage N: count a turn's prompt as the tokens beyond its conversation's previous prompt (prefill cap, fair share)
+  ingest_fair_share: ${SLOTGW_INGEST_FAIR_SHARE:-false}   # stage N: serve the interactive queue in weighted fair order over tenants (weight = the shape's tps), not first-in first-out
   dispatch_tick_s: 0.25
   reservation_spill: ${SLOTGW_RESERVATION_SPILL:-false}
   health_interval_s: 5.0
