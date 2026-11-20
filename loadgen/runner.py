@@ -10,6 +10,7 @@ import csv
 import json
 import logging
 import shutil
+import re
 import time
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
@@ -62,6 +63,7 @@ class ClientRecord:
     throttled_ms: float | None = None
     error: str | None = None
     showcase: str | None = None  # prompt id of a showcase request (real text, kept by the gateway)
+    turn_late_s: float | None = None  # scheduled turns: seconds this turn was sent after its planned time (None: closed loop or first turn)
 
     @property
     def ttft_ms(self) -> float | None:
@@ -120,6 +122,15 @@ class Counters:
         return asdict(self)
 
 
+_TPS = re.compile(r"\.(\d+)tps")
+
+
+def _tier_rate(shape: str | None) -> float | None:
+    """The rate in a shape's name (`small.8k.30tps` -> 30); None when the name has none."""
+    m = _TPS.search(shape or "")
+    return float(m.group(1)) if m else None
+
+
 class LoadRunner:
     def __init__(
         self,
@@ -135,8 +146,10 @@ class LoadRunner:
         reservations: bool = True,
         reservation_replica: str | None = None,
         reservations_required: bool = False,
+        turn_timing: str | None = None,
     ):
         self.scenario = scenario
+        self.turn_timing = turn_timing or scenario.turn_timing  # "closed" or "scheduled" (stage P)
         self.plan = plan
         self.reservations_enabled = reservations
         self.reservation_replica = reservation_replica  # None: the scenario's `replica:`; "none": unpinned; else this replica
@@ -244,6 +257,7 @@ class LoadRunner:
                 "reservations": self.reservation_log,
                 "replicas": health.get("replicas"),  # id, model, KV budget (cache) at the start of the run
                 "plan_digest": self.plan.digest,
+                "turn_timing": self.turn_timing,
                 "planned_open_loop_requests": self.plan.n_open_loop_requests,
                 "closed_loop_workers": self.plan.n_workers,
                 "duration_s": self.scenario.duration_s,
@@ -452,19 +466,34 @@ class LoadRunner:
 
     async def _run_session(self, client: httpx.AsyncClient, tp: TenantPlan, session: Session) -> None:
         history: list[dict[str, str]] = []
+        # Scheduled turns (stage P): turn i is planned at the session's start plus, for every earlier turn,
+        # its think time and a nominal answer time of 1 s + max_tokens / the tier's rate (what a paced answer
+        # takes). A turn cannot be sent before the previous reply exists, so a late reply makes it late.
+        rate = _tier_rate(tp.shape) if self.turn_timing == "scheduled" else None
+        t_plan = time.perf_counter()
         for step in session.steps:
-            if step.pause_before_s > 0:
+            late: float | None = None
+            if rate is not None and step.i > 0:
+                t_plan += step.pause_before_s
+                delay = t_plan - time.perf_counter()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                late = max(0.0, -delay)
+            elif step.pause_before_s > 0:
                 await asyncio.sleep(step.pause_before_s)
             if self.past_end():
                 return
-            ok, user_content, reply = await self._run_step(client, tp, session, step, history)
+            if rate is not None:
+                t_plan += 1.0 + step.max_tokens / rate
+            ok, user_content, reply = await self._run_step(client, tp, session, step, history, late)
             if not ok:
                 return  # a refusal (context full) or an error ends the session, as a real client would
             history.append({"role": "user", "content": user_content})
             history.append({"role": "assistant", "content": reply})
 
     async def _run_step(
-        self, client: httpx.AsyncClient, tp: TenantPlan, session: Session, step: Step, history: list[dict[str, str]]
+        self, client: httpx.AsyncClient, tp: TenantPlan, session: Session, step: Step, history: list[dict[str, str]],
+        turn_late_s: float | None = None,
     ) -> tuple[bool, str, str]:
         showcase: str | None = None
         if step.showcase is not None:
@@ -509,6 +538,7 @@ class LoadRunner:
             user_tokens=step.user_tokens,
             max_tokens=step.max_tokens,
             showcase=showcase,
+            turn_late_s=turn_late_s,
         )
         self.counters.sent += 1
         self.counters.inflight += 1

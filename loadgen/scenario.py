@@ -191,6 +191,10 @@ class Scenario(BaseModel):
     drain_s: float = Field(default=60.0, ge=0)
     sample_interval_s: float = Field(default=2.0, gt=0)
     rate_multiplier: float = Field(default=1.0, ge=0)  # scales every open-loop arrival rate: the sizing knob for a bigger replica
+    # stage P. closed: a session's next turn is sent a think time after the previous answer ends. scheduled:
+    # it is sent at a fixed planned time (see LoadRunner._run_session), so a faster answer does not bring the
+    # next turn sooner. The plan (the requests of a seed) is the same either way.
+    turn_timing: Literal["closed", "scheduled"] = "closed"
     phases: list[Phase] = Field(min_length=1)
     tenants: list[TenantSpec] = Field(min_length=1)
 

@@ -20,6 +20,7 @@ admission:
   ingest_bucket: ${SLOTGW_INGEST_BUCKET:-false}   # stage O: a token bucket on prompt reading per tenant, ratio x the shape's tps per slot
   ingest_bucket_input_ratio: ${SLOTGW_INGEST_BUCKET_RATIO:-10}
   tier_priority: ${SLOTGW_TIER_PRIORITY:-false}   # stage O: the engine schedules a faster shape first
+  reserved_prefill_gate: ${SLOTGW_RESERVED_PREFILL_GATE:-false}   # stage P: reserved requests pass the prefill cap, in fair order across tenants
   dispatch_tick_s: 0.25
   reservation_spill: ${SLOTGW_RESERVATION_SPILL:-false}
   health_interval_s: 5.0

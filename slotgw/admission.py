@@ -443,6 +443,7 @@ class Scheduler:
         self._buckets: dict[str, tuple[float, float]] = {}  # stage O: tenant -> (input tokens in the bucket, time)
         self.ingest_waits = 0  # requests that waited for their tenant's input bucket
         self.ingest_refusals = 0  # requests whose bucket wait would have passed the shape's queue limit
+        self.gate_holds = 0  # stage P: reserved requests that had a free slot and were held by the prefill cap
 
     # ---- fair share of prompt reading (stage N) ------------------------------------------------
 
@@ -757,6 +758,8 @@ class Scheduler:
         """Admit queued waiters in priority order: interactive FIFO first, lazy only when no
         interactive request is waiting, context bursts only when nothing else waits. Strict FIFO
         within a class (no overtaking)."""
+        if self.settings.reserved_prefill_gate:
+            self._dispatch_reserved()
         for cls in QUEUE_ORDER:
             if not self._dispatch_queue(cls):
                 break
@@ -835,7 +838,54 @@ class Scheduler:
         self.dispatch()
         return res
 
+    def _dispatch_reserved(self) -> None:
+        """Stage P, `reserved_prefill_gate`: hand free reserved slots to waiting requests of every
+        reservation. A request needs a free slot of its own reservation and room under the replica's prefill
+        cap. Among the heads of the reservations' queues the smallest fair-share start tag goes first with
+        `ingest_fair_share` on, the earliest arrival otherwise. A head held by the cap holds every request
+        behind it in that order on the same replica, so a long prompt is not starved by short ones."""
+        fair = self.settings.ingest_fair_share
+        cap = self.settings.max_prefill_tokens_in_flight
+        blocked: set[str] = set()
+        while True:
+            best: tuple[tuple[float, float], Reservation, Hold, Waiter] | None = None
+            for res in self.reservations.values():
+                if res.t_end is not None:
+                    continue
+                while res.queue and res.queue[0].future.done():
+                    res.queue.popleft()
+                if not res.queue:
+                    continue
+                slot = next((s for s in res.slots if s.occupant is None and not s.released and s.ledger.id not in blocked), None)
+                if slot is None:
+                    continue
+                w = res.queue[0]
+                key = (w.fq_start if fair else w.t_enqueued, w.t_enqueued)
+                if best is None or key < best[0]:
+                    best = (key, res, slot, w)
+            if best is None:
+                return
+            _, res, slot, w = best
+            ledg = slot.ledger
+            if cap > 0:
+                in_flight = sum(h.prompt_tokens for h in ledg.holds.values() if not h.prefill_done)
+                if in_flight > 0 and in_flight + w.prompt_tokens > cap:
+                    blocked.add(ledg.id)
+                    if not w.passed:
+                        w.passed = 1  # counted once per request held at the gate
+                        self.gate_holds += 1
+                    continue
+            res.queue.popleft()
+            ledg.occupy(slot, w.request_id, w.prompt_tokens)
+            res.served += 1
+            self._fq_vtime = max(self._fq_vtime, w.fq_start)
+            self._touch(w.conversation, ledg.id)
+            w.future.set_result(slot)
+
     def _dispatch_reservation(self, res: Reservation) -> None:
+        if self.settings.reserved_prefill_gate:
+            self._dispatch_reserved()
+            return
         while res.queue:
             w = res.queue[0]
             if w.future.done():
@@ -849,10 +899,17 @@ class Scheduler:
             res.served += 1
             w.future.set_result(slot)
 
-    async def _wait_reservation(self, res: Reservation, request_id: str, shape: Shape, prompt_tokens: int, timeout: float) -> Hold:
+    async def _wait_reservation(
+        self, res: Reservation, request_id: str, shape: Shape, prompt_tokens: int, timeout: float,
+        conversation: str | None = None, fq_start: float = 0.0,
+    ) -> Hold:
         loop = asyncio.get_running_loop()
-        w = Waiter(request_id, shape, prompt_tokens, None, False, False, now(), loop.create_future())
+        w = Waiter(request_id, shape, prompt_tokens, None, False, False, now(), loop.create_future(),
+                   conversation=conversation, fq_start=fq_start)
         res.queue.append(w)
+        gate = self.settings.reserved_prefill_gate
+        if gate:
+            self._dispatch_reserved()  # resolves at once when a slot is free and the prefill cap has room
         try:
             await asyncio.wait([w.future], timeout=timeout)
         except asyncio.CancelledError:
@@ -869,7 +926,10 @@ class Scheduler:
         w.future.cancel()
         res.timeouts += 1
         self.timeouts += 1
-        raise QueueTimeout("reservation_busy", now() - w.t_enqueued)
+        reason = "prefill" if gate and res.free_slot() is not None else "reservation_busy"
+        if gate:
+            self._dispatch_reserved()
+        raise QueueTimeout(reason, now() - w.t_enqueued)
 
     def _abandon(self, queue: deque[Waiter], w: Waiter) -> None:
         """The caller stopped waiting (its client went away while queued, DESIGN 4.1 step 5): take the
@@ -941,7 +1001,14 @@ class Scheduler:
             timeout = min(timeout, self.burst.context_max_queue_s)
         if not burst_ctx:
             res = self.reservation_for(tenant, shape)
-            if res is not None:
+            if res is not None and self.settings.reserved_prefill_gate and not front:
+                # stage P: through the gate, in the tenants' fair order when that is on
+                if res.free_slot() is not None or res.queue or not self.settings.reservation_spill:
+                    fq = self._fq_tag(tenant, shape, prompt_tokens) if self.settings.ingest_fair_share else 0.0
+                    h = await self._wait_reservation(res, request_id, shape, prompt_tokens, timeout, conversation, fq)
+                    self._refresh_burst()
+                    return h
+            elif res is not None:
                 slot = res.free_slot()
                 if slot is not None:
                     slot.ledger.occupy(slot, request_id, prompt_tokens)
@@ -1057,6 +1124,8 @@ class Scheduler:
                 "bucket_input_ratio": self.settings.ingest_bucket_input_ratio,
                 "bucket_waits": self.ingest_waits,
                 "bucket_refusals": self.ingest_refusals,
+                "reserved_prefill_gate": self.settings.reserved_prefill_gate,
+                "gate_holds": self.gate_holds,
             },
             "burst": self.burst.model_dump(),
             "reservations": [r.snapshot() for r in self.reservations.values() if r.t_end is None],

@@ -29,6 +29,8 @@ def main() -> None:
     p.add_argument("--reservations-required", action="store_true",
                    help="exit 3 before any load is sent if a reservation opening at t=0 is refused: a run whose "
                         "setting is the reservation must not run on demand with a warning")
+    p.add_argument("--turn-timing", choices=["closed", "scheduled"], default=None,
+                   help="override the scenario's turn_timing: scheduled sends each turn of a session at a fixed planned time")
     p.add_argument("--plan-only", action="store_true", help="print the plan as JSON and exit")
     p.add_argument("--log-level", default=os.environ.get("LOADGEN_LOG_LEVEL", "info"))
     args = p.parse_args()
@@ -52,6 +54,7 @@ def main() -> None:
         reservations=not args.no_reservations,
         reservation_replica=args.reservation_replica,
         reservations_required=args.reservations_required,
+        turn_timing=args.turn_timing,
     )
     try:
         meta = asyncio.run(runner.run())

@@ -1853,6 +1853,100 @@ were set by me from one base run, not chosen by tenants reacting to price.
 Files: `docs/reports/stage-o/stage_o_table.csv`, table script `scripts/stage_o_table.py`, run script
 `scripts/stage_o_local.sh`. Cost: none (local GPU, about 100 minutes).
 
+## Q20. Does the output ceiling buy the host any capacity, and what separates tiers without it?
+
+**Status: the plan and hypotheses below were written on 2026-11-19 and 20, before any stage P run (owner's plan,
+with a second reviewer). Results go under them. Local RTX 2080 Ti, no paid GPU time.**
+
+Why ask. Stage O (Q19) paced every stream at its tier's rate. The gateway frees a slot when the engine
+finishes, not when delivery finishes (`slotgw/api.py`, the producer task), so the ceiling should hold no GPU
+capacity. If so it only delays customers, and the slot model should drop it. The model tested is the one a VPS
+host uses: pay for what you hold, run at full speed.
+
+The model. A flat price per slot per hour, used or not. Pacing off: tokens go out as the engine makes them.
+A slot holds one concurrent request with its shape's context in KV. Speed is reported, not promised. Tiers
+differ by slot count, context size and, in one arm, engine priority.
+
+Arms. Stage N and O traffic and seeds 1–3; 8 slots (chat-std 2, chat-pro 3, docs-std 1, docs-pro 2), or each
+tenant's p95 (5, 6, 2, 3) on the oversold arms. Bursting is off everywhere.
+
+| Arm | Pacing | Input bucket | Tier priority | Seats sold | Other | Role |
+|---|---|---|---|---|---|---|
+| `o-slots` | on | off | off | once | | stage O baseline, re-run the same day |
+| `p-slots` | **off** | off | off | once | | the model under test |
+| `p-fair` | off | off | off | once | prefill cap 2,048, fair share, gate | the model as it would be proposed |
+| `o-slots-open` | on | off | off | once | scheduled turns | `o-slots` with open-loop turns |
+| `p-slots-open` | off | off | off | once | scheduled turns | `p-slots` with open-loop turns |
+| `p-prio` | off | off | on | once | | does priority separate tiers with no cap? |
+| `o-over` | on | on | on | twice | | stage O oversold arm, re-run |
+| `p-over` | off | on | on | twice | | oversold, with no cap |
+| `p-plain` | off | off | off | on demand | no reservations | the plain unpaced deployment; read against `n-fifo` |
+
+27 runs, run seed by seed in the order above so a stop part-way leaves complete pairs
+(`scripts/stage_p_local.sh`, table `scripts/stage_p_table.py`).
+
+What was built for it.
+
+- `pacing.enabled` reads `SLOTGW_PACING`.
+- **A prefill gate for reserved slots** (`admission.reserved_prefill_gate`). Fair share did nothing for a
+  reserved request before: it went from its tenant's queue straight onto a free slot. With the gate on, it
+  needs a free slot of its own reservation and room under the replica's prefill cap, and requests held at the
+  gate are released across tenants in stage N's fair order (weight = the shape's tps). Off, nothing changes.
+- **Scheduled turns** in the load generator (`turn_timing: scheduled`, or `--turn-timing`). Turn *i* of a chat
+  session is sent at the session's start plus, for each earlier turn, its think time and a nominal answer time
+  of 1 s + `max_tokens` ÷ the tier's rate. A turn still waits for the previous reply; how late it was sent is
+  logged (`turn_late_s`). The requests of a seed are unchanged.
+
+Measures. Host side: seat time (admission to engine done), slot busy share, slots needed (p95 of a tenant's
+requests between admission and engine done), engine decode rate, output, refusals. Customer side: wait,
+end-to-end time, delivered rate (median and slowest 5%), conversation duration. Bills: slot-hour (flat),
+per token, delivery-second and engine-second for the same requests.
+
+Hypotheses (owner's, written before the runs). Each compares arms on the same seed unless stated.
+
+| # | Line | Holds if | Expectation |
+|---|---|---|---|
+| P1 | the ceiling holds no GPU capacity | each tenant's mean seat time and slot busy share in `p-slots` are within ±10% of `o-slots` on every seed | holds |
+| P2 | customers get answers sooner | chat median end-to-end time in `p-slots` is at least 30% below `o-slots` on every seed | holds |
+| P3 | waits do not get worse | chat wait p95 in `p-slots` is not more than 10% above `o-slots` on every seed | uncertain: next turns arrive sooner in a closed loop |
+| P4 | conversations finish sooner | median chat conversation duration in `p-slots` is at least 10% shorter than `o-slots`, seeds pooled | likely; think time dominates |
+| P5 | without a cap, speed tiers merge | chat-std and chat-pro median delivered rates (tokens a second) in `p-slots` are within 10% of each other on every seed | holds |
+| P6 | priority partly separates tiers | in `p-prio` against `p-slots`: chat-pro's mean time to first token falls and chat-std's rises, **and** chat-pro's median delivered rate exceeds chat-std's by at least 10% | first half holds, second fails |
+| P7 | pacing does not cause the oversold slowdowns | in `p-over` against `o-over`: chat's slowest-5% engine decode rate is within ±10%, and chat wait p95 is not higher | holds |
+| P8 | slot needs do not grow without a cap | the sum of tenants' p95 slots needed in `p-slots` is within 10% of `o-slots` on every seed | uncertain, as P3 |
+| P9 | fair share restores the speed the cap ignored | in `p-fair` against `p-slots`: chat's wait p95 and median time to first token are lower, and the share of chat streams below 95% of their tier's rate is lower, on every seed | holds for chat |
+| P10 | fair share costs no output | output tokens in `p-fair` are within 3% of `p-slots` on every seed | holds |
+| P11 | with open-loop traffic the cap still holds no capacity | P1's line, for `p-slots-open` against `o-slots-open` | holds |
+| P12 | with open-loop traffic waits do not change | chat wait p95 and the sum of p95 slots needed in `p-slots-open` are within 10% of `o-slots-open` on every seed | holds |
+
+Decision rules (owner's).
+
+- **P1 and P2 hold:** drop the output ceiling from the slot model; keep delivery smoothing as an option.
+- **P5 holds and P6's second half fails:** stop selling speed as a tier. Sell slot count, context size and
+  priority; report speed.
+- **P3 or P8 fails:** read the open-loop pair. If P12 holds, the failure was customer behaviour. If P12 also
+  fails, removing the cap changes capacity, which contradicts P1 and needs explaining first.
+- **P9 and P10 hold:** propose `p-fair` as the slot model and judge the paid-run rule on it.
+- **Paid 4090 run:** only if P1, P2 and P3 (or P12) hold and slot needs sized by engine occupancy fit within
+  1.2 times the seats. Otherwise the slot model's problem is capacity, not pacing.
+
+Notes on the measures, written before the runs (mine).
+
+- **Slots needed is bounded by slots held.** A tenant with 2 slots never has more than 2 requests between
+  admission and engine done, so P8, P12 and the 1.2 times rule cannot fail upward on the arms with seats sold
+  once. The table also reports slots wanted (arrival to engine done, which counts requests waiting for a slot),
+  and the rule is read on both.
+- **The paced open-loop arm will send some turns late.** A paced answer takes about `max_tokens` ÷ rate − 1 s
+  after its first token (the pacer's one second of starting credit), so a turn is on time only when the wait to
+  first token was under about 2 s. Stage O's chat waits averaged 1.5–4 s. Lateness is reported per arm, and a
+  turn counts as late above 0.25 s.
+- `p-plain` counts whole prompts (new-token counting off), to match `n-fifo`.
+- The background note the plan cites (`pacer-findings.md`) is not in this repository.
+
+Limits, stated in advance. One 2080 Ti, a 3B model, four tenants: ratios, not absolute numbers. Most arms are
+closed loop. Three seeds. Only `p-fair` addresses prefill interference. Overselling with four tenants does not
+show what many independent tenants would do.
+
 ## What was not measured, and what to do next
 
 Measured since the phase-2 list: reservation spill (`resv-spill`, `resv-p95-spill`, Q8), the `abort` revocation

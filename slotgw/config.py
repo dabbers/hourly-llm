@@ -212,6 +212,10 @@ class AdmissionSettings(BaseModel):
     ingest_bucket_input_ratio: float = Field(default=10.0, gt=0)
     # stage O: the engine's request priority follows the tier (a faster shape is scheduled first).
     tier_priority: bool = False
+    # stage P: a request on a reserved slot also has to pass the replica's prefill cap, and requests held at
+    # that gate are released across tenants in the fair order when `ingest_fair_share` is on (first come
+    # otherwise). Off: a reserved request takes a free slot at once, as before.
+    reserved_prefill_gate: bool = False
 
 
 class BurstSettings(BaseModel):

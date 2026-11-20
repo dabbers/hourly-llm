@@ -1,6 +1,6 @@
 # Gateway behaviour knobs (docs/DESIGN.md sections 5-7). Every key has a default in slotgw/config.py.
 pacing:
-  enabled: true          # false = milestone-1 passthrough (tokens leave as fast as the engine makes them)
+  enabled: ${SLOTGW_PACING:-true}          # false = milestone-1 passthrough (tokens leave as fast as the engine makes them)
   bucket_depth_s: 1.0    # per-request token bucket depth, in seconds of the shape's rate
 admission:
   enabled: true                   # false = milestone-2 behaviour (no ledgers, no queue)
@@ -19,6 +19,7 @@ admission:
   ingest_bucket: ${SLOTGW_INGEST_BUCKET:-false}   # stage O: a token bucket on prompt reading per tenant, ratio x the shape's tps per slot
   ingest_bucket_input_ratio: ${SLOTGW_INGEST_BUCKET_RATIO:-10}
   tier_priority: ${SLOTGW_TIER_PRIORITY:-false}   # stage O: the engine schedules a faster shape first
+  reserved_prefill_gate: ${SLOTGW_RESERVED_PREFILL_GATE:-false}   # stage P: reserved requests pass the prefill cap, in fair order across tenants
   dispatch_tick_s: 0.25
   reservation_spill: false     # a reserved tenant whose slots are all busy waits for one (no on-demand spill)
   health_interval_s: 5.0
