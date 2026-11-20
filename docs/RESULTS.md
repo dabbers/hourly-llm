@@ -1855,8 +1855,8 @@ Files: `docs/reports/stage-o/stage_o_table.csv`, table script `scripts/stage_o_t
 
 ## Q20. Does the output ceiling buy the host any capacity, and what separates tiers without it?
 
-**Status: the plan and hypotheses below were written on 2026-11-19 and 20, before any stage P run (owner's plan,
-with a second reviewer). Results go under them. Local RTX 2080 Ti, no paid GPU time.**
+**Status: run 2026-11-20. The plan and hypotheses below were written on 2026-11-19 and 20, before any stage P
+run (owner's plan, with a second reviewer); the results follow them. Local RTX 2080 Ti, no paid GPU time.**
 
 Why ask. Stage O (Q19) paced every stream at its tier's rate. The gateway frees a slot when the engine
 finishes, not when delivery finishes (`slotgw/api.py`, the producer task), so the ceiling should hold no GPU
@@ -1947,6 +1947,113 @@ Limits, stated in advance. One 2080 Ti, a 3B model, four tenants: ratios, not ab
 closed loop. Three seeds. Only `p-fair` addresses prefill interference. Overselling with four tenants does not
 show what many independent tenants would do.
 
+### Results (run 2026-11-20, local 2080 Ti)
+
+27 runs, 9,345 requests, 0 errors, 28 refused at the 30 s queue limit (3 to 5 per arm on the arms with
+reservations, all chat-std and docs-std; none on `p-plain`). No paid GPU time. Table:
+`docs/reports/stage-p/stage_p_table.csv`. Values are seeds 1 / 2 / 3.
+
+**Short answer.** The ceiling holds no GPU capacity: with it off, slots were held for the same time and
+answers arrived in less than half the time. Speed did not follow the tier without it, and engine priority did
+not bring it back. The slot model's waits are still set by slot counts, not by pacing, and the rule for a paid
+run is not met.
+
+Paced (`o-slots`) against unpaced (`p-slots`), same seats and seeds:
+
+| Measure | `o-slots` | `p-slots` | Change |
+|---|---|---|---|
+| Seat time, mean, all tenants (s) | 4.16 / 5.14 / 3.43 | 4.17 / 5.05 / 3.40 | 0% / −2% / −1% |
+| Slot busy share | 0.41 / 0.46 / 0.26 | 0.43 / 0.46 / 0.26 | |
+| Output tokens | 55,012 / 49,903 / 40,945 | 56,584 / 51,541 / 41,662 | +3% / +3% / +2% |
+| Chat end-to-end time, median (s) | 9.0 / 8.3 / 6.7 | 3.9 / 3.3 / 1.8 | −57% / −61% / −72% |
+| Chat conversation, median (s) | 85 / 88 / 63 | 67 / 64 / 47 | −22% / −27% / −26% |
+| Chat wait to first token, mean (s) | 3.58 / 4.04 / 1.44 | 3.08 / 3.64 / 1.63 | −14% / −10% / +13% |
+| Chat wait to first token, p95 (s) | 14.3 / 19.3 / 6.1 | 11.8 / 17.9 / 9.9 | −18% / −7% / +63% |
+| Slots wanted, sum of tenants' p95 | 19 / 19 / 10 | 18 / 18 / 12 | against 8 seats |
+
+Hypotheses.
+
+| # | Result | Numbers |
+|---|---|---|
+| P1 | **held** | per tenant, seat time changed −6% to +5% and busy share −3% to +6% |
+| P2 | **held** | chat median end-to-end time −57% / −61% / −72% |
+| P3 | **failed on seed 3** | chat wait p95 −18% / −7% / +63% (6.1 s to 9.9 s) |
+| P4 | **held** | pooled median chat conversation 78.4 s to 61.7 s (−21%) |
+| P5 | **failed on seed 1** | chat-std 80 / 72 / 98 tokens a second, chat-pro 65 / 69 / 99: the higher tier was 19% slower on seed 1, within 4% on the others |
+| P6 | **failed, both halves** | chat-std's time from admission to first token rose 12–28%; chat-pro's did not fall (+6% / −7% / +1%). chat-pro's rate against chat-std's: −26% / −5% / +2% |
+| P7 | **failed on seed 3** | chat's slowest 5%, share of tier: 0.49 / 0.32 / 0.64 paced, 0.45 / 0.31 / 0.57 unpaced (−8% / −4% / −11%); chat wait p95 −31% / +1% / +48% |
+| P8 | held, but cannot fail | sum of p95 slots needed is 8 in both arms on every seed (bounded by the 8 held). Slots wanted: 19 / 19 / 10 to 18 / 18 / 12 |
+| P9 | **failed** | `p-fair` against `p-slots`: chat wait p95 +5% / −7% / −3%, median wait +38% / −37% / +4%, slow-stream share 0.11 / 0.12 / 0.05 to 0.11 / 0.14 / 0.05 |
+| P10 | **held** | output −0.6% / −1.9% / 0% |
+| P11 | **held** | open-loop pair: seat time 0% to +4%, busy share 0% to +4% per tenant |
+| P12 | **failed on seed 3** | open-loop pair: chat wait p95 +5% / −1% / +13% (7.6 s to 8.6 s); slots needed 8 in both |
+
+What the runs show.
+
+- **The ceiling only delays the customer.** Seat time, busy share and the slowest streams are the same with and
+  without it; the answer just arrives later. The paced arms bill 7–12% more delivery seconds than the engine
+  spent on the same requests ($0.0362 against $0.0331 on seed 1); unpaced, the two bills agree within 3%.
+- **Speed is not a tier here.** Unpaced, both chat tiers got 65–100 tokens a second, 2 to 6 times what they
+  pay for, and the higher tier was never more than 2% faster. Tier priority did not change that: it made the
+  lower tier wait longer for its first token and gave the higher tier nothing measurable. Why chat-pro was
+  slower on seed 1 is not explained; it showed in `p-prio`, `p-fair`, `p-over` and `p-plain` on the same seed
+  (−15% to −27%), so it comes from that seed's traffic, not from one arm.
+- **Unpaced waits on the light seed are a recurring anomaly.** On seed 3 chat-std's wait p95 doubled in
+  `p-slots` (6.3 s to 12.7 s) and rose 40% in `p-over`, while seeds 1 and 2 fell or held. The unpaced closed
+  loop sent 299 requests in the window against 291, and chat-std wanted 6 slots at p95 against 4, holding 2.
+  A second identical paced run moved chat wait p95 by −16% / +9% / −5% (stage O's `o-slots` against today's),
+  so a 10% line on a p95 is inside the repeat spread; +63% is not.
+- **The open-loop pair does not settle it.** P12 failed on seed 3 by 3 points (+13%), which is inside that
+  repeat spread. The pair was also not fully open: 40% / 30% / 6% of paced turns and 33% / 28% / 4% of
+  unpaced turns were sent late because the previous answer had not finished, so arrivals still differed.
+  Seat time and busy share were equal (P11), so I read the engine's capacity as unchanged and the wait
+  difference as arrival timing plus noise. That reading is mine and is not proven by these runs.
+- **The prefill gate moved the wait, it did not remove it.** In `p-fair` chat's mean time from admission to
+  first token fell from 0.7–0.9 s to 0.25–0.28 s and mean seat time fell 5–15%, but the time from arrival to
+  first token did not improve (chat mean 3.08 / 3.64 / 1.63 s to 3.59 / 3.27 / 1.52 s). The request waits at the
+  gate instead of on the slot. It lowers an engine-second bill a little and gives the customer nothing.
+- **Reservations still cost chat its waits.** Against the plain unpaced pool (`p-plain`), `p-slots` had chat
+  wait p95 25–39% higher (mean +54% / +15% / +4%) and refused 3 requests where the pool refused none. Document
+  tenants did better with slots: median end-to-end time 11–23% lower. `p-plain` itself matched `n-fifo`
+  (chat mean wait −2% / −16% / −4%, same output), as expected: `n-fifo` already delivered at 2.3–3.7 times
+  the tier rate, so the two differ little.
+
+Bills for the same requests, `p-slots`, 480 s of load (dollars).
+
+| Tenant (slots) | Slot-hour, flat | Per token | Slot-hour as share of per token |
+|---|---|---|---|
+| chat-std (2) | 0.0022 | 0.0111 / 0.0089 / 0.0078 | 20% / 25% / 28% |
+| chat-pro (3) | 0.0065 | 0.0106 / 0.0105 / 0.0081 | 61% / 62% / 80% |
+| docs-std (1) | 0.0011 | 0.0052 / 0.0084 / 0.0064 | 21% / 13% / 17% |
+| docs-pro (2) | 0.0043 | 0.0096 / 0.0081 / 0.0073 | 45% / 53% / 59% |
+| all (8) | 0.0140 | 0.0366 / 0.0359 / 0.0296 | 38% / 39% / 47% |
+
+The slot price here is today's price per second for the shape (its rate times the per-token output price),
+charged for every second. Without the ceiling a slot yields far more than its rate, so that price recovers
+38–47% of the per-token revenue (74–91% on the oversold arm, which sells 16 slots). The standard tier got the
+same speed as the pro tier at half the price per slot. Every shape here has the same 8k context, so by what a
+slot holds (one eighth of the batch and of the KV memory) all eight slots are the same product and would carry
+one price: about 2.1 to 2.6 times today's average slot price to match the per-token revenue on this traffic.
+
+Decision rules, read on these results.
+
+- **Drop the output ceiling from the slot model: yes** (P1 and P2 held, and P11 for the open-loop pair).
+- **Stop selling speed as a tier: the rule's condition is not met as written** (P5 failed on seed 1), but it
+  failed because the higher tier was slower, which argues the same way. P6's second half failed. My reading:
+  speed cannot be sold as a tier on this engine; the decision is the owner's.
+- **P3 failed, so the open-loop pair was read, and P12 also failed (seed 3).** By the rule this needs
+  explaining before anything is built on it. The explanation above (equal engine occupancy, arrivals that
+  still differ, a line inside the repeat spread) is a reading, not a measurement.
+- **`p-fair` is not proposed** (P9 failed). The paid-run rule is judged on `p-slots`.
+- **Paid 4090 run: no.** P3 and P12 failed, and tenants wanted 18 / 18 / 12 slots at p95 against a limit of
+  9.6 (1.2 times the 8 seats). As the rule says, the slot model's problem is capacity, not pacing.
+
+Limits of these runs, beyond those stated in advance. Windows restarted during seed 2's last arm; that run was
+discarded and re-run, and seed 3 ran about eight hours after seeds 1 and 2. Each seed's pairs ran back to back
+in one session, and seed 3's paced baseline matched stage O's (chat wait p95 6.1 s against 6.4 s). Desktop
+programs were closed part-way through `p-plain` on seed 2. Seed 3 is light traffic (busy share 0.26), so its
+p95 rests on about 13 requests. The 10% lines on p95 waits are inside the spread of two identical runs.
+
 ## What was not measured, and what to do next
 
 Measured since the phase-2 list: reservation spill (`resv-spill`, `resv-p95-spill`, Q8), the `abort` revocation
@@ -1982,6 +2089,7 @@ and four of the shipping reservation (Q8). Not measured, in order of value:
 - One GPU model, one model size, one price basket: a 4090 at $0.893 per GPU-hour and a 7B AWQ model at the 7B
   basket; the fp16 model, a 120 tps shape and an A100 cross-check (PHASE2.md §3) were skipped for budget. The
   report recomputes the margins for any `gpu_usd_per_hour` and price reference.
+- A truly open-loop comparison of paced and unpaced slots (Q20): the scheduled turns still sent 28–40% of turns late on the busy seeds, so whether removing the ceiling changes waits at fixed arrivals is not settled. Slot prices that tenants would accept without a speed tier, and tiers by context size, are also unmeasured.
 - Fair share of prompt reading (Q18) and the slot-ceiling model (Q19) on the 4090s. Both were run on one local GPU with a 3B model and four tenants; fair share with cache routing across replicas, and slot counts chosen by tenants reacting to a price, are unmeasured.
 - A full day of traffic and more than three replicas. Q17 extrapolates margin against idle time from 18-minute busy periods; the share of the day that is busy, scaling GPUs down in quiet hours and queue-side affinity at a scale where its pass window binds (Q16) are all unmeasured.
 - fp8 KV with a model that carries calibrated KV scales (Q15: 1.98× KV and a 60 tps seat ceiling of 41 against 22, if the text can be made correct), affinity with a cap on prompt-token share and a price that keeps part of the saving (Q14), phase-length reservations, and the gateway fix for requests abandoned in the

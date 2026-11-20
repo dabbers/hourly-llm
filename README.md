@@ -208,6 +208,12 @@ cluster has. In the local runs the model did not beat today's design on waits: s
 own slots, the input ceiling protected the other tenants by refusing 7–48% of the under-sized tenant's requests, and
 overselling cut the slowest streams to a third of their rate. The rule set in advance for a paid run was not met.
 
+Stage P (Q20, same machine, 2026-11-20, 27 runs, no cost) tested slot-hour billing with no output ceiling. The ceiling held no
+GPU capacity: with it off, slots were held for the same time and chat answers took 57–72% less time end to end. Without it
+the two tiers got the same speed, and engine priority did not separate them, so speed could not be sold as a tier. Waits
+were still set by slot counts: tenants wanted 12–18 slots against 8, the unpaced arm's chat wait p95 rose 63% on one seed
+of three, and today's slot price would recover 38–47% of the per-token revenue. No paid run is recommended.
+
 ## License
 
 MIT, see `LICENSE`. The served models are third-party: `Qwen/Qwen2.5-7B-Instruct-AWQ` (Apache-2.0) in phases 2

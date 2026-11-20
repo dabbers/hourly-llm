@@ -8,8 +8,10 @@ engine done. Engine decode rate is output tokens over first token to engine done
 Customer side. Wait is arrival to first token; end-to-end is arrival to last token; delivered rate is output
 tokens over first to last token, as a share of the tier rate; a conversation runs from its first arrival to
 the last token of its last turn.
-Bills. Slot-hour: slots x hours x the shape's price per second x 3600 (flat). Per token and delivery-second:
-the gateway's own figures per request (client.csv). Engine-second: seat time x the shape's price per second.
+Bills. The shape's price per second comes from the config (config/gateway.yaml). Slot-hour: each tenant's
+slots x the load's duration x its shape's price (flat, used or not). Per token and delivery-second: the
+gateway's own figures per request (client.csv). Engine-second: seat time x the shape's price, plus the same
+prompt charge the delivery-second bill carries.
 """
 from __future__ import annotations
 
@@ -27,6 +29,20 @@ TPS = re.compile(r"\.(\d+)tps")
 SLOTS = {"slots": {"chat-std": 2, "chat-pro": 3, "docs-std": 1, "docs-pro": 2},
          "over": {"chat-std": 5, "chat-pro": 6, "docs-std": 2, "docs-pro": 3}}
 DURATION_S = 480.0
+TENANT_SHAPE = {"chat-std": "small.8k.15tps", "chat-pro": "small.8k.30tps", "docs-std": "small.8k.15tps", "docs-pro": "small.8k.30tps"}
+_PRICE: dict[str, float] = {}
+
+
+def price(shape: str) -> float:
+    """The shape's price per second, from the repository's config."""
+    if not _PRICE:
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+        from slotgw.config import load_config
+        _PRICE.update({s.name: s.price_per_second for s in load_config("config").shapes})
+    return _PRICE[shape]
+
+
 ARMS = ["n-fifo", "p-plain", "o-slots", "p-slots", "p-fair", "o-slots-open", "p-slots-open", "p-prio", "o-over", "p-over"]
 
 
@@ -53,7 +69,7 @@ def pct(xs, q) -> float:
     return float(np.percentile(xs, q)) if len(xs) else float("nan")
 
 
-def stats(rows: list[dict], client: dict[str, dict], slots: int | None) -> dict:
+def stats(rows: list[dict], client: dict[str, dict], slots: int | None, slot_usd: float | None = None) -> dict:
     ok = [r for r in rows if r["status"] == "ok" and r["t_first_token"] is not None and r["t_engine_done"] is not None]
     refused = [r for r in rows if r["status"] == "refused"]
     out = {"requests": len(rows), "ok": len(ok), "refused": len(refused), "other": len(rows) - len(ok) - len(refused), "slots": slots or 0}
@@ -89,8 +105,12 @@ def stats(rows: list[dict], client: dict[str, dict], slots: int | None) -> dict:
             conv[r["conversation_id"]].append(r)
     conv_s = [max(x["t_last_token"] for x in rs) - min(x["t_arrival"] for x in rs) for rs in conv.values() if len(rs) > 1]
     cl = [client[r["request_id"]] for r in ok if r["request_id"] in client]
-    price = [num(c["shape_usd"]) / num(c["billed_s"]) for c in cl if num(c["billed_s"]) > 0 and num(c["shape_usd"]) > 0]
-    price_s = float(np.median(price)) if price else float("nan")
+    engine_usd = 0.0
+    for r in ok:
+        p = price(r["billed_shape"] or r["shape"])
+        c = client.get(r["request_id"])
+        prompt_usd = max(0.0, num(c["shape_usd"]) - num(c["billed_s"]) * p) if c else 0.0
+        engine_usd += (r["t_engine_done"] - r["t_admitted"]) * p + prompt_usd
     late = [num(c.get("turn_late_s")) for c in cl if c.get("turn_late_s") not in (None, "")]
     out.update({
         "seat_mean_s": seat.mean(), "seat_sum_s": seat.sum(),
@@ -107,8 +127,8 @@ def stats(rows: list[dict], client: dict[str, dict], slots: int | None) -> dict:
         "output_tokens": sum(r["output_tokens"] or 0 for r in ok), "prompt_tokens": sum(r["prompt_tokens"] or 0 for r in ok),
         "per_token_usd": float(np.nansum([num(c["per_token_usd"]) for c in cl])),
         "delivery_second_usd": float(np.nansum([num(c["shape_usd"]) for c in cl])),
-        "engine_second_usd": float(seat.sum() * price_s),
-        "slot_hour_usd": float(slots * DURATION_S * price_s) if slots else float("nan"),
+        "engine_second_usd": engine_usd,
+        "slot_hour_usd": slot_usd if slot_usd is not None else float("nan"),
         "turns_scheduled": len(late), "turns_late_share": float(np.mean([x > 0.25 for x in late])) if late else float("nan"),
         "turn_late_p95_s": pct(late, 95),
     })
@@ -137,10 +157,12 @@ def main() -> None:
                 groups[g].append(r)
         for tenant in sorted(groups):
             if slot_map is None:
-                slots = None
+                slots = slot_usd = None
             else:
-                slots = sum(v for k, v in slot_map.items() if tenant == "all" or k == tenant or (tenant.endswith("*") and k.startswith(tenant[:-1])))
-            s = stats(groups[tenant], client, slots)
+                mine = {k: v for k, v in slot_map.items() if tenant == "all" or k == tenant or (tenant.endswith("*") and k.startswith(tenant[:-1]))}
+                slots = sum(mine.values())
+                slot_usd = sum(v * DURATION_S * price(TENANT_SHAPE[k]) for k, v in mine.items())
+            s = stats(groups[tenant], client, slots, slot_usd)
             cell[(arm, seed, tenant)] = s
             table.append({"arm": arm, "seed": seed, "tenant": tenant, **s})
         # the sum of the tenants' own p95 slot needs (the figure P8 and the paid-run rule use)
