@@ -200,6 +200,14 @@ prices from these runs (not measured): a 25% gross margin at the 7B basket price
 for 72% of the hours it pays for, break-even is 54%, and a reserved 30 tps seat costs about $0.025 an hour at 25%. $113.93 of the
 $150 cap spent over all stages.
 
+Stages N and O ran on a local RTX 2080 Ti on 2026-11-19 and 20, at no cost, as scaled tests of two mechanisms (ratios, not
+absolute numbers). Stage N (Q18): a weighted fair share of prompt reading between tenants cut the mean wait 17–35% and the
+chat tenants' wait 27–46%, with document tenants 3% slower and no output lost. Stage O (Q19): true slot-hour billing with the
+rates as ceilings on output and input. Offline, the tenants of the stage K and M runs would need 1.3–1.5 times the seats the
+cluster has. In the local runs the model did not beat today's design on waits: seats sold once made tenants queue for their
+own slots, the input ceiling protected the other tenants by refusing 7–48% of the under-sized tenant's requests, and
+overselling cut the slowest streams to a third of their rate. The rule set in advance for a paid run was not met.
+
 ## License
 
 MIT, see `LICENSE`. The served models are third-party: `Qwen/Qwen2.5-7B-Instruct-AWQ` (Apache-2.0) in phases 2

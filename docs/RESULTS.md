@@ -1632,8 +1632,9 @@ Files: `docs/reports/stage-n/stage_n_table.csv`, table script `scripts/stage_n_t
 
 ## Q19. What happens under true slot-hour billing, with the rates as ceilings on output and on input?
 
-**Status: the plan and the hypotheses for the runs were written on 2026-11-19, before any stage O run. The
-offline part (part A) is done and needs no GPU. The local runs (part B) go under the hypotheses.**
+**Status: run 2026-11-20. The plan and the hypotheses for the runs were written on 2026-11-19, before any
+stage O run. Part A is offline and needs no GPU. Part B is twelve local runs; its results follow its
+hypotheses.**
 
 Why ask. The design measured so far is a hybrid (owner and a second reviewer, 2026-11-19). It sells a rate as a
 floor, bills runtime seconds plus a per-token prompt charge, and leaves input unbounded. The model a VM uses is
@@ -1666,7 +1667,7 @@ Deviations from the reviewer's plan, and why.
 
 ### Part A. Offline: slot-hour prices and the stage K and M runs re-priced (done, no GPU time)
 
-**Under slot-hour billing the tenants of the stage K and M runs would need 1.4 to 1.7 times the seats the
+**Under slot-hour billing the tenants of the stage K and M runs would need 1.3 to 1.5 times the seats the
 cluster has, so the model only works oversold. Cache routing still cuts revenue, by 13% instead of 17–19%,
 because tenants need 13% fewer slots. The bill is flat only for a tenant that never resizes. The price a
 tenant pays against per-token runs from 0.7 times (long prompts) to 1.6 times (the fast tier).**
@@ -1760,6 +1761,98 @@ matters, and a paid run would only confirm it.
 Limits, stated in advance. As Q18: one GPU, a 3B model, four tenants, ratios not absolute numbers. Slot counts
 for `o-over` come from one base run. The bucket's input ratio (10) is one value, chosen before the runs.
 
+### Part B results (run 2026-11-20, local 2080 Ti)
+
+Twelve runs, 4,129 requests, no request errors. 42 requests were refused: 5 because the tenant's slots were
+busy past the queue limit, 37 by the input bucket.
+
+**The slot-ceiling model ran, and it did not beat today's design on waits. With seats sold once the chat
+tenants waited longer on one seed, shorter on one and the same on one. The input ceiling did protect the other
+tenants, by refusing 7–48% of the 15 tps document tenant's requests. Overselling brought waits back to about
+the base arm's and cut the slowest streams to a third of their tier's rate. Three lines held, four failed, and
+the rule for a paid run was not met.**
+
+Wait from arrival to first token, seconds, per seed (1 / 2 / 3). `n-fifo` is today's design; `n-fair` is stage
+N's fair share (Q18), for comparison.
+
+| | `n-fifo` | `o-slots` | `o-bucket` | `o-prio` | `o-over` | `n-fair` |
+|---|---|---|---|---|---|---|
+| All, mean | 2.43 / 4.47 / 2.08 | 4.27 / 4.49 / 2.07 | 3.71 / 3.04 / 2.37 | 3.56 / 3.02 / 2.41 | 2.62 / 3.19 / 1.95 | 2.17 / 2.80 / 1.66 |
+| Chat, mean | 2.05 / 3.75 / 1.62 | 4.13 / 3.91 / 1.56 | 3.46 / 2.52 / 1.49 | 3.30 / 2.51 / 1.53 | 2.27 / 2.57 / 1.44 | 1.66 / 1.92 / 1.12 |
+| Chat, p95 | 8.1 / 16.5 / 8.2 | 17.1 / 17.7 / 6.4 | 12.9 / 13.6 / 7.8 | 12.7 / 13.8 / 8.2 | 11.2 / 13.9 / 7.1 | 5.9 / 8.1 / 4.9 |
+| Documents, mean | 5.78 / 9.42 / 5.41 | 5.49 / 8.33 / 5.65 | 5.93 / 7.66 / 9.59 | 5.87 / 7.67 / 9.63 | 5.64 / 7.72 / 5.57 | 6.69 / 9.18 / 5.63 |
+| Refused | 0 / 0 / 0 | 0 / 5 / 0 | 1 / 11 / 5 | 1 / 11 / 5 | 0 / 3 / 0 | 0 / 2 / 0 |
+| Output against `n-fifo` | | −4% / −5% / −2% | −2% / −4% / −4% | −2% / −4% / −4% | −2% / −1% / −2% | within 0.4% of `n-cap` |
+
+Delivered output rate as a share of the tier's rate, per seed:
+
+| | `n-fifo` | `o-slots` | `o-bucket` | `o-prio` | `o-over` |
+|---|---|---|---|---|---|
+| Chat, median | 2.19 / 2.19 / 3.40 | 1.14 / 1.14 / 1.16 | 1.13 / 1.15 / 1.16 | 1.12 / 1.14 / 1.16 | 1.09 / 1.11 / 1.14 |
+| Chat, slowest 5% | 0.61 / 0.56 / 0.73 | 0.76 / 0.56 / 0.97 | 0.74 / 0.69 / 0.85 | 0.74 / 0.64 / 0.82 | 0.42 / 0.34 / 0.65 |
+| `docs-pro`, median | 1.17 / 0.95 / 1.28 | 0.97 / 0.77 / 1.15 | 1.07 / 1.07 / 1.15 | 1.06 / 1.08 / 1.15 | 0.79 / 0.55 / 1.15 |
+
+A stream at the ceiling reads about 1.1, not 1.0: the pacer gives each stream one second of tokens as starting
+credit, and the streams here are short.
+
+The lines.
+
+| # | Line | Result |
+|---|---|---|
+| O1 | chat wait p95 in `o-bucket` not more than 10% above `n-fifo` | **failed on seed 1**, as expected: +59%, −18%, −5% |
+| O2 | chat time from admission to first token lower in `o-bucket` than `o-slots` | **held**: 0.63 against 0.76 s, 0.66 against 0.89, 0.70 against 0.87 |
+| O3 | every tenant's median delivered rate at least 90% of its tier, in each arm | **failed**: `docs-pro` reached 0.77 in `o-slots` seed 2 and 0.79 and 0.55 in `o-over`. It held in `o-bucket` and `o-prio` |
+| O4 | document tenants wait longer in `o-bucket` than `o-slots`, and `docs-std` waits longer for its bucket than `docs-pro` | **failed on seed 2** for the first half (+8%, −8%, +70%; refused requests are not in the mean). The second half held: `docs-pro` never waited for its bucket, `docs-std` did 17 times, 11 to 21 s on average |
+| O5 | output more than 10% below `n-fifo` | **failed**: 1–5% below. The load was below the card's capacity, so this does not measure capacity |
+| O6 | tier priority lowers the 30 tps tenants' time to first token and raises the 15 tps tenants' | **held**: 30 tps 1.12 → 1.02, 1.18 → 1.05, 1.17 → 1.06 s; 15 tps 0.83 → 1.02, 0.76 → 0.82, 0.95 → 1.09 s |
+| O7 | overselling lowers chat wait p95 against `o-prio` and lowers the 30 tps tenants' median rate | **failed on seed 2** for the wait (11.2 against 12.7, 13.9 against 13.8, 7.1 against 8.2 s). The rate half held, by 1–3 points at the median and by half at the slowest 5% |
+
+How to read it.
+
+- **Seats sold once move the wait from the shared queue to each tenant's own slots.** `chat-std` has 2 slots and
+  its mean wait went from 1.68 to 4.65 s on seed 1. `docs-pro` has 2 slots, more than it needs, and its mean
+  wait on the heavy seed fell from 10.0 to 5.8 s. Each tenant gets the wait its own sizing earns, which is the
+  isolation a slot promises. It is not a shorter wait on average.
+- **The input ceiling works as a ceiling, and the tenant under it is refused.** `docs-std` sends about 13,500
+  prompt tokens a minute and one 15 tps slot allows 9,000. The bucket refused 1 of 15, 11 of 23 and 5 of 16 of
+  its documents, and its mean wait rose to 7–17 s. The chat tenants' time to first token fell 17–26% and the
+  mean wait over all requests fell on two seeds. So the user's point of 2026-11-19 holds: limiting input does
+  improve service for the others. The cost is carried by one tenant, who has to buy more slots or send less.
+- **The tier comparison is mixed with the slot count.** `docs-pro` holds 2 slots at 300 tokens a second each and
+  never touched its limit; `docs-std` holds 1 at 150. The runs show that a tenant sized under its traffic is
+  throttled, not that the 30 tps tier reads faster.
+- **Tier priority did what it says and little else.** The faster tier's first token came 9–11% sooner, the
+  slower tier's 7–22% later. Waits, refusals and output did not move.
+- **Overselling gives the wait back and takes the speed.** `o-over` has the waits closest to today's design
+  (mean +8%, −29%, −6%) and almost no refusals (3 of 1,037). The slowest 5% of chat streams ran at 34–65% of
+  their rate, against 64–82% with seats sold once. Under a ceiling contract that is allowed; it is the slow
+  stream a tenant on a fast tier is paying to avoid.
+- **The bill is flat in every stage O arm, by construction.** Nothing in these runs tests that; part A does.
+- **Fair share beat every stage O arm for chat.** `n-fair` has the lowest chat mean and p95 on every seed, with
+  two refusals and no slots to size. The ordering rule did more for the wait than the billing model did.
+
+The two questions the reviewer asked.
+
+- **Who would buy this?** A tenant with long prompts and steady, known traffic that sizes its slots above its
+  load: `docs-pro` here, which got shorter and steadier waits than under today's design and (part A) a lower
+  bill than per token. A tenant sized under its load is refused instead of slowed. A tenant with bursty short
+  turns gets a longer wait with seats sold once, or a stream at a third of its rate on an oversold card.
+- **Does the provider keep its efficiency gains?** These runs do not add to part A's answer: only if tenants do
+  not resize. On one GPU there is no cache routing to gain from.
+
+Against the rule for a paid run, set before the runs: O2 held, refusals in `o-over` were 0.3% over the three
+seeds, and O3 failed. So the rule is not met, and the reason is the one written in advance: the tenants' slots
+do not fit the card, and what the model does about that is refuse (seats sold once) or slow (oversold). A paid
+stage on the 4090s would price that trade with real prices and cache routing; it would not remove it. Not
+recommended on these numbers.
+
+Limits. As stated in advance: one GPU, a 3B model, four tenants, eight minutes a run, one input ratio. Later
+chat turns are sent after the earlier one ends, so arms with longer waits sent 1–5% fewer requests. Slot counts
+were set by me from one base run, not chosen by tenants reacting to price.
+
+Files: `docs/reports/stage-o/stage_o_table.csv`, table script `scripts/stage_o_table.py`, run script
+`scripts/stage_o_local.sh`. Cost: none (local GPU, about 100 minutes).
+
 ## What was not measured, and what to do next
 
 Measured since the phase-2 list: reservation spill (`resv-spill`, `resv-p95-spill`, Q8), the `abort` revocation
@@ -1795,6 +1888,7 @@ and four of the shipping reservation (Q8). Not measured, in order of value:
 - One GPU model, one model size, one price basket: a 4090 at $0.893 per GPU-hour and a 7B AWQ model at the 7B
   basket; the fp16 model, a 120 tps shape and an A100 cross-check (PHASE2.md §3) were skipped for budget. The
   report recomputes the margins for any `gpu_usd_per_hour` and price reference.
+- Fair share of prompt reading (Q18) and the slot-ceiling model (Q19) on the 4090s. Both were run on one local GPU with a 3B model and four tenants; fair share with cache routing across replicas, and slot counts chosen by tenants reacting to a price, are unmeasured.
 - A full day of traffic and more than three replicas. Q17 extrapolates margin against idle time from 18-minute busy periods; the share of the day that is busy, scaling GPUs down in quiet hours and queue-side affinity at a scale where its pass window binds (Q16) are all unmeasured.
 - fp8 KV with a model that carries calibrated KV scales (Q15: 1.98× KV and a 60 tps seat ceiling of 41 against 22, if the text can be made correct), affinity with a cap on prompt-token share and a price that keeps part of the saving (Q14), phase-length reservations, and the gateway fix for requests abandoned in the
   queue (served and billed to a closed socket in one saturation run; built and tested, not run on hardware).
