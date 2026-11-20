@@ -1480,8 +1480,9 @@ OpenRouter make 25% is the owner's assumption; only their prices are used.
 
 ## Q18. Does a fair share of prompt reading, weighted by the tier a tenant pays for, shorten the wait?
 
-**Status: the plan and hypotheses below were written on 2026-11-19, before any stage N run. Results go under
-them. The runs are on the local RTX 2080 Ti (free), as a scaled test of the mechanism, not of real traffic.**
+**Status: run 2026-11-19 and 20. The plan and hypotheses below were written before any stage N run; the
+results follow them. The runs are on the local RTX 2080 Ti (free), as a scaled test of the mechanism, not of
+real traffic.**
 
 Why ask. Every stage so far found the same limit: reading prompts, not writing tokens, is what the engine runs
 out of, and one tenant's long prompt slows everyone (Q5, Q10, Q12). The slot bill charges output by time and
@@ -1556,6 +1557,78 @@ Limits, stated in advance. One GPU, so nothing about routing or cache affinity. 
 absolute speeds do not transfer; the ratios between arms are the result. Four tenants. Fair share is tested as
 a service rule; no bill is changed, so this stage shows whether an input tier could be delivered, not what it
 would earn.
+
+### Results (run 2026-11-19 and 20, local 2080 Ti)
+
+Nine runs, 3,169 requests, no request errors. Two requests were refused, both long documents in `n-fair` seed 2
+that waited past the 30 s queue limit.
+
+**Fair share cut the average wait by 17–35% and the chat tenants' wait by 27–46%, at almost no cost to the
+document tenants and none to output. The cap by itself did nothing for the wait on this card. The tier a tenant
+pays for moved its share in the right direction but by less than the line asked. Three lines held, three
+failed.**
+
+Mean wait from arrival to first token, seconds, per seed (1 / 2 / 3):
+
+| | `n-fifo` | `n-cap` | `n-fair` | fair against cap | fair against fifo |
+|---|---|---|---|---|---|
+| All requests | 2.43 / 4.47 / 2.08 | 2.70 / 4.29 / 2.00 | 2.17 / 2.80 / 1.66 | −20% / −35% / −17% | −11% / −37% / −20% |
+| Chat tenants | 2.05 / 3.75 / 1.62 | 2.30 / 3.57 / 1.53 | 1.66 / 1.92 / 1.12 | −28% / −46% / −27% | −19% / −49% / −31% |
+| Document tenants | 5.78 / 9.42 / 5.41 | 6.31 / 9.26 / 5.44 | 6.69 / 9.18 / 5.63 | +6% / −1% / +4% | +16% / −3% / +4% |
+
+The same at p95:
+
+| | `n-fifo` | `n-cap` | `n-fair` | fair against cap |
+|---|---|---|---|---|
+| All requests | 8.8 / 19.9 / 8.9 | 10.3 / 20.0 / 8.8 | 6.8 / 11.0 / 7.3 | −34% / −45% / −17% |
+| Chat tenants | 8.1 / 16.5 / 8.2 | 9.3 / 15.8 / 7.3 | 5.9 / 8.1 / 4.9 | −37% / −49% / −32% |
+| Document tenants | 11.6 / 24.9 / 10.6 | 13.6 / 24.4 / 11.1 | 15.5 / 27.7 / 12.1 | +14% / +13% / +9% |
+
+The lines.
+
+| # | Line | Result |
+|---|---|---|
+| N1 | chat tenants' mean wait at least 25% lower than `n-cap` | **held**: −28%, −46%, −27% |
+| N2 | mean wait over all requests lower than `n-cap` | **held**, and my doubt was wrong: −20%, −35%, −17% |
+| N3 | `docs-pro` queues at most 0.75 of `docs-std` under fair share, 0.75–1.33 under the cap | **failed on size**: the pooled ratio went from 1.15 under the cap to 0.83 under fair share |
+| N4 | the document tenants' mean wait is higher | **failed on seed 2**: +6%, −1%, +4%. They paid less than I expected |
+| N5 | output and completed requests within 5% of `n-cap` | **held**: output within 0.4%, completed within 1 request, 2 refusals |
+| N6 | the cap lowers the share of slow chat streams, and fair share stays within 3 points | **failed**: slow chat streams were 15% / 15% / 9% with no cap, 15% / 17% / 8% with it and 16% / 18% / 12% with fair share |
+
+How to read it.
+
+- **The gain is from order, not from the cap.** `n-cap` against `n-fifo` moved the mean wait by +11%, −4% and
+  −4%. The cap shortened the engine's time to first token for chat from 0.9–1.2 s to 0.3 s and lengthened the
+  queue by as much. Putting the wait in the gateway only pays once the gateway orders it.
+- **Short prompts first is why the average falls.** A chat turn reads a few hundred new tokens and a document
+  reads thousands. Fair share lets the chat turns through ahead of a tenant's backlog of documents,
+  so many requests wait a little less and a few wait a little more. Documents are 12% of requests here; the
+  larger their share, the smaller this gain.
+- **The heavy tenants lost little.** Mean document wait +3% on average, p95 +9–14%. `docs-std` lost most (+6%
+  to +14% in the mean, p95 up to 18 s from 12 s on seed 1) and `docs-pro` on seed 2 gained (−13%).
+- **Paying more bought reading, less than proportionally.** Under the cap the two document tenants queued about
+  equally (ratio 1.15, the 30 tps tenant slightly worse). Under fair share the 30 tps tenant queued 0.83 of the
+  15 tps tenant's time, and for chat 0.91. Two reasons it is not 0.5: `docs-pro` drew 68 documents against 54,
+  so it used more of its larger share, and with only four tenants and a short queue the order rarely had more
+  than a few requests to choose between. The per-seed ratios (0.70, 0.86, 1.23) show how noisy 12–25 documents
+  per tenant per run are.
+- **Delivered speed did not improve.** N6 asked whether streams run closer to their rate. They do not: the
+  share of chat streams under 95% of their rate was 8–18% in every arm, and slightly higher under fair share
+  on seed 3. Fair share fixes who waits to start, not how fast a stream runs once started.
+- **The 30 s queue limit binds for long prompts.** Two documents were refused under fair share on the heavy
+  seed. A rule that makes heavy tenants wait needs a longer limit for them, or it turns waits into refusals.
+
+Against the rule for a paid run, set before the runs: N1, N2 and N5 held and N3 moved the right way without
+reaching its mark. So fair share is promising enough to carry to the 4090s, as an arm of whatever stage runs
+next, not as a stage by itself. What the 4090s would add is the 7B mix, three replicas and cache routing; what
+they cannot change is that this is a result about ordering.
+
+Limits. As stated in advance: one GPU, a 3B model, four tenants, eight minutes a run. The ratios are the
+result, not the seconds. Seed 2 is the heavy seed and carries the largest gains; the smallest gain (seed 3,
+−17%) is the cautious reading. The mix was sized on the first-in-first-out arm's first run and not changed.
+
+Files: `docs/reports/stage-n/stage_n_table.csv`, table script `scripts/stage_n_table.py`, run script
+`scripts/stage_n_local.sh`. Cost: none (local GPU, about 75 minutes).
 
 ## Q19. What happens under true slot-hour billing, with the rates as ceilings on output and on input?
 
